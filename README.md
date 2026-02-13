@@ -233,13 +233,18 @@ flutter run
 
 ## 📱 截图
 
-![群聊](./img/1.jpg)
-![个人](./img/2.jpg)
-![角色设置](./img/3.jpg)
-![接口设置](./img/4.jpg)
-![角色设置](./img/5.jpg)
-![聊天信息](./img/6.jpg)
-![群聊设置](./img/7.jpg)
+<p align="center">
+  <img src="./img/1.jpg" width="30%" alt="群聊">
+  <img src="./img/2.jpg" width="30%" alt="个人">
+  <img src="./img/3.jpg" width="30%" alt="角色设置">
+</p>
+
+<p align="center">
+  <img src="./img/4.jpg" width="22%" alt="接口设置">
+  <img src="./img/5.jpg" width="22%" alt="角色设置2">
+  <img src="./img/6.jpg" width="22%" alt="聊天信息">
+  <img src="./img/7.jpg" width="22%" alt="群聊设置">
+</p>
 
 ---
 
@@ -250,3 +255,4 @@ flutter run
 ## 📄 许可证
 
 MIT License
+
