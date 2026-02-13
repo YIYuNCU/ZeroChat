@@ -8,9 +8,11 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
+##已知BUG：
+- 无法后台运行
 
 ## 📋 功能概览
-
+    部分内容参考了https://github.com/KouriChat/KouriChat
 ### 💬 AI 聊天
 - **多角色对话** — 创建多个 AI 角色，每个角色拥有独立人设、记忆和系统提示词
 - **分段发送** — AI 回复自动分段，模拟真人打字节奏
@@ -255,4 +257,5 @@ flutter run
 ## 📄 许可证
 
 MIT License
+
 
