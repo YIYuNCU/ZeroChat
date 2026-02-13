@@ -90,9 +90,15 @@ class RoleService {
     _roles.removeWhere((r) => r.id == role.id);
     _roles.add(role);
     await _saveRoles();
-    // 自动同步到后端
-    await syncRoleToBackend(role);
-    debugPrint('Added role: ${role.name} (synced to backend)');
+    // 自动同步到后端（失败不影响本地）
+    try {
+      await syncRoleToBackend(role);
+      debugPrint('Added role: ${role.name} (synced to backend)');
+    } catch (e) {
+      debugPrint(
+        'Added role: ${role.name} (backend sync failed: $e, local only)',
+      );
+    }
   }
 
   /// 更新角色
@@ -101,9 +107,12 @@ class RoleService {
     if (index != -1) {
       _roles[index] = role;
       await _saveRoles();
-      // 自动同步到后端（完整同步，包括 core_memory）
-      await syncRoleToBackend(role);
-      debugPrint('Updated role: ${role.name} (synced to backend)');
+      // 自动同步到后端（失败不影响本地）
+      try {
+        await syncRoleToBackend(role);
+      } catch (e) {
+        debugPrint('RoleService: updateRole backend sync failed: $e');
+      }
     }
   }
 
@@ -121,9 +130,15 @@ class RoleService {
     // 同时清除该角色的短期记忆
     MemoryService.clearShortTermMemory(roleId);
     await _saveRoles();
-    // 自动从后端删除
-    await _httpDelete('$_backendUrl/api/roles/$roleId');
-    debugPrint('Deleted role: $roleId (synced to backend)');
+    // 自动从后端删除（失败不影响本地已删除状态）
+    try {
+      await _httpDelete('$_backendUrl/api/roles/$roleId');
+      debugPrint('Deleted role: $roleId (synced to backend)');
+    } catch (e) {
+      debugPrint(
+        'Deleted role: $roleId (backend delete failed: $e, local only)',
+      );
+    }
   }
 
   /// 创建新角色
@@ -195,17 +210,14 @@ class RoleService {
             );
             if (existingIndex != -1) {
               final existing = _roles[existingIndex];
-              // 合并：用后端的基础信息，保留本地的高级配置
-              _roles[existingIndex] = backendRole.copyWith(
-                attachedJsonContent: existing.attachedJsonContent,
-                allowWebSearch: existing.allowWebSearch,
-                proactiveConfig: existing.proactiveConfig,
-                stickerConfig: existing.stickerConfig,
-                summaryEveryNRounds: existing.summaryEveryNRounds,
-                topP: existing.topP,
-                frequencyPenalty: existing.frequencyPenalty,
-                presencePenalty: existing.presencePenalty,
-                maxContextRounds: existing.maxContextRounds,
+              // 合并：用后端的基础信息（名称、描述、头像、系统提示词、核心记忆），
+              // 保留本地的所有AI参数和高级配置
+              _roles[existingIndex] = existing.copyWith(
+                name: backendRole.name,
+                description: backendRole.description,
+                systemPrompt: backendRole.systemPrompt,
+                avatarUrl: backendRole.avatarUrl,
+                coreMemory: backendRole.coreMemory,
               );
             } else {
               _roles.add(backendRole);
