@@ -8,7 +8,7 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
-##已知BUG：
+## 已知BUG：
 - 无法后台运行
 
 ## 📋 功能概览
@@ -257,5 +257,6 @@ flutter run
 ## 📄 许可证
 
 MIT License
+
 
 
