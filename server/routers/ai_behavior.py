@@ -108,7 +108,6 @@ async def handle_ai_event(event: AIEvent):
     role = load_role(event.role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
-    
     # 根据事件类型分发
     if event.event_type == AIEventType.CHAT:
         return await handle_chat(role, event)
@@ -135,7 +134,6 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     
     role_id = event.role_id
     user_message = event.content or ""
-    
     # 获取上下文
     history = get_context_messages(role_id)
     memory_context = get_memory_context_string(role_id)
@@ -162,7 +160,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         extra_parts.append(f"[外挂记录]\n{attached_json}")
     
     extra_context = "\n\n".join(extra_parts) if extra_parts else None
-    
+
     # 生成回复
     result = await generate_with_role(
         role_data=role,
@@ -170,14 +168,14 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         history=history,
         extra_context=extra_context
     )
-    
+
     if not result["success"]:
         return AIResponse(success=False, action="ignore", error=result["error"])
     
     ai_reply = result["content"]
     
     # 更新记忆
-    append_short_term(role_id, "user", user_message)
+    append_short_term(role_id, "user", result.get("user_content", {"content": user_message}).get("content", user_message))
     append_short_term(role_id, "assistant", ai_reply)
     
     # 触发记忆总结（静默执行，不影响回复）

@@ -36,6 +36,9 @@ async def call_ai(
     """
     config = load_config()
     api_url = config.get("ai_api_url", "")
+    if "deepseek" in api_url:
+        if not api_url.endswith("chat/completions/"):
+            api_url = 'https://api.deepseek.com/chat/completions/'
     api_key = config.get("ai_api_key", "")
     default_model = config.get("ai_model", "gpt-3.5-turbo")
     
@@ -59,9 +62,10 @@ async def call_ai(
             )
             response.raise_for_status()
             data = response.json()
-            
             content = data["choices"][0]["message"]["content"]
-            return {"success": True, "content": content, "error": None}
+            if "usage" in data:
+                print(f"hit chache:{data['usage']['prompt_cache_hit_tokens']},miss cache:{data['usage']['prompt_cache_miss_tokens']},total tokens:{data['usage']['total_tokens']}")
+            return {"success": True, "content": content,"user_content": messages[-1], "error": None}
             
     except httpx.HTTPError as e:
         return {"success": False, "content": None, "error": f"HTTP Error: {str(e)}"}
@@ -103,21 +107,18 @@ async def generate_with_role(
         weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         now = datetime.now()
         weekday = weekdays[now.weekday()]
-        system_content += f"\n\n[当前时间信息]\n当前日期：{now.strftime('%Y年%m月%d日')} {weekday}\n当前时间：{now.strftime('%H:%M')}"
         
         messages.append({"role": "system", "content": system_content})
-    
     # 历史消息
     if history:
-        for msg in history[-20:]:  # 最近 20 条
+        for msg in history:  # 最近 20 条
             messages.append({
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
             })
     
     # 当前消息
-    messages.append({"role": "user", "content": user_message})
-    
+    messages.append({"role": "user", "content": user_message + f"\n\n（当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')} {weekday}）"})
     return await call_ai(messages)
 
 async def generate_proactive_message(

@@ -67,10 +67,19 @@ def get_context_messages(role_id: str, limit: int = 20) -> List[Dict]:
     """
     memory = load_memory(role_id)
     short_term = memory.get("short_term", [])
-    
+
+    if limit <= 0:
+        return []
+
+    total = len(short_term)
+    if total == 0:
+        return []
+
+    block_start = ((total - 1) // limit) * limit
+    block_end = min(block_start + limit, total)
     return [
         {"role": m["role"], "content": m["content"]}
-        for m in short_term[-limit:]
+        for m in short_term[block_start:block_end]
     ]
 
 def get_core_memory(role_id: str) -> str:

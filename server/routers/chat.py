@@ -91,7 +91,6 @@ async def chat(request: ChatRequest):
     
     # 添加当前消息
     messages.append({"role": "user", "content": request.message})
-    
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
