@@ -5,7 +5,7 @@ AI 服务
 import json
 import httpx
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
 
@@ -16,9 +16,91 @@ def load_config() -> Dict:
             return json.load(f)
     return {}
 
+def _normalize_api_url(api_url: str) -> str:
+    if not api_url.endswith("/v1/chat/completions"):
+        api_url = api_url.rstrip("/") + "/v1/chat/completions"
+    return api_url
+
+def _resolve_ai_config(
+    model: Optional[str],
+    api_url: Optional[str],
+    api_key: Optional[str],
+    temperature: Optional[float] = None
+) -> Tuple[Optional[str], Optional[str], Optional[str],Optional[float]]:
+    config = load_config()
+    default_model = config.get("ai_model", "gpt-3.5-turbo")
+    default_url = config.get("ai_api_url", "")
+    default_key = config.get("ai_api_key", "")
+    default_temperature = config.get("ai_temperature", 0.7)
+    resolved_model = model or default_model
+    resolved_url = _normalize_api_url(api_url or default_url)
+    resolved_key = api_key or default_key
+    resolved_temperature = temperature if temperature is not None else default_temperature
+
+    return resolved_model, resolved_url, resolved_key, resolved_temperature
+
+def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[float]]:
+    if not role_data:
+        return _resolve_ai_config(None, None, None, None)
+
+    model = role_data.get("ai_model")
+    api_url = role_data.get("ai_api_url")
+    api_key = role_data.get("ai_api_key")
+    temperature = role_data.get("ai_temperature")
+    metadata = role_data.get("metadata")
+    if isinstance(metadata, dict):
+        model = model or metadata.get("ai_model")
+        api_url = api_url or metadata.get("ai_api_url")
+        api_key = api_key or metadata.get("ai_api_key")
+        temperature = temperature if temperature is not None else metadata.get("ai_temperature")
+
+    return _resolve_ai_config(model, api_url, api_key, temperature)
+
+async def _post_chat(
+    messages: List[Dict[str, str]],
+    api_url: str,
+    api_key: str,
+    model: str,
+    temperature: float,
+    max_tokens: int
+) -> Dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                api_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            if "usage" in data:
+                print(
+                    "hit chache:{},miss cache:{},total tokens:{}".format(
+                        data["usage"].get("prompt_cache_hit_tokens"),
+                        data["usage"].get("prompt_cache_miss_tokens"),
+                        data["usage"].get("total_tokens")
+                    )
+                )
+            return {"success": True, "content": content, "user_content": messages[-1], "error": None}
+    except httpx.HTTPError as e:
+        return {"success": False, "content": None, "error": f"HTTP Error: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "content": None, "error": str(e)}
+
 async def call_ai(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
+    api_url: Optional[str] = None,
+    api_key: Optional[str] = None,
     temperature: float = 0.7,
     max_tokens: int = 1000
 ) -> Dict[str, Any]:
@@ -35,42 +117,49 @@ async def call_ai(
         {"success": bool, "content": str, "error": str}
     """
     config = load_config()
-    api_url = config.get("ai_api_url", "")
-    if "deepseek" in api_url:
-        if not api_url.endswith("chat/completions/"):
-            api_url = 'https://api.deepseek.com/chat/completions/'
-    api_key = config.get("ai_api_key", "")
     default_model = config.get("ai_model", "gpt-3.5-turbo")
+    default_temperature = config.get("ai_temperature", 0.7)
+    resolved_model, resolved_url, resolved_key, resolved_temperature = _resolve_ai_config(
+        model or default_model,
+        api_url,
+        api_key,
+        temperature or default_temperature
+    )
     
-    if not api_url or not api_key:
+    if not resolved_url or not resolved_key:
         return {"success": False, "content": None, "error": "AI API 未配置"}
-    
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                api_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": model or default_model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            if "usage" in data:
-                print(f"hit chache:{data['usage']['prompt_cache_hit_tokens']},miss cache:{data['usage']['prompt_cache_miss_tokens']},total tokens:{data['usage']['total_tokens']}")
-            return {"success": True, "content": content,"user_content": messages[-1], "error": None}
-            
-    except httpx.HTTPError as e:
-        return {"success": False, "content": None, "error": f"HTTP Error: {str(e)}"}
-    except Exception as e:
-        return {"success": False, "content": None, "error": str(e)}
+
+    return await _post_chat(
+        messages=messages,
+        api_url=resolved_url,
+        api_key=resolved_key,
+        model=resolved_model,
+        temperature=resolved_temperature,
+        max_tokens=max_tokens
+    )
+
+async def call_ai_direct(
+    messages: List[Dict[str, str]],
+    api_url: str,
+    api_key: str,
+    model: str,
+    temperature: float = 0.7,
+    max_tokens: int = 1000
+) -> Dict[str, Any]:
+    """
+    独立调用 AI（不依赖全局配置）
+    """
+    if not api_url or not api_key or not model:
+        return {"success": False, "content": None, "error": "AI API 未配置"}
+    api_url = _normalize_api_url(api_url)
+    return await _post_chat(
+        messages=messages,
+        api_url=api_url,
+        api_key=api_key,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens
+    )
 
 async def generate_with_role(
     role_data: Dict,
@@ -101,7 +190,7 @@ async def generate_with_role(
             system_content += system_prompt
         if extra_context:
             system_content += f"\n\n额外上下文：{extra_context}"
-        
+        system_content += "用户消息格式为：message: <消息内容>\ntime: <消息时间> <星期几>，请严格按照这个格式理解用户消息，并在回复中体现对时间的理解和关联。"
         # 注入当前日期时间
         from datetime import datetime
         weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -111,43 +200,23 @@ async def generate_with_role(
         messages.append({"role": "system", "content": system_content})
     # 历史消息
     if history:
-        for msg in history:  # 最近 20 条
+        for msg in history:
             messages.append({
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
             })
-    
+    user_message = f"message: {user_message}\ntime: {now.strftime('%Y-%m-%d %H:%M:%S')} {weekday}"
     # 当前消息
-    messages.append({"role": "user", "content": user_message + f"\n\n（当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')} {weekday}）"})
-    return await call_ai(messages)
+    messages.append({"role": "user", "content": user_message})
 
-async def generate_proactive_message(
-    role_data: Dict,
-    trigger_prompt: str,
-    memory_context: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    生成主动消息（无需用户输入）
-    """
-    messages = []
-    
-    persona = role_data.get("persona", "")
-    system_prompt = role_data.get("system_prompt", "")
-    
-    system_content = ""
-    if persona:
-        system_content += f"你的人设：{persona}\n\n"
-    if system_prompt:
-        system_content += system_prompt
-    if memory_context:
-        system_content += f"\n\n你对用户的记忆：{memory_context}"
-    
-    system_content += "\n\n你现在想主动给用户发一条消息，要求自然、符合人设，不要提及'主动''系统'等词。"
-    
-    messages.append({"role": "system", "content": system_content})
-    messages.append({"role": "user", "content": trigger_prompt or "请发起一个自然的话题"})
-    
-    return await call_ai(messages, temperature=0.8)
+    model_override, url_override, key_override, temp_override = _get_role_ai_config(role_data)
+    return await call_ai(
+        messages,
+        model=model_override,
+        api_url=url_override,
+        api_key=key_override,
+        temperature=temp_override or 1.2
+    )
 
 async def generate_moment_post(
     role_data: Dict,
@@ -171,7 +240,14 @@ async def generate_moment_post(
 直接输出朋友圈内容，不要任何解释。"""
 
     messages = [{"role": "user", "content": prompt}]
-    return await call_ai(messages, temperature=0.9)
+    model_override, url_override, key_override, temp_override = _get_role_ai_config(role_data)
+    return await call_ai(
+        messages,
+        model=model_override,
+        api_url=url_override,
+        api_key=key_override,
+        temperature=temp_override or 0.9
+    )
 
 async def generate_moment_comment(
     role_data: Dict,
@@ -198,4 +274,11 @@ async def generate_moment_comment(
 直接输出评论内容。"""
 
     messages = [{"role": "user", "content": prompt}]
-    return await call_ai(messages, temperature=0.8)
+    model_override, url_override, key_override, temp_override = _get_role_ai_config(role_data)
+    return await call_ai(
+        messages,
+        model=model_override,
+        api_url=url_override,
+        api_key=key_override,
+        temperature=temp_override or 0.8
+    )

@@ -89,7 +89,6 @@ def get_role_dir(role_id: str) -> Path:
     emotions = ["happy", "sad", "angry", "surprised", "love", "confused", "tired"]
     for emotion in emotions:
         (role_dir / "emojis" / emotion).mkdir(exist_ok=True)
-    
     # 创建初始 JSON 文件（如不存在）
     if not (role_dir / "memory.json").exists():
         with open(role_dir / "memory.json", "w", encoding="utf-8") as f:
@@ -174,10 +173,19 @@ async def create_role(role: RoleCreate):
             "next_trigger_time": None
         },
         "tags": role.tags or [],
+        "gender": "men",  # 默认男性，可自行修改
+        "menstruation_cycle": {
+            "cycle_length": 30,
+            "period_length": 6,
+            "last_period_start": "2026-01-24"
+        },
         "metadata": role.metadata or {},
         "created_at": datetime.now().isoformat()
     }
     save_role(role.id, data)
+    # Ensure an empty memory database exists for the new role.
+    from services.memory_service import load_memory
+    load_memory(role.id)
     print(f"[ROLES] Role created: {role.id}")
     return data
 
@@ -205,48 +213,60 @@ async def delete_role(role_id: str):
 
 # ========== 记忆管理 ==========
 
-def load_memory(role_id: str) -> Dict:
-    memory_file = get_role_dir(role_id) / "memory.json"
-    if memory_file.exists():
-        with open(memory_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"core_memory": "", "short_term": []}
-
-def save_memory(role_id: str, memory: Dict):
-    memory_file = get_role_dir(role_id) / "memory.json"
-    with open(memory_file, "w", encoding="utf-8") as f:
-        json.dump(memory, f, indent=2, ensure_ascii=False)
+def _normalize_short_term(items: List[Any]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            content = str(item.get("content", ""))
+            role = item.get("role") or "assistant"
+            timestamp = item.get("timestamp") or datetime.now().isoformat()
+        else:
+            content = str(item)
+            role = "assistant"
+            timestamp = datetime.now().isoformat()
+        normalized.append({"role": role, "content": content, "timestamp": timestamp})
+    return normalized
 
 @router.get("/roles/{role_id}/memory")
 async def get_memory(role_id: str):
     """获取角色记忆"""
-    return load_memory(role_id)
+    from services.memory_service import load_memory
+
+    memory = load_memory(role_id)
+    return {
+        "core_memory": memory.get("core_memory", ""),
+        "short_term": memory.get("short_term", [])
+    }
 
 @router.put("/roles/{role_id}/memory")
 async def update_memory(role_id: str, update: MemoryUpdate):
     """更新角色记忆"""
+    from services.memory_service import load_memory, save_memory
+
     memory = load_memory(role_id)
     
     if update.core_memory is not None:
         memory["core_memory"] = update.core_memory
     if update.short_term is not None:
-        memory["short_term"] = update.short_term
+        memory["short_term"] = _normalize_short_term(update.short_term)
     
     save_memory(role_id, memory)
-    return memory
+    return {
+        "core_memory": memory.get("core_memory", ""),
+        "short_term": memory.get("short_term", [])
+    }
 
 @router.post("/roles/{role_id}/memory/append")
 async def append_memory(role_id: str, content: str):
     """追加短期记忆"""
+    from services.memory_service import append_short_term, load_memory
+
+    append_short_term(role_id, "assistant", content, window_size=50)
     memory = load_memory(role_id)
-    memory["short_term"].append({
-        "content": content,
-        "timestamp": datetime.now().isoformat()
-    })
-    # 保留最近 50 条
-    memory["short_term"] = memory["short_term"][-50:]
-    save_memory(role_id, memory)
-    return memory
+    return {
+        "core_memory": memory.get("core_memory", ""),
+        "short_term": memory.get("short_term", [])
+    }
 
 # ========== 素材管理 ==========
 
@@ -386,6 +406,7 @@ async def get_emoji(role_id: str, emotion: str, filename: str):
     
     emoji_path = ROLES_DIR / role_id / "emojis" / emotion / filename
     if emoji_path.exists() and emoji_path.is_file():
+        print(f"Serving emoji: {emoji_path}")
         return FileResponse(emoji_path)
     raise HTTPException(status_code=404, detail="Emoji not found")
 
