@@ -1,6 +1,7 @@
 # ZeroChat 🤖💬
 
 > 一款模拟微信界面的 AI 聊天伴侣 Flutter 应用，支持多角色 AI 对话、AI 朋友圈、主动消息、定时任务等丰富功能。
+> 本仓库Fork自[sh1nny0u/ZeroChat](https://github.com/sh1nny0u/ZeroChat),并对记忆，表情等功能做了技术修改
 
 ![Flutter](https://img.shields.io/badge/Flutter-02569B?style=flat&logo=flutter&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white)
@@ -9,8 +10,26 @@
 
 ---
 ## 已知BUG：
-- 无法后台运行
+- 在后端AI生成回复后退出会导致生成中断，返回失败
+- 受前端限制以及个人能力影响，下述bug虽已定位或在后端修改，但无法同步到前端
+  - 表情包功能无法拓展更多类型的表情，且已有表情中surprised类别无法正常发送（前端surprised错误拼写为了suprised）
+  - 主动聊天功能虽已在后端修改，但因前端并未调用定义好的后端接口，更改无法生效（当前生成主动聊天内容时不参考前后文，容易导致内容严重割裂）
+  - 记忆功能前后端并未同步（但仅影响主动聊天部分记忆，被动聊天部分不受影响）
+  - 记忆功能未对群聊场景进行适配
+  - 部分新增功能并未在前端有设置UI，只能手动在后端文件中进行修改
 
+## 当前技术修改：
+- 将记忆存储格式从json改为sqlite
+- 将表情功能触发方式从匹配固定关键词改为调用AI判断，并限制进行判断的概率为25%（需要手动配置data/roles/1000000000001/profile.json中的API_KEY）
+- 将记忆截取方式从固定抛弃最旧消息改为滑动窗口（以适配deepseek的缓存功能，降低开销），并引入以下机制
+  - 核心记忆总结助手（需要手动配置data/roles/1000000000000/profile.json中的API_KEY）：将核心记忆总结拆分出来，允许自选模型，以降低开销（由于前端限制，目前前端仍会自己总结）
+  - 事件总结助手（需要手动配置data/roles/1000000000002/profile.json中的API_KEY）：总结上一个记忆窗口中的内容，避免出现记忆断层（同样允许自选模型）
+  - 衔接事件生成助手（需要手动配置data/roles/1000000000002/profile.json中的API_KEY）：当你在在对话的事件并未完成时突然有其他事要忙，下次对话时会在两次对话中插入合理的过度事件
+- 为女性角色添加“月经事件”以增强真实性（需要手动修改对应角色的profile，将“gender”修改为“women”以开启功能）
+## 未来技术修改方向：
+- [ ]修复记忆功能对群聊的支持                                                            
+- [ ]将记忆窗口从固定长度改为由AI判断，避免在一个事件中切换记忆窗口导致上下文出现割裂感       
+- [ ]支持指定前置模型完成图片识别任务，以适配deepseek等不支持视觉的模型                     
 ## 📋 功能概览
     部分内容参考了https://github.com/KouriChat/KouriChat
 ### 💬 AI 聊天
@@ -188,6 +207,7 @@ chmod +x start.sh && ./start.sh
 | [**ngrok**](https://ngrok.com/) | 全球流行，免费版有限 | `ngrok http 8000` |
 | [**frp**](https://github.com/fatedier/frp) | 自建服务器，完全掌控 | 需自行配置 |
 | [**花生壳**](https://hsk.oray.com/) | 国内免费 DDNS | 需注册 |
+| [**SakuraFrp**](https://www.natfrp.com/) | 操作简单，支持建站，价格相对便宜 | 需注册，有一定成本 |
 
 运行穿透工具后，会得到一个公网地址（如 `https://xxx.cpolar.top`），将其填入应用的"后端地址"即可。
 
@@ -257,6 +277,7 @@ flutter run
 ## 📄 许可证
 
 MIT License
+
 
 
 
