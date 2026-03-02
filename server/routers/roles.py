@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
 
@@ -89,10 +89,6 @@ def get_role_dir(role_id: str) -> Path:
     emotions = ["happy", "sad", "angry", "surprised", "love", "confused", "tired"]
     for emotion in emotions:
         (role_dir / "emojis" / emotion).mkdir(exist_ok=True)
-    # 创建初始 JSON 文件（如不存在）
-    if not (role_dir / "memory.json").exists():
-        with open(role_dir / "memory.json", "w", encoding="utf-8") as f:
-            json.dump({"short_term": [], "core_memory": [], "message_count_since_summary": 0}, f)
     
     if not (role_dir / "chats" / "messages.json").exists():
         with open(role_dir / "chats" / "messages.json", "w", encoding="utf-8") as f:
@@ -117,8 +113,17 @@ def save_role(role_id: str, data: Dict):
     with open(profile_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+def normalize_role_avatar_url(role: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    role_copy = dict(role)
+    role_id = str(role_copy.get("id", "")).strip()
+    if role_id:
+        if not role_copy.get("avatar_url",None):
+            return role_copy
+        role_copy["avatar_url"] = str(request.url_for("get_role_avatar_file", role_id=role_id))
+    return role_copy
+
 @router.get("/roles")
-async def list_roles():
+async def list_roles(request: Request):
     """获取所有角色"""
     roles = []
     if ROLES_DIR.exists():
@@ -126,19 +131,19 @@ async def list_roles():
             if role_dir.is_dir():
                 role = load_role(role_dir.name)
                 if role:
-                    roles.append(role)
+                    roles.append(normalize_role_avatar_url(role, request))
     return {"roles": roles}
 
 @router.get("/roles/{role_id}")
-async def get_role(role_id: str):
+async def get_role(role_id: str, request: Request):
     """获取角色详情"""
     role = load_role(role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
-    return role
+    return normalize_role_avatar_url(role, request)
 
 @router.post("/roles")
-async def create_role(role: RoleCreate):
+async def create_role(role: RoleCreate, request: Request):
     """创建或更新角色（upsert）"""
     existing = load_role(role.id)
     
@@ -150,7 +155,7 @@ async def create_role(role: RoleCreate):
                 existing[key] = value
         save_role(role.id, existing)
         print(f"[ROLES] Role updated: {role.id}, core_memory count: {len(existing.get('core_memory', []))}")
-        return existing
+        return normalize_role_avatar_url(existing, request)
     
     # 创建新角色
     print(f"[ROLES] Creating new role: {role.id}")
@@ -187,10 +192,10 @@ async def create_role(role: RoleCreate):
     from services.memory_service import load_memory
     load_memory(role.id)
     print(f"[ROLES] Role created: {role.id}")
-    return data
+    return normalize_role_avatar_url(data, request)
 
 @router.put("/roles/{role_id}")
-async def update_role(role_id: str, update: RoleUpdate):
+async def update_role(role_id: str, update: RoleUpdate, request: Request):
     """更新角色"""
     role = load_role(role_id)
     if not role:
@@ -200,7 +205,7 @@ async def update_role(role_id: str, update: RoleUpdate):
         role[key] = value
     
     save_role(role_id, role)
-    return role
+    return normalize_role_avatar_url(role, request)
 
 @router.delete("/roles/{role_id}")
 async def delete_role(role_id: str):
@@ -452,7 +457,7 @@ async def upload_role_avatar(role_id: str):
     return JSONResponse({"error": "Use multipart form upload"}, status_code=400)
 
 @router.post("/roles/{role_id}/avatar/upload")
-async def upload_role_avatar_file(role_id: str, file: UploadFile = File(...)):
+async def upload_role_avatar_file(role_id: str, request: Request, file: UploadFile = File(...)):
     """上传角色头像文件"""
     from fastapi.responses import FileResponse
     import shutil
@@ -474,7 +479,7 @@ async def upload_role_avatar_file(role_id: str, file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
     
     # 更新角色 avatar_url
-    avatar_url = f"/api/roles/{role_id}/avatar/file"
+    avatar_url = str(request.url_for("get_role_avatar_file", role_id=role_id))
     role["avatar_url"] = avatar_url
     save_role(role_id, role)
     
