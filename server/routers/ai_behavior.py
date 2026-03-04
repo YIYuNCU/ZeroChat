@@ -186,7 +186,7 @@ async def handle_ai_event(event: AIEvent):
     elif event.event_type == AIEventType.MOMENT_COMMENT:
         return await handle_moment_comment(role, event)
     elif event.event_type == AIEventType.MEMORY_SUMMARIZATION:
-        return await handle_memory_summarization(role, event)
+        pass  # 记忆总结目前没有单独触发入口，由聊天处理流程内触发
     else:
         return AIResponse(success=False, error="未知事件类型")
 
@@ -200,7 +200,7 @@ async def detect_intent(request: IntentDetectRequest):
     system_prompt = """
 你是一个意图分类器。根据用户输入，返回一个 JSON 对象，格式如下：
 {
-  "intent": "normal_chat" | "set_memory" | "set_reminder" | "set_quiet_time" | "clear_memory",
+  "intent": "normal_chat" | "set_memory" | "set_reminder" | "set_quiet_time",
   "extracted_content": "提取的关键内容",
   "duration_seconds": 数字（仅提醒类有效）, 
   "start_hour": 数字（仅安静时间有效）, 
@@ -418,9 +418,6 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
         content=ai_message,
         metadata={"type": "proactive", "role_name": role.get("name")}
     )
-
-async def handle_memory_summarization(role, event):
-    return await trigger_memory_summary("1000000000000", role)
 
 
 # ========== 定时任务处理 ==========

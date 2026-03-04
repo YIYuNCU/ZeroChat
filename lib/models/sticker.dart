@@ -129,7 +129,7 @@ class EmotionTypes {
   static const String confused = 'confused';
   static const String sleepy = 'sleepy';
   static const String neutral = 'neutral';
-  static const String surprised = 'suprised';
+  static const String surprised = 'surprised';
   static const String tired = 'tired';
 
   static const List<String> all = [
