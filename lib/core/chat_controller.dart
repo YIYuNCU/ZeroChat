@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import '../models/message.dart';
 import '../models/role.dart';
 import '../models/chat_context.dart';
@@ -21,6 +19,7 @@ import 'moments_scheduler.dart';
 import '../services/intent_service.dart';
 import '../services/memory_service.dart';
 import '../services/sticker_service.dart';
+import '../services/secure_backend_client.dart';
 
 /// 聊天核心引擎
 /// 整个项目中唯一负责消息流转、AI 调度、分段发送、群聊控制、记忆更新的权威组件
@@ -654,6 +653,11 @@ class ChatController extends ChangeNotifier {
 
     if (backendResponse.success && backendResponse.content != null) {
       debugPrint('ChatController: AI response via backend');
+      if (backendResponse.metadata != null) {
+        debugPrint(
+          'ChatController: Detected metadata from backend: ${backendResponse.metadata}',
+        );
+      }
       return backendResponse.content;
     }
 
@@ -779,12 +783,11 @@ class ChatController extends ChangeNotifier {
       if (emotion != null) {
         try {
           final backendUrl = SettingsService.instance.backendUrl;
-          final url = Uri.parse(
+          final resp = await SecureBackendClient.get(
             '$backendUrl/api/roles/$roleId/emojis/$emotion/random',
-          );
-          final resp = await http.get(url).timeout(const Duration(seconds: 5));
+          ).timeout(const Duration(seconds: 5));
           if (resp.statusCode == 200) {
-            final data = jsonDecode(resp.body);
+            final data = resp.data;
             if (data['found'] == true && data['url'] != null) {
               // 延迟一小段时间再发表情包
               await Future.delayed(

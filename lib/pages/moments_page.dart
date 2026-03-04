@@ -5,6 +5,7 @@ import '../services/moments_service.dart';
 import '../services/role_service.dart';
 import '../services/settings_service.dart';
 import '../services/image_service.dart';
+import '../services/secure_backend_client.dart';
 import 'publish_moment_page.dart';
 
 /// 朋友圈页面
@@ -201,6 +202,7 @@ class _MomentsPageState extends State<MomentsPage> {
     } else {
       return Image.network(
         coverUrl,
+        headers: SecureBackendClient.authHeaders,
         fit: BoxFit.cover,
         width: double.infinity,
         height: 320,
@@ -240,6 +242,7 @@ class _MomentsPageState extends State<MomentsPage> {
           borderRadius: BorderRadius.circular(6),
           child: Image.network(
             avatarUrl,
+            headers: SecureBackendClient.authHeaders,
             fit: BoxFit.cover,
             errorBuilder: (_, __, ___) => _buildDefaultUserAvatar(nickname),
           ),
@@ -514,6 +517,7 @@ class _MomentsPageState extends State<MomentsPage> {
         borderRadius: BorderRadius.circular(4),
         child: Image.network(
           avatarUrl,
+          headers: SecureBackendClient.authHeaders,
           width: 42,
           height: 42,
           fit: BoxFit.cover,

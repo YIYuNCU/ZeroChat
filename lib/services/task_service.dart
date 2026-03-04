@@ -1,10 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../core/chat_controller.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
+import 'secure_backend_client.dart';
 
 /// 定时任务类型
 enum TaskType {
@@ -357,20 +356,15 @@ class TaskService {
   /// 同步任务到后端
   static Future<bool> _syncTaskToBackend(ScheduledTask task) async {
     try {
-      final uri = Uri.parse('$_backendUrl/api/tasks');
-      final request = await HttpClient().postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(
-        jsonEncode({
-          'id': task.id,
-          'role_id': task.roleId,
-          'trigger_time': task.triggerTime.toIso8601String(),
-          'message': task.message,
-          'ai_prompt': task.aiPrompt,
-          'enabled': !task.isCompleted,
-        }),
-      );
-      final response = await request.close();
+      final response =
+          await SecureBackendClient.post('$_backendUrl/api/tasks', {
+            'id': task.id,
+            'role_id': task.roleId,
+            'trigger_time': task.triggerTime.toIso8601String(),
+            'message': task.message,
+            'ai_prompt': task.aiPrompt,
+            'enabled': !task.isCompleted,
+          });
       return response.statusCode == 200 || response.statusCode == 201;
     } catch (e) {
       debugPrint('TaskService: Backend sync failed: $e');
@@ -381,12 +375,9 @@ class TaskService {
   /// 从后端拉取任务
   static Future<bool> fetchFromBackend() async {
     try {
-      final uri = Uri.parse('$_backendUrl/api/tasks');
-      final request = await HttpClient().getUrl(uri);
-      final response = await request.close();
+      final response = await SecureBackendClient.get('$_backendUrl/api/tasks');
       if (response.statusCode == 200) {
-        final body = await response.transform(const Utf8Decoder()).join();
-        final data = jsonDecode(body);
+        final data = response.data;
         if (data['tasks'] != null) {
           debugPrint(
             'TaskService: Fetched ${(data['tasks'] as List).length} tasks from backend',

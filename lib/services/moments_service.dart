@@ -1,9 +1,8 @@
-import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../models/moment_post.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
+import 'secure_backend_client.dart';
 
 /// 朋友圈服务
 /// 管理朋友圈动态的增删查改
@@ -145,12 +144,14 @@ class MomentsService extends ChangeNotifier {
 
     // 自动同步到后端
     if (isLiking) {
-      await _httpPost(
+      await SecureBackendClient.post(
         '$_backendUrl/api/moments/$postId/like?user_id=me&user_name=我',
         {},
       );
     } else {
-      await _httpDelete('$_backendUrl/api/moments/$postId/like/me');
+      await SecureBackendClient.delete(
+        '$_backendUrl/api/moments/$postId/like/me',
+      );
     }
   }
 
@@ -202,7 +203,7 @@ class MomentsService extends ChangeNotifier {
     await _savePosts();
 
     // 自动同步到后端
-    await _httpPost('$_backendUrl/api/moments/$postId/comment', {
+    await SecureBackendClient.post('$_backendUrl/api/moments/$postId/comment', {
       'author_id': authorId,
       'author_name': authorName,
       'content': content,
@@ -239,7 +240,12 @@ class MomentsService extends ChangeNotifier {
   /// 从后端获取朋友圈列表
   Future<bool> fetchFromBackend() async {
     try {
-      final response = await _httpGet('$_backendUrl/api/moments');
+      final secureResponse = await SecureBackendClient.get(
+        '$_backendUrl/api/moments',
+      );
+      final response = secureResponse.isSuccess
+          ? secureResponse.data as Map<String, dynamic>?
+          : null;
       if (response != null && response['moments'] != null) {
         final List<dynamic> momentsJson = response['moments'];
         for (final json in momentsJson) {
@@ -288,66 +294,17 @@ class MomentsService extends ChangeNotifier {
   /// 发布动态到后端
   Future<bool> publishToBackend(MomentPost post) async {
     try {
-      final response = await _httpPost('$_backendUrl/api/moments', {
-        'author_id': post.authorId,
-        'author_name': post.authorName,
-        'content': post.content,
-        'image_urls': post.imageUrls,
-      });
-      return response != null;
+      final response =
+          await SecureBackendClient.post('$_backendUrl/api/moments', {
+            'author_id': post.authorId,
+            'author_name': post.authorName,
+            'content': post.content,
+            'image_urls': post.imageUrls,
+          });
+      return response.isSuccess;
     } catch (e) {
       debugPrint('MomentsService: Publish to backend failed: $e');
       return false;
     }
-  }
-
-  /// HTTP GET
-  Future<Map<String, dynamic>?> _httpGet(String url) async {
-    try {
-      final uri = Uri.parse(url);
-      final request = await HttpClient().getUrl(uri);
-      final response = await request.close();
-      if (response.statusCode == 200) {
-        final body = await response.transform(const Utf8Decoder()).join();
-        return jsonDecode(body) as Map<String, dynamic>;
-      }
-    } catch (e) {
-      debugPrint('HTTP GET error: $e');
-    }
-    return null;
-  }
-
-  /// HTTP POST
-  Future<Map<String, dynamic>?> _httpPost(
-    String url,
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final uri = Uri.parse(url);
-      final request = await HttpClient().postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode(data));
-      final response = await request.close();
-      if (response.statusCode == 200 || response.statusCode == 201) {
-        final body = await response.transform(const Utf8Decoder()).join();
-        return jsonDecode(body) as Map<String, dynamic>;
-      }
-    } catch (e) {
-      debugPrint('HTTP POST error: $e');
-    }
-    return null;
-  }
-
-  /// HTTP DELETE
-  Future<bool> _httpDelete(String url) async {
-    try {
-      final uri = Uri.parse(url);
-      final request = await HttpClient().deleteUrl(uri);
-      final response = await request.close();
-      return response.statusCode == 200;
-    } catch (e) {
-      debugPrint('HTTP DELETE error: $e');
-    }
-    return false;
   }
 }

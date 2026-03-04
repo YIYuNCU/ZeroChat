@@ -2,6 +2,7 @@
 角色管理路由
 """
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -517,6 +518,42 @@ class ChatMessagesSync(BaseModel):
     """消息同步请求"""
     messages: List[ChatMessage]
 
+
+def _load_role_chat_messages(role_id: str) -> List[Dict[str, Any]]:
+    role_dir = get_role_dir(role_id)
+    messages_file = role_dir / "chats" / "messages.json"
+    if not messages_file.exists():
+        return []
+    with open(messages_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        messages = data.get("messages", [])
+        if isinstance(messages, list):
+            return messages
+        return []
+
+
+def _build_chats_snapshot() -> Dict[str, Any]:
+    chats: Dict[str, List[Dict[str, Any]]] = {}
+    if ROLES_DIR.exists():
+        for role_dir in sorted(ROLES_DIR.iterdir(), key=lambda p: p.name):
+            if not role_dir.is_dir():
+                continue
+            role_id = role_dir.name
+            messages = _load_role_chat_messages(role_id)
+            messages.sort(key=lambda m: (str(m.get("timestamp", "")), str(m.get("id", ""))))
+            chats[role_id] = messages
+
+    canonical = json.dumps(chats, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    snapshot_md5 = hashlib.md5(canonical.encode("utf-8")).hexdigest()
+    total_messages = sum(len(items) for items in chats.values())
+
+    return {
+        "md5": snapshot_md5,
+        "total_chats": len(chats),
+        "total_messages": total_messages,
+        "chats": chats,
+    }
+
 @router.get("/roles/{role_id}/chats/messages")
 async def get_chat_messages(role_id: str, limit: int = 100, offset: int = 0):
     """获取角色聊天记录"""
@@ -534,6 +571,27 @@ async def get_chat_messages(role_id: str, limit: int = 100, offset: int = 0):
                 "messages": all_messages[offset:offset + limit]
             }
     return {"role_id": role_id, "total": 0, "messages": []}
+
+
+@router.get("/chats/messages/snapshot")
+async def get_all_chats_snapshot(client_md5: Optional[str] = None):
+    """获取所有聊天记录快照；传入 client_md5 相同则仅返回无需同步"""
+    snapshot = _build_chats_snapshot()
+    if client_md5 and client_md5 == snapshot["md5"]:
+        return {
+            "need_sync": False,
+            "md5": snapshot["md5"],
+            "total_chats": snapshot["total_chats"],
+            "total_messages": snapshot["total_messages"],
+        }
+
+    return {
+        "need_sync": True,
+        "md5": snapshot["md5"],
+        "total_chats": snapshot["total_chats"],
+        "total_messages": snapshot["total_messages"],
+        "chats": snapshot["chats"],
+    }
 
 @router.post("/roles/{role_id}/chats/messages")
 async def save_chat_message(role_id: str, message: ChatMessage):

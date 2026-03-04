@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../services/settings_service.dart';
 import '../services/image_service.dart';
+import '../services/secure_backend_client.dart';
 
 /// 设置页面
 /// 整合背景设置等功能
@@ -198,6 +199,7 @@ class _SettingsPageState extends State<SettingsPage> {
         borderRadius: BorderRadius.circular(4),
         child: Image.network(
           path,
+          headers: SecureBackendClient.authHeaders,
           width: 40,
           height: 40,
           fit: BoxFit.cover,

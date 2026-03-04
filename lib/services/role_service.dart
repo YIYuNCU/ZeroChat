@@ -1,10 +1,10 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../models/role.dart';
 import 'storage_service.dart';
 import 'memory_service.dart';
 import 'settings_service.dart';
+import 'secure_backend_client.dart';
 
 /// 角色管理服务
 /// 管理 AI 角色的创建、切换和持久化
@@ -132,7 +132,7 @@ class RoleService {
     await _saveRoles();
     // 自动从后端删除（失败不影响本地已删除状态）
     try {
-      await _httpDelete('$_backendUrl/api/roles/$roleId');
+      await SecureBackendClient.delete('$_backendUrl/api/roles/$roleId');
       debugPrint('Deleted role: $roleId (synced to backend)');
     } catch (e) {
       debugPrint(
@@ -178,7 +178,12 @@ class RoleService {
   /// 从后端获取角色列表
   static Future<bool> fetchFromBackend() async {
     try {
-      final response = await _httpGet('$_backendUrl/api/roles');
+      final secureResponse = await SecureBackendClient.get(
+        '$_backendUrl/api/roles',
+      );
+      final response = secureResponse.isSuccess
+          ? secureResponse.data as Map<String, dynamic>?
+          : null;
       if (response != null && response['roles'] != null) {
         final List<dynamic> rolesJson = response['roles'];
         for (final json in rolesJson) {
@@ -241,16 +246,17 @@ class RoleService {
   /// 同步单个角色到后端
   static Future<bool> syncRoleToBackend(Role role) async {
     try {
-      final response = await _httpPost('$_backendUrl/api/roles', {
-        'id': role.id,
-        'name': role.name,
-        'description': role.description,
-        'system_prompt': role.systemPrompt,
-        'avatar_url': role.avatarUrl,
-        'persona': role.description,
-        'core_memory': role.coreMemory,
-      });
-      return response != null;
+      final response =
+          await SecureBackendClient.post('$_backendUrl/api/roles', {
+            'id': role.id,
+            'name': role.name,
+            'description': role.description,
+            'system_prompt': role.systemPrompt,
+            'avatar_url': role.avatarUrl,
+            'persona': role.description,
+            'core_memory': role.coreMemory,
+          });
+      return response.isSuccess;
     } catch (e) {
       debugPrint('RoleService: Sync to backend failed: $e');
       return false;
@@ -263,76 +269,5 @@ class RoleService {
       await syncRoleToBackend(role);
     }
     debugPrint('RoleService: Synced ${_roles.length} roles to backend');
-  }
-
-  /// HTTP GET
-  static Future<Map<String, dynamic>?> _httpGet(String url) async {
-    try {
-      final uri = Uri.parse(url);
-      final request = await HttpClient().getUrl(uri);
-      final response = await request.close();
-      if (response.statusCode == 200) {
-        final body = await response.transform(const Utf8Decoder()).join();
-        return jsonDecode(body) as Map<String, dynamic>;
-      }
-    } catch (e) {
-      debugPrint('HTTP GET error: $e');
-    }
-    return null;
-  }
-
-  /// HTTP POST
-  static Future<Map<String, dynamic>?> _httpPost(
-    String url,
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final uri = Uri.parse(url);
-      final request = await HttpClient().postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode(data));
-      final response = await request.close();
-      if (response.statusCode == 200 || response.statusCode == 201) {
-        final body = await response.transform(const Utf8Decoder()).join();
-        return jsonDecode(body) as Map<String, dynamic>;
-      }
-    } catch (e) {
-      debugPrint('HTTP POST error: $e');
-    }
-    return null;
-  }
-
-  /// HTTP PUT
-  static Future<Map<String, dynamic>?> _httpPut(
-    String url,
-    Map<String, dynamic> data,
-  ) async {
-    try {
-      final uri = Uri.parse(url);
-      final request = await HttpClient().openUrl('PUT', uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode(data));
-      final response = await request.close();
-      if (response.statusCode == 200) {
-        final body = await response.transform(const Utf8Decoder()).join();
-        return jsonDecode(body) as Map<String, dynamic>;
-      }
-    } catch (e) {
-      debugPrint('HTTP PUT error: $e');
-    }
-    return null;
-  }
-
-  /// HTTP DELETE
-  static Future<bool> _httpDelete(String url) async {
-    try {
-      final uri = Uri.parse(url);
-      final request = await HttpClient().deleteUrl(uri);
-      final response = await request.close();
-      return response.statusCode == 200;
-    } catch (e) {
-      debugPrint('HTTP DELETE error: $e');
-    }
-    return false;
   }
 }

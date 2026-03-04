@@ -6,6 +6,7 @@ import '../models/message.dart';
 import '../services/role_service.dart';
 import '../services/memory_service.dart';
 import '../services/task_service.dart';
+import '../services/secure_backend_client.dart';
 import '../core/message_store.dart';
 import '../core/proactive_message_scheduler.dart';
 import 'role_settings_page.dart';
@@ -350,6 +351,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
         borderRadius: BorderRadius.circular(4),
         child: Image.network(
           _currentRole.avatarUrl!,
+          headers: SecureBackendClient.authHeaders,
           width: 60,
           height: 60,
           fit: BoxFit.cover,

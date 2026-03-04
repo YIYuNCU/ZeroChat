@@ -118,7 +118,7 @@ class ProactiveMessageScheduler {
   DateTime _generateNextTriggerTime(ProactiveConfig config) {
     final minMs = (config.minCountdownHours * 60 * 60 * 1000).toInt();
     final maxMs = (config.maxCountdownHours * 60 * 60 * 1000).toInt();
-    final randomMs = minMs + _random.nextInt(maxMs - minMs);
+    final randomMs = minMs + _random.nextInt(max(maxMs - minMs,60));
     return DateTime.now().add(Duration(milliseconds: randomMs));
   }
 
@@ -157,9 +157,10 @@ class ProactiveMessageScheduler {
     debugPrint('ProactiveMessageScheduler: Triggering for ${role.name}');
 
     try {
-      final response = await ApiService.sendChatMessageWithRole(
-        message: role.proactiveConfig.triggerPrompt,
-        role: role,
+      final response = await ApiService.callBackendAI(
+        content: role.proactiveConfig.triggerPrompt,
+        roleId: role.id,
+        eventType: 'proactive'
       );
 
       if (response.success && response.content != null) {

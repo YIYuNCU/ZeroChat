@@ -89,12 +89,12 @@ class MemoryManager {
     );
 
     // 调用 AI 进行总结（静默执行，不发送聊天消息）
-    final response = await ApiService.sendChatMessageWithRole(
-      message: '请总结以下对话的关键信息，提取重要的用户偏好、事实和需要记住的内容：\n\n$chatText',
-      role: summaryRole,
+    final response = await ApiService.callBackendAI(
+      eventType: 'memory_summarization',
+      roleId: role.id
     );
 
-    if (response.success && response.content != null) {
+    if (response.content != null) {
       debugPrint('MemoryManager: AI returned summary: ${response.content}');
 
       // 解析总结结果
@@ -104,7 +104,6 @@ class MemoryManager {
       if (memories.isNotEmpty) {
         // 添加到角色的核心记忆
         final updatedRole = role.addCoreMemories(memories);
-        await RoleService.updateRole(updatedRole);
         debugPrint(
           'MemoryManager: Updated role ${role.name} with ${memories.length} new core memories',
         );

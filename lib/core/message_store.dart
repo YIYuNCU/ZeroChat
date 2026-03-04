@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
+import 'package:crypto/crypto.dart';
 import '../models/message.dart';
 import '../services/storage_service.dart';
 import '../services/settings_service.dart';
+import '../services/secure_backend_client.dart';
 
 /// 消息存储层
 /// 聊天记录的唯一真实来源（Single Source of Truth）
@@ -35,6 +36,7 @@ class MessageStore extends ChangeNotifier {
       return;
     }
     await _instance._loadAllMessages();
+    await _instance._syncAllChatsFromBackendIfNeeded();
     _instance._initialized = true;
     debugPrint(
       'MessageStore initialized with ${_instance._messages.length} chats',
@@ -139,12 +141,10 @@ class MessageStore extends ChangeNotifier {
   ) async {
     try {
       final backendUrl = SettingsService.instance.backendUrl;
-      final url = Uri.parse(
+      final response = await SecureBackendClient.delete(
         '$backendUrl/api/roles/$chatId/chats/messages/$messageId',
       );
-      final response = await http
-          .delete(url)
-          .timeout(const Duration(seconds: 5));
+
       if (response.statusCode == 200) {
         debugPrint('MessageStore: Message $messageId deleted from backend');
       } else {
@@ -312,6 +312,123 @@ class MessageStore extends ChangeNotifier {
     }
   }
 
+  Future<void> _syncAllChatsFromBackendIfNeeded() async {
+    try {
+      final backendUrl = SettingsService.instance.backendUrl;
+      if (backendUrl.isEmpty) {
+        return;
+      }
+
+      final localMd5 = _calculateLocalChatsMd5();
+      final response = await SecureBackendClient.get(
+        '$backendUrl/api/chats/messages/snapshot?client_md5=$localMd5',
+      ).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode != 200 ||
+          response.data is! Map<String, dynamic>) {
+        return;
+      }
+
+      final data = response.data as Map<String, dynamic>;
+      final needSync = data['need_sync'] == true;
+      if (!needSync) {
+        debugPrint('MessageStore: Chat snapshot MD5 matched, skip full sync');
+        return;
+      }
+
+      final chatsRaw = data['chats'];
+      if (chatsRaw is! Map) {
+        return;
+      }
+
+      var syncedChats = 0;
+      for (final entry in chatsRaw.entries) {
+        final chatId = entry.key.toString();
+        final rawMessages = entry.value;
+        if (rawMessages is! List) {
+          continue;
+        }
+
+        final messages = <Message>[];
+        for (final item in rawMessages) {
+          if (item is! Map) {
+            continue;
+          }
+          final map = Map<String, dynamic>.from(item as Map);
+          final typeName = (map['type'] ?? 'text').toString();
+          final type = MessageType.values.firstWhere(
+            (e) => e.name == typeName,
+            orElse: () => MessageType.text,
+          );
+
+          final timestampStr = map['timestamp']?.toString() ?? '';
+          final timestamp = DateTime.tryParse(timestampStr) ?? DateTime.now();
+
+          messages.add(
+            Message(
+              id:
+                  map['id']?.toString() ??
+                  '${timestamp.millisecondsSinceEpoch}',
+              senderId: map['sender_id']?.toString() ?? 'unknown',
+              receiverId: map['receiver_id']?.toString() ?? 'me',
+              content: map['content']?.toString() ?? '',
+              type: type,
+              timestamp: timestamp,
+              quotedMessageId:
+                  map['quoted_message_id']?.toString() ??
+                  map['quote_id']?.toString(),
+              quotedPreviewText:
+                  map['quoted_preview_text']?.toString() ??
+                  map['quote_content']?.toString(),
+            ),
+          );
+        }
+
+        messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        _messages[chatId] = messages;
+        await _saveMessages(chatId);
+        syncedChats += 1;
+      }
+
+      debugPrint('MessageStore: Full chat sync completed, chats=$syncedChats');
+    } catch (e) {
+      debugPrint('MessageStore: Full chat sync skipped due to error: $e');
+    }
+  }
+
+  String _calculateLocalChatsMd5() {
+    final canonical = <String, List<Map<String, dynamic>>>{};
+
+    final chatIds = _messages.keys.toList()..sort();
+    for (final chatId in chatIds) {
+      final list = _messages[chatId] ?? const <Message>[];
+      final serialized =
+          list
+              .map(
+                (m) => {
+                  'id': m.id,
+                  'content': m.content,
+                  'sender_id': m.senderId,
+                  'receiver_id': m.receiverId,
+                  'timestamp': m.timestamp.toIso8601String(),
+                  'type': m.type.name,
+                  'quote_id': m.quotedMessageId,
+                  'quote_content': m.quotedPreviewText,
+                },
+              )
+              .toList()
+            ..sort(
+              (a, b) => (a['timestamp'] ?? '').toString().compareTo(
+                (b['timestamp'] ?? '').toString(),
+              ),
+            );
+      canonical[chatId] = serialized;
+    }
+
+    final jsonStr = jsonEncode(canonical);
+    return md5.convert(utf8.encode(jsonStr)).toString();
+  }
+
   /// 异步同步消息到后端（不阻塞 UI）
   void _syncMessageToBackend(String chatId, Message message) {
     Future(() async {
@@ -326,10 +443,9 @@ class MessageStore extends ChangeNotifier {
           'MessageStore: Syncing to $backendUrl/api/roles/$chatId/chats/messages',
         );
 
-        final response = await http.post(
-          Uri.parse('$backendUrl/api/roles/$chatId/chats/messages'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
+        final response = await SecureBackendClient.post(
+          '$backendUrl/api/roles/$chatId/chats/messages',
+          {
             'id': message.id,
             'content': message.content,
             'sender_id': message.senderId,
@@ -337,14 +453,14 @@ class MessageStore extends ChangeNotifier {
             'type': message.type.toString().split('.').last, // enum to string
             'quote_id': message.quotedMessageId,
             'quote_content': message.quotedPreviewText,
-          }),
+          },
         );
 
         if (response.statusCode == 200) {
           debugPrint('MessageStore: Synced message ${message.id} to backend ✓');
         } else {
           debugPrint(
-            'MessageStore: Failed to sync message: ${response.statusCode} ${response.body}',
+            'MessageStore: Failed to sync message: ${response.statusCode} ${response.data}',
           );
         }
       } catch (e) {

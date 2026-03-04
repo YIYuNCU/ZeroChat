@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../services/sticker_service.dart';
 import '../services/settings_service.dart';
+import '../services/secure_backend_client.dart';
 
 /// ZeroChat 风格聊天气泡组件
 /// 支持文字、表情包、引用显示和长按操作
@@ -221,6 +222,7 @@ class ChatBubble extends StatelessWidget {
         child: imagePath.startsWith('http')
             ? CachedNetworkImage(
                 imageUrl: imagePath,
+              httpHeaders: SecureBackendClient.authHeaders,
                 fit: BoxFit.contain,
                 placeholder: (_, __) => _buildStickerPlaceholder(emotion),
                 errorWidget: (_, __, ___) => _buildStickerPlaceholder(emotion),
@@ -362,6 +364,7 @@ class ChatBubble extends StatelessWidget {
             ? (effectiveAvatarUrl.startsWith('http')
                   ? Image.network(
                       effectiveAvatarUrl,
+                      headers: SecureBackendClient.authHeaders,
                       width: 40,
                       height: 40,
                       fit: BoxFit.cover,

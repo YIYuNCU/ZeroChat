@@ -8,6 +8,7 @@ import '../services/role_service.dart';
 import '../services/memory_service.dart';
 import '../services/chat_list_service.dart';
 import '../services/settings_service.dart';
+import '../services/secure_backend_client.dart';
 import 'role_settings_page.dart';
 import 'chat_detail_page.dart';
 
@@ -158,6 +159,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
         borderRadius: BorderRadius.circular(8),
         child: Image.network(
           _role.avatarUrl!,
+          headers: SecureBackendClient.authHeaders,
           width: size,
           height: size,
           fit: BoxFit.cover,
@@ -327,6 +329,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
       // 上传到后端
       final uri = Uri.parse('$backendUrl/api/roles/${_role.id}/avatar/upload');
       final request = http.MultipartRequest('POST', uri);
+      request.headers.addAll(SecureBackendClient.authHeaders);
 
       final bytes = await pickedFile.readAsBytes();
       final ext = pickedFile.path.split('.').last.toLowerCase();
@@ -343,7 +346,9 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
       final response = await request.send();
       if (response.statusCode == 200) {
         final respStr = await response.stream.bytesToString();
-        final data = jsonDecode(respStr);
+        final data =
+            SecureBackendClient.decodeResponseBodyString(respStr)
+                as Map<String, dynamic>;
         final avatarUrl = data['avatar_url'] as String?;
 
         if (avatarUrl != null) {

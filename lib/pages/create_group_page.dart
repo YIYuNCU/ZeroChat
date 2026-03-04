@@ -3,6 +3,7 @@ import '../models/role.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
 import '../services/chat_list_service.dart';
+import '../services/secure_backend_client.dart';
 
 /// 创建群聊页面
 /// 选择多个角色创建群聊
@@ -139,6 +140,7 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
         borderRadius: BorderRadius.circular(4),
         child: Image.network(
           role.avatarUrl!,
+          headers: SecureBackendClient.authHeaders,
           width: 40,
           height: 40,
           fit: BoxFit.cover,

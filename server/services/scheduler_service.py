@@ -215,7 +215,10 @@ async def _check_moment_posts():
             profile_file = role_dir / "profile.json"
             if profile_file.exists():
                 with open(profile_file, "r", encoding="utf-8") as f:
-                    roles.append(json.load(f))
+                    profile = json.load(f)
+                    if profile.get("id", "").startswith("1000000000"):
+                        continue  # 跳过系统角色
+                    roles.append(profile)
     
     if not roles:
         return

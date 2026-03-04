@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import '../services/settings_service.dart';
+import '../services/secure_backend_client.dart';
 import 'api_settings_page.dart';
 import 'global_prompts_page.dart';
 import 'favorites_page.dart';
@@ -120,6 +121,7 @@ class _ProfilePageState extends State<ProfilePage> {
                       settings.userAvatarUrl.startsWith('http')
                           ? settings.userAvatarUrl
                           : '${settings.backendUrl}${settings.userAvatarUrl}',
+                      headers: SecureBackendClient.authHeaders,
                       width: 64,
                       height: 64,
                       fit: BoxFit.cover,
@@ -219,6 +221,7 @@ class _ProfilePageState extends State<ProfilePage> {
                                   currentAvatarUrl.startsWith('http')
                                       ? currentAvatarUrl
                                       : '${SettingsService.instance.backendUrl}$currentAvatarUrl',
+                                  headers: SecureBackendClient.authHeaders,
                                   fit: BoxFit.cover,
                                   errorBuilder: (_, __, ___) => const Icon(
                                     Icons.add_a_photo,
@@ -272,6 +275,7 @@ class _ProfilePageState extends State<ProfilePage> {
           final backendUrl = SettingsService.instance.backendUrl;
           final uri = Uri.parse('$backendUrl/api/settings/avatar');
           final request = http.MultipartRequest('POST', uri);
+          request.headers.addAll(SecureBackendClient.authHeaders);
           request.files.add(
             await http.MultipartFile.fromPath(
               'file',
@@ -282,15 +286,10 @@ class _ProfilePageState extends State<ProfilePage> {
           final response = await request.send();
           if (response.statusCode == 200) {
             final respStr = await response.stream.bytesToString();
-            // 解析 JSON 响应
-            if (respStr.contains('"path"')) {
-              final match = RegExp(
-                r'"path"\s*:\s*"([^"]+)"',
-              ).firstMatch(respStr);
-              if (match != null) {
-                newAvatarUrl = match.group(1);
-              }
-            }
+            final data =
+                SecureBackendClient.decodeResponseBodyString(respStr)
+                    as Map<String, dynamic>;
+            newAvatarUrl = data['path'] as String?;
             debugPrint('Avatar uploaded: $newAvatarUrl');
           }
         } catch (e) {

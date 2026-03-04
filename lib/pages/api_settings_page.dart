@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../services/settings_service.dart';
+import '../services/secure_backend_client.dart';
 
 /// API 设置页面
 /// 配置主聊天、意图识别、图像识别 API
@@ -303,9 +304,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
     try {
       debugPrint('Testing connection to: $url/api/health');
-      final response = await http
-          .get(Uri.parse('$url/api/health'))
-          .timeout(const Duration(seconds: 5));
+      final response = await SecureBackendClient.get(
+        '$url/api/health',
+      ).timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
         setState(() {
@@ -347,12 +348,12 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
     try {
       final backendUrl = _backendUrlController.text.trim();
-      final response = await http.get(
-        Uri.parse('$backendUrl/api/settings/models'),
+      final response = await SecureBackendClient.get(
+        '$backendUrl/api/settings/models',
       );
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+        final data = response.data;
         if (data['success'] == true) {
           final models = List<String>.from(data['models'] ?? []);
           setState(() {

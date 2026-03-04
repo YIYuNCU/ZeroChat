@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/secure_backend_client.dart';
 
 /// 表情包管理页面
 /// 用户上传和管理角色表情包
@@ -143,6 +144,7 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
             borderRadius: BorderRadius.circular(8),
             child: Image.network(
               emojis[index],
+              headers: SecureBackendClient.authHeaders,
               fit: BoxFit.cover,
               errorBuilder: (_, __, ___) => Container(
                 color: Colors.grey[300],

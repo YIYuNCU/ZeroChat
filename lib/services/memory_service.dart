@@ -1,10 +1,9 @@
-import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../models/message.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
 import 'role_service.dart';
+import 'secure_backend_client.dart';
 
 /// 记忆服务
 /// 管理短期记忆和核心记忆
@@ -191,11 +190,10 @@ class MemoryService {
       final roleId = RoleService.getCurrentRole().id;
       final coreMemoryStr = _coreMemory.join('；');
 
-      final uri = Uri.parse('$backendUrl/api/roles/$roleId/memory');
-      final request = await HttpClient().putUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'core_memory': coreMemoryStr}));
-      final response = await request.close();
+      final response = await SecureBackendClient.put(
+        '$backendUrl/api/roles/$roleId/memory',
+        {'core_memory': coreMemoryStr},
+      );
       if (response.statusCode == 200) {
         debugPrint(
           'MemoryService: Core memory synced to backend for role $roleId',

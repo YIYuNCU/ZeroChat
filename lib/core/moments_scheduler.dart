@@ -96,9 +96,9 @@ class MomentsScheduler {
 
     final prompt = _buildPostPrompt(role);
 
-    final response = await ApiService.sendChatMessageWithRole(
-      message: prompt,
-      role: role,
+    final response = await ApiService.callBackendAI(
+      roleId: role.id,
+      eventType: 'moment',
     );
 
     if (!response.success || response.content == null) {
@@ -223,9 +223,9 @@ class MomentsScheduler {
   Future<void> _performComment(Role role, MomentPost post) async {
     final prompt = _buildCommentPrompt(role, post);
 
-    final response = await ApiService.sendChatMessageWithRole(
-      message: prompt,
-      role: role,
+    final response = await ApiService.callBackendAI(
+      roleId: role.id,
+      eventType: 'comment'
     );
 
     if (!response.success || response.content == null) {

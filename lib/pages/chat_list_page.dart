@@ -4,6 +4,7 @@ import '../models/chat_info.dart';
 import '../services/chat_list_service.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
+import '../services/secure_backend_client.dart';
 import '../core/message_store.dart';
 import '../core/chat_controller.dart';
 import 'chat_detail_page.dart';
@@ -226,6 +227,7 @@ class _ChatListPageState extends State<ChatListPage> {
         borderRadius: BorderRadius.circular(4),
         child: Image.network(
           avatarUrl,
+          headers: SecureBackendClient.authHeaders,
           width: 48,
           height: 48,
           fit: BoxFit.cover,

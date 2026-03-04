@@ -1,8 +1,7 @@
-import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'storage_service.dart';
 import 'intent_service.dart';
+import 'secure_backend_client.dart';
 
 /// 全局设置服务
 /// 管理 API 配置、全局提示词等
@@ -384,17 +383,14 @@ class SettingsService extends ChangeNotifier {
   /// 同步 API 设置到后端
   Future<bool> syncApiSettingsToBackend() async {
     try {
-      final uri = Uri.parse('$_backendUrl/api/settings');
-      final request = await HttpClient().putUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(
-        jsonEncode({
+      final response = await SecureBackendClient.put(
+        '$_backendUrl/api/settings',
+        {
           'ai_api_url': _chatApiUrl,
           'ai_api_key': _chatApiKey,
           'ai_model': _chatModel,
-        }),
+        },
       );
-      final response = await request.close();
       if (response.statusCode == 200) {
         debugPrint('SettingsService: API settings synced to backend');
         return true;

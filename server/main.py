@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # 确定根目录
 if getattr(sys, 'frozen', False):
@@ -49,7 +50,9 @@ def load_config():
         "port": 8000,
         "ai_api_url": "",
         "ai_api_key": "",
-        "ai_model": "gpt-3.5-turbo"
+        "ai_model": "gpt-3.5-turbo",
+        "auth_token": "ZEROCHAT_FIXED_TOKEN_2026",
+        "encryption_secret": "ZEROCHAT_TRANSFER_SECRET_2026"
     }
     if config_file.exists():
         with open(config_file, "r", encoding="utf-8") as f:
@@ -65,6 +68,12 @@ CONFIG = load_config()
 from routers import chat, roles, moments, tasks, settings
 from routers import ai_behavior
 from services import scheduler_service
+from services.security_service import (
+    DEFAULT_AUTH_TOKEN,
+    DEFAULT_ENCRYPTION_SECRET,
+    decrypt_payload,
+    encrypt_payload,
+)
 
 # AI 事件回调
 async def handle_ai_event(event_data: dict):
@@ -107,7 +116,8 @@ app = FastAPI(
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000","http://127.0.0.1:8000"],
+    allow_origins=["http://localhost:8000","http://127.0.0.1:8000","https://sakura.evian.asia"],
+    allow_origin_regex=r"^http://((10\.81)|(192\.168))\.\d{1,3}\.\d{1,3}(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -117,6 +127,68 @@ app.add_middleware(
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
+
+class SecurityMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if not path.startswith("/api"):
+            return await call_next(request)
+
+        auth_token = CONFIG.get("auth_token") or DEFAULT_AUTH_TOKEN
+        encryption_secret = CONFIG.get("encryption_secret") or DEFAULT_ENCRYPTION_SECRET
+
+        incoming_token = request.headers.get("X-Auth-Token", "")
+        if incoming_token != auth_token:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            raw_body = await request.body()
+            if raw_body:
+                try:
+                    payload_obj = json.loads(raw_body.decode("utf-8"))
+                    encrypted = payload_obj.get("payload") if isinstance(payload_obj, dict) else None
+                    if encrypted is None:
+                        return JSONResponse(status_code=400, content={"detail": "Encrypted payload required"})
+                    decrypted = decrypt_payload(encrypted, encryption_secret)
+                    request._body = json.dumps(decrypted, ensure_ascii=False).encode("utf-8")
+                except Exception as e:
+                    logger.warning(f"请求解密失败: {e}")
+                    return JSONResponse(status_code=400, content={"detail": "Invalid encrypted payload"})
+
+        response = await call_next(request)
+
+        response_content_type = response.headers.get("content-type", "")
+        if "application/json" not in response_content_type or response.status_code == 204:
+            return response
+
+        response_body = b""
+        async for chunk in response.body_iterator:
+            response_body += chunk
+
+        if not response_body:
+            return response
+
+        try:
+            plain_obj = json.loads(response_body.decode("utf-8"))
+            encrypted_obj = encrypt_payload(plain_obj, encryption_secret)
+            headers = {
+                key: value
+                for key, value in response.headers.items()
+                if key.lower() not in {"content-length", "content-type"}
+            }
+            return JSONResponse(
+                status_code=response.status_code,
+                content={"payload": encrypted_obj},
+                headers=headers,
+            )
+        except Exception as e:
+            logger.warning(f"响应加密失败，返回原始响应: {e}")
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Response encryption failed"},
+            )
+
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         logger.info(f"→ {request.method} {request.url.path}")
@@ -125,6 +197,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(SecurityMiddleware)
 
 # 注册路由
 app.include_router(chat.router, prefix="/api", tags=["Chat"])

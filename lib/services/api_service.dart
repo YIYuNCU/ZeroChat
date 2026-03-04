@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/role.dart';
 import 'settings_service.dart';
+import 'secure_backend_client.dart';
 
 /// API 服务
 /// 用于调用第三方 AI API（支持 OpenAI 兼容接口）
@@ -224,21 +225,18 @@ class ApiService {
     Map<String, dynamic>? context,
   }) async {
     try {
-      final response = await http.post(
-        Uri.parse('$_backendUrl/api/ai/event'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'role_id': roleId,
-          'event_type': eventType,
-          'content': content,
-          'context': context ?? {},
-        }),
-      );
+      final response =
+          await SecureBackendClient.post('$_backendUrl/api/ai/event', {
+            'role_id': roleId,
+            'event_type': eventType,
+            'content': content,
+            'context': context ?? {},
+          });
 
       debugPrint('ApiService: Backend AI call - $eventType for $roleId');
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+        final data = response.data;
         if (data['success'] == true && data['content'] != null) {
           return ApiResponse.success(data['content']);
         } else if (data['action'] == 'ignore') {
@@ -267,9 +265,9 @@ class ApiService {
   /// 检查后端是否可用
   static Future<bool> isBackendAvailable() async {
     try {
-      final response = await http
-          .get(Uri.parse('$_backendUrl/api/health'))
-          .timeout(const Duration(seconds: 3));
+      final response = await SecureBackendClient.get(
+        '$_backendUrl/api/health',
+      ).timeout(const Duration(seconds: 3));
       return response.statusCode == 200;
     } catch (e) {
       return false;
@@ -292,24 +290,19 @@ class ApiService {
       final mimeType = ext == 'png' ? 'image/png' : 'image/jpeg';
 
       // 调用后端 vision API
-      final response = await http
-          .post(
-            Uri.parse('$_backendUrl/api/chat/vision'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'image_base64': base64Image,
-              'mime_type': mimeType,
-              'user_prompt': userPrompt,
-              'system_prompt': rolePersona,
-            }),
-          )
-          .timeout(const Duration(seconds: 60));
+      final response =
+          await SecureBackendClient.post('$_backendUrl/api/chat/vision', {
+            'image_base64': base64Image,
+            'mime_type': mimeType,
+            'user_prompt': userPrompt,
+            'system_prompt': rolePersona,
+          }).timeout(const Duration(seconds: 60));
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+        final data = response.data;
         return data['reply'] ?? '图片识别失败';
       } else {
-        debugPrint('Vision API error: ${response.statusCode} ${response.body}');
+        debugPrint('Vision API error: ${response.statusCode} ${response.data}');
         return '图片识别失败：服务器错误 ${response.statusCode}';
       }
     } catch (e) {
@@ -329,12 +322,18 @@ class ApiService {
 class ApiResponse {
   final bool success;
   final String? content;
+  final Directory? metadata; // 可选的情绪标签（后端返回）
   final String? error;
 
-  ApiResponse._({required this.success, this.content, this.error});
+  ApiResponse._({
+    required this.success,
+    this.content,
+    this.metadata,
+    this.error,
+  });
 
-  factory ApiResponse.success(String content) {
-    return ApiResponse._(success: true, content: content);
+  factory ApiResponse.success(String content, {Directory? metadata}) {
+    return ApiResponse._(success: true, content: content, metadata: metadata);
   }
 
   factory ApiResponse.error(String error) {

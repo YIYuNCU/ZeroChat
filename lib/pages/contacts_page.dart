@@ -3,6 +3,7 @@ import 'package:lpinyin/lpinyin.dart';
 import '../models/role.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
+import '../services/secure_backend_client.dart';
 import 'role_detail_page.dart';
 import 'group_settings_page.dart';
 
@@ -335,6 +336,7 @@ class ContactsPageState extends State<ContactsPage>
         borderRadius: BorderRadius.circular(4),
         child: Image.network(
           role.avatarUrl!,
+          headers: SecureBackendClient.authHeaders,
           width: 40,
           height: 40,
           fit: BoxFit.cover,

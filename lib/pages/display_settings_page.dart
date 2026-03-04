@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/settings_service.dart';
+import '../services/secure_backend_client.dart';
 
 /// 显示设置页面
 /// 朋友圈封面、聊天背景设置
@@ -164,6 +165,7 @@ class _DisplaySettingsPageState extends State<DisplaySettingsPage> {
               borderRadius: BorderRadius.circular(8),
               child: Image.network(
                 previewUrl,
+                headers: SecureBackendClient.authHeaders,
                 height: 100,
                 width: double.infinity,
                 fit: BoxFit.cover,
