@@ -48,19 +48,6 @@ class ChatController extends ChangeNotifier {
   /// 等待定时器（用于消息合并）
   final Map<String, Timer> _waitTimers = {};
 
-  /// 核心记忆总结轮数（默认 20 轮）
-  int _summaryEveryNRounds = 20;
-
-  /// 设置核心记忆总结轮数
-  set summaryEveryNRounds(int value) {
-    if (value > 0) {
-      _summaryEveryNRounds = value;
-      MemoryManager.summarizeInterval = value * 2;
-    }
-  }
-
-  int get summaryEveryNRounds => _summaryEveryNRounds;
-
   /// 初始化
   static Future<void> init() async {
     await MessageStore.init();
@@ -211,9 +198,6 @@ class ChatController extends ChangeNotifier {
     // 标记正在处理
     _processingChats.add(chatId);
     notifyListeners();
-
-    // 检查是否需要触发核心记忆总结
-    MemoryManager.triggerSummarizeIfNeeded(chatId);
 
     // 根据聊天类型处理（后台执行）
     _processMessageInBackground(chatId, combinedContent, context.isGroup);
@@ -443,19 +427,29 @@ class ChatController extends ChangeNotifier {
     final history = MessageStore.toApiHistory(recentMessages);
     final coreMemory = MemoryManager.getCoreMemoryForRequest();
 
-    final response = await ApiService.sendChatMessageWithRole(
-      message: prompt,
-      role: role,
-      history: history,
-      coreMemory: coreMemory,
+    final response = await ApiService.callBackendAI(
+      roleId: role.id,
+      eventType: 'task',
+      content: prompt,
+      context: {'chat_id': chatId},
     );
 
     String contentToSend;
     if (response.success && response.content != null) {
       contentToSend = response.content!;
     } else {
-      // AI 失败时使用简洁的备用消息
-      contentToSend = '嘿～$taskContent';
+      final fallbackResponse = await ApiService.sendChatMessageWithRoleDirect(
+        message: prompt,
+        role: role,
+        history: history,
+        coreMemory: coreMemory,
+      );
+      if (fallbackResponse.success && fallbackResponse.content != null) {
+        contentToSend = fallbackResponse.content!;
+      } else {
+        // AI 失败时使用简洁的备用消息
+        contentToSend = '嘿～$taskContent';
+      }
     }
 
     // 分段发送
@@ -645,10 +639,41 @@ class ChatController extends ChangeNotifier {
     required String userMessage,
     required bool isGroup,
   }) async {
+    final recentMessages = MessageStore.instance.getRecentRounds(
+      chatId,
+      role.maxContextRounds,
+    );
+    final historyMessages = recentMessages.isNotEmpty
+        ? recentMessages.sublist(0, recentMessages.length - 1)
+        : <Message>[];
+    final history = MessageStore.toApiHistory(historyMessages);
+    final coreMemory = MemoryManager.getCoreMemoryForRequest();
+
+    // 获取朋友圈感知上下文（弱上下文，概率注入）
+    final momentsContext = isGroup
+        ? null
+        : MomentsScheduler.instance.buildMomentsAwarenessContext();
+
+    // 注入外挂 JSON 记录（后端优先使用自身配置，此处作为兜底透传）
+    final attachedJson = role.attachedJsonContent;
+
+    // 如果有朋友圈上下文，附加到消息后面
+    final finalMessage = momentsContext != null
+        ? '$userMessage\n\n$momentsContext'
+        : userMessage;
+
     // 优先尝试后端 API
     final backendResponse = await ApiService.sendChatViaBackend(
       roleId: role.id,
-      message: userMessage,
+      message: finalMessage,
+      context: {
+        'chat_id': chatId,
+        'is_group': isGroup,
+        'history': history,
+        'core_memory': coreMemory,
+        'moments_context': momentsContext,
+        'attached_json': attachedJson,
+      },
     );
 
     if (backendResponse.success && backendResponse.content != null) {
@@ -664,33 +689,12 @@ class ChatController extends ChangeNotifier {
     // 后端不可用时，降级到直接调用（保持原有逻辑）
     debugPrint('ChatController: Backend unavailable, fallback to direct API');
 
-    final recentMessages = MessageStore.instance.getRecentRounds(
-      chatId,
-      role.maxContextRounds,
-    );
-    final historyMessages = recentMessages.isNotEmpty
-        ? recentMessages.sublist(0, recentMessages.length - 1)
-        : <Message>[];
-    final history = MessageStore.toApiHistory(historyMessages);
-    final coreMemory = MemoryManager.getCoreMemoryForRequest();
-
     // 注入外挂 JSON 记录（与聊天记录同级）
-    final attachedJson = role.attachedJsonContent;
     if (attachedJson != null && attachedJson.isNotEmpty) {
       history.insert(0, {'role': 'system', 'content': '[外挂记录]\n$attachedJson'});
     }
 
-    // 获取朋友圈感知上下文（弱上下文，概率注入）
-    final momentsContext = isGroup
-        ? null
-        : MomentsScheduler.instance.buildMomentsAwarenessContext();
-
-    // 如果有朋友圈上下文，附加到消息后面
-    final finalMessage = momentsContext != null
-        ? '$userMessage\n\n$momentsContext'
-        : userMessage;
-
-    final response = await ApiService.sendChatMessageWithRole(
+    final response = await ApiService.sendChatMessageWithRoleDirect(
       message: finalMessage,
       role: role,
       history: history,

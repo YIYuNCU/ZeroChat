@@ -32,6 +32,13 @@ class PersonalityTraits(BaseModel):
     agreeableness: int = 50     # 宜人性
     neuroticism: int = 50       # 神经质
 
+
+class MenstruationCycle(BaseModel):
+    """生理周期配置"""
+    cycle_length: int = 30
+    period_length: int = 6
+    last_period_start: str = "2026-01-24"
+
 class RoleCreate(BaseModel):
     """创建角色"""
     id: str
@@ -46,6 +53,16 @@ class RoleCreate(BaseModel):
     
     # 核心记忆
     core_memory: Optional[List[str]] = []
+
+    # 角色专属 AI 配置
+    ai_model: Optional[str] = None
+    ai_api_url: Optional[str] = None
+    ai_api_key: Optional[str] = None
+    ai_temperature: Optional[float] = None
+
+    # 性别与生理周期
+    gender: Optional[str] = "men"
+    menstruation_cycle: Optional[MenstruationCycle] = None
     
     # 人格配置
     personality: Optional[PersonalityTraits] = None
@@ -70,6 +87,12 @@ class RoleUpdate(BaseModel):
     proactive_config: Optional[ProactiveConfig] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
+    ai_model: Optional[str] = None
+    ai_api_url: Optional[str] = None
+    ai_api_key: Optional[str] = None
+    ai_temperature: Optional[float] = None
+    gender: Optional[str] = None
+    menstruation_cycle: Optional[MenstruationCycle] = None
 
 class MemoryUpdate(BaseModel):
     """记忆更新"""
@@ -169,6 +192,10 @@ async def create_role(role: RoleCreate, request: Request):
         "greeting": role.greeting or "",
         "description": role.description or "",
         "core_memory": role.core_memory or [],
+        "ai_model": role.ai_model or "deepseek-chat",
+        "ai_api_url": role.ai_api_url or "",
+        "ai_api_key": role.ai_api_key or "",
+        "ai_temperature": role.ai_temperature if role.ai_temperature is not None else 0.7,
         "personality": role.personality.model_dump() if role.personality else {
             "openness": 50, "conscientiousness": 50, "extraversion": 50,
             "agreeableness": 50, "neuroticism": 50
@@ -179,8 +206,8 @@ async def create_role(role: RoleCreate, request: Request):
             "next_trigger_time": None
         },
         "tags": role.tags or [],
-        "gender": "men",  # 默认男性，可自行修改
-        "menstruation_cycle": {
+        "gender": role.gender or "men",
+        "menstruation_cycle": role.menstruation_cycle.model_dump() if role.menstruation_cycle else {
             "cycle_length": 30,
             "period_length": 6,
             "last_period_start": "2026-01-24"

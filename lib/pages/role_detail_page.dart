@@ -73,9 +73,40 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
           _buildSection([
             _buildInfoItem('系统提示词', _role.systemPrompt, onTap: _editRole),
             _buildDivider(),
-            _buildInfoItem('Temperature', _role.temperature.toStringAsFixed(2)),
+            _buildInfoItem('温度', _role.temperature.toStringAsFixed(1)),
             _buildDivider(),
             _buildInfoItem('上下文轮数', '${_role.maxContextRounds} 轮'),
+          ]),
+
+          const SizedBox(height: 10),
+
+          // 可修改配置展示
+          _buildSection([
+            _buildInfoItem('AI模型', _role.aiModel, onTap: _editRole),
+            _buildDivider(),
+            _buildInfoItem('API地址', _role.aiApiUrl, onTap: _editRole),
+            _buildDivider(),
+            _buildInfoItem('密钥', _maskApiKey(_role.aiApiKey), onTap: _editRole),
+            _buildDivider(),
+            _buildInfoItem(
+              '温度',
+              _role.aiTemperature.toStringAsFixed(1),
+              onTap: _editRole,
+            ),
+            _buildDivider(),
+            _buildInfoItem('性别', _formatGender(_role.gender), onTap: _editRole),
+            if (_role.gender != 'men') ...[
+              _buildDivider(),
+              _buildInfoItem('周期长度', _formatCycleLength(), onTap: _editRole),
+              _buildDivider(),
+              _buildInfoItem('月经时长', _formatPeriodLength(), onTap: _editRole),
+              _buildDivider(),
+              _buildInfoItem(
+                '上次月经时间',
+                _formatLastPeriodStartZh(),
+                onTap: _editRole,
+              ),
+            ],
           ]),
 
           const SizedBox(height: 10),
@@ -265,6 +296,36 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
 
   Widget _buildDivider() {
     return const Divider(height: 1, indent: 16, endIndent: 0);
+  }
+
+  String _maskApiKey(String key) {
+    if (key.isEmpty) return '未设置';
+    if (key.length <= 12) return '***';
+    return '${key.substring(0, 6)}...${key.substring(key.length - 4)}';
+  }
+
+  String _formatGender(String gender) {
+    if (gender == 'men') return '男';
+    if (gender == 'women') return '女';
+    return gender;
+  }
+
+  String _formatCycleLength() {
+    final cycleLength = _role.menstruationCycle['cycle_length'] ?? 30;
+    return '$cycleLength 天';
+  }
+
+  String _formatPeriodLength() {
+    final periodLength = _role.menstruationCycle['period_length'] ?? 6;
+    return '$periodLength 天';
+  }
+
+  String _formatLastPeriodStartZh() {
+    final raw = _role.menstruationCycle['last_period_start']?.toString();
+    if (raw == null || raw.isEmpty) return '未设置';
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) return raw;
+    return '${parsed.year}年${parsed.month}月${parsed.day}日';
   }
 
   void _changeAvatar() async {

@@ -49,6 +49,14 @@ class ChatDetailPage extends StatefulWidget {
 
 class _ChatDetailPageState extends State<ChatDetailPage> {
   final ScrollController _scrollController = ScrollController();
+  static const int _messagePageSize = 50;
+
+  int _visibleMessageCount = _messagePageSize;
+  int _lastTotalMessageCount = 0;
+  bool _isLoadingMoreMessages = false;
+  bool _isUserNearBottom = true;
+  bool _loadMoreConfirmNeeded = false;
+  DateTime? _lastLoadMoreConfirmTime;
   bool _showTyping = false;
   late Role _currentRole;
 
@@ -62,6 +70,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   @override
   void initState() {
     super.initState();
+
+    _scrollController.addListener(_onScroll);
 
     _currentRole =
         RoleService.getRoleById(widget.chatId) ?? RoleService.getCurrentRole();
@@ -95,6 +105,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
     SettingsService.instance.removeListener(_onSettingsChanged);
     ChatController.instance.unregisterTypingCallback(widget.chatId);
     ChatController.instance.onChatPageExit(widget.chatId);
@@ -231,6 +242,86 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     await MessageStore.instance.deleteMessage(widget.chatId, message.id);
   }
 
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+
+    final position = _scrollController.position;
+    final distanceToBottom = position.maxScrollExtent - position.pixels;
+    _isUserNearBottom = distanceToBottom < 120;
+
+    if (position.pixels > 120 && _loadMoreConfirmNeeded) {
+      setState(() {
+        _loadMoreConfirmNeeded = false;
+        _lastLoadMoreConfirmTime = null;
+      });
+    }
+
+    if (position.pixels <= 60) {
+      if (!_loadMoreConfirmNeeded) {
+        setState(() {
+          _loadMoreConfirmNeeded = true;
+          _lastLoadMoreConfirmTime = DateTime.now();
+        });
+        return;
+      }
+
+      final confirmAt = _lastLoadMoreConfirmTime;
+      if (confirmAt != null &&
+          DateTime.now().difference(confirmAt) <
+              const Duration(milliseconds: 350)) {
+        return;
+      }
+
+      _loadMoreMessages();
+    }
+  }
+
+  void _loadMoreMessages() {
+    if (_isLoadingMoreMessages || !_scrollController.hasClients) return;
+
+    final totalMessageCount = MessageStore.instance.getMessageCount(
+      widget.chatId,
+    );
+    if (_visibleMessageCount >= totalMessageCount) return;
+
+    final oldMaxScrollExtent = _scrollController.position.maxScrollExtent;
+    final oldPixels = _scrollController.position.pixels;
+
+    setState(() {
+      _isLoadingMoreMessages = true;
+      _loadMoreConfirmNeeded = false;
+      _lastLoadMoreConfirmTime = null;
+      _visibleMessageCount += _messagePageSize;
+      if (_visibleMessageCount > totalMessageCount) {
+        _visibleMessageCount = totalMessageCount;
+      }
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        final newMaxScrollExtent = _scrollController.position.maxScrollExtent;
+        final delta = newMaxScrollExtent - oldMaxScrollExtent;
+        _scrollController.jumpTo(oldPixels + delta);
+      }
+      if (mounted) {
+        setState(() => _isLoadingMoreMessages = false);
+      }
+    });
+  }
+
+  void _handleAutoScroll(int totalMessagesCount) {
+    final hasNewMessages = totalMessagesCount > _lastTotalMessageCount;
+    _lastTotalMessageCount = totalMessagesCount;
+
+    if (!hasNewMessages || _isMultiSelectMode || !_isUserNearBottom) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _scrollToBottom();
+      }
+    });
+  }
+
   void _scrollToBottom({bool animate = true}) {
     if (_scrollController.hasClients) {
       final position = _scrollController.position.maxScrollExtent;
@@ -323,8 +414,30 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                 stream: MessageStore.instance.watchMessages(widget.chatId),
                 builder: (context, snapshot) {
                   final messages = snapshot.data ?? [];
+                  final totalMessagesCount = messages.length;
+                  final currentVisibleCount =
+                      totalMessagesCount < _visibleMessageCount
+                      ? totalMessagesCount
+                      : _visibleMessageCount;
+                  final visibleStart = totalMessagesCount - currentVisibleCount;
+                  final visibleMessages = messages.sublist(visibleStart);
+                  final hasMoreMessages =
+                      totalMessagesCount > currentVisibleCount;
+                  final remainingMessageCount =
+                      totalMessagesCount - currentVisibleCount;
 
-                  if (messages.isEmpty) {
+                  if (!hasMoreMessages && _loadMoreConfirmNeeded) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted) {
+                        setState(() {
+                          _loadMoreConfirmNeeded = false;
+                          _lastLoadMoreConfirmTime = null;
+                        });
+                      }
+                    });
+                  }
+
+                  if (visibleMessages.isEmpty) {
                     return const Center(
                       child: Text(
                         '暂无消息',
@@ -336,17 +449,39 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                     );
                   }
 
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (!_isMultiSelectMode) _scrollToBottom();
-                  });
+                  _handleAutoScroll(totalMessagesCount);
 
                   return ListView.builder(
                     controller: _scrollController,
                     padding: const EdgeInsets.symmetric(vertical: 10),
-                    itemCount: messages.length,
+                    itemCount:
+                        visibleMessages.length + (hasMoreMessages ? 1 : 0),
                     itemBuilder: (context, index) {
-                      final message = messages[index];
-                      final showTime = _shouldShowTime(messages, index);
+                      if (hasMoreMessages && index == 0) {
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6, bottom: 10),
+                          child: Center(
+                            child: Text(
+                              _isLoadingMoreMessages
+                                  ? '正在加载更多消息...'
+                                  : _loadMoreConfirmNeeded
+                                  ? '继续上划，加载更早的 $remainingMessageCount 条消息'
+                                  : '上划查看更早消息（$remainingMessageCount 条）',
+                              style: const TextStyle(
+                                color: Color(0xFF999999),
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        );
+                      }
+
+                      final adjustedIndex = hasMoreMessages ? index - 1 : index;
+                      final message = visibleMessages[adjustedIndex];
+                      final showTime = _shouldShowTime(
+                        visibleMessages,
+                        adjustedIndex,
+                      );
 
                       return Column(
                         children: [

@@ -221,11 +221,10 @@ class MomentsScheduler {
 
   /// 执行评论
   Future<void> _performComment(Role role, MomentPost post) async {
-    final prompt = _buildCommentPrompt(role, post);
-
     final response = await ApiService.callBackendAI(
       roleId: role.id,
-      eventType: 'comment'
+      eventType: 'comment',
+      context: {'post_content': post.content, 'post_author': post.authorName},
     );
 
     if (!response.success || response.content == null) {
@@ -304,8 +303,19 @@ class MomentsScheduler {
 
       // 生成回复
       final userComment = userComments.last;
-      final prompt =
-          '''用户在你发的朋友圈下评论了：「${userComment.content}」
+      final response = await ApiService.callBackendAI(
+        roleId: role.id,
+        eventType: 'comment',
+        context: {
+          'post_content': post.content,
+          'post_author': post.authorName,
+          'reply_to': userComment.content,
+        },
+      );
+
+      if (!response.success || response.content == null) {
+        final prompt =
+            '''用户在你发的朋友圈下评论了：「${userComment.content}」
 
 你的朋友圈内容是：「${post.content}」
 
@@ -315,12 +325,31 @@ class MomentsScheduler {
 - 可以用表情或简单语气词
 - 直接输出回复内容，不要任何解释''';
 
-      final response = await ApiService.sendChatMessageWithRole(
-        message: prompt,
-        role: role,
-      );
+        final fallback = await ApiService.sendChatMessageWithRoleDirect(
+          message: prompt,
+          role: role,
+        );
+        if (!fallback.success || fallback.content == null) continue;
 
-      if (!response.success || response.content == null) continue;
+        String reply = fallback.content!.trim();
+        if (reply.startsWith('\"') && reply.endsWith('\"')) {
+          reply = reply.substring(1, reply.length - 1);
+        }
+
+        await MomentsService.instance.addComment(
+          post.id,
+          authorId: role.id,
+          authorName: role.name,
+          content: reply,
+          replyToId: 'me',
+          replyToName: userComment.authorName,
+        );
+
+        debugPrint(
+          'MomentsScheduler: ${role.name} replied to user comment: $reply',
+        );
+        break;
+      }
 
       String reply = response.content!.trim();
       if (reply.startsWith('\"') && reply.endsWith('\"')) {

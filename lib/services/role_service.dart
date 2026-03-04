@@ -201,7 +201,23 @@ class RoleService {
               description: json['description'] ?? '',
               systemPrompt: json['system_prompt'] ?? '',
               avatarUrl: json['avatar_url'] ?? '',
-              temperature: (json['personality']?['openness'] ?? 50) / 100.0,
+              aiModel: json['ai_model'] ?? 'deepseek-chat',
+              aiApiUrl: json['ai_api_url'] ?? '',
+              aiApiKey: json['ai_api_key'] ?? '',
+              aiTemperature:
+                  (json['ai_temperature'] as num?)?.toDouble() ?? 0.7,
+              gender: json['gender'] ?? 'men',
+              menstruationCycle:
+                  (json['menstruation_cycle'] as Map<String, dynamic>?) ??
+                  const {
+                    'cycle_length': 30,
+                    'period_length': 6,
+                    'last_period_start': '2026-01-24',
+                  },
+              temperature:
+                  (json['temperature'] as num?)?.toDouble() ??
+                  (json['ai_temperature'] as num?)?.toDouble() ??
+                  0.7,
               topP: 1.0,
               frequencyPenalty: 0.0,
               presencePenalty: 0.0,
@@ -223,6 +239,13 @@ class RoleService {
                 systemPrompt: backendRole.systemPrompt,
                 avatarUrl: backendRole.avatarUrl,
                 coreMemory: backendRole.coreMemory,
+                aiModel: backendRole.aiModel,
+                aiApiUrl: backendRole.aiApiUrl,
+                aiApiKey: backendRole.aiApiKey,
+                aiTemperature: backendRole.aiTemperature,
+                gender: backendRole.gender,
+                menstruationCycle: backendRole.menstruationCycle,
+                temperature: backendRole.temperature,
               );
             } else {
               _roles.add(backendRole);
@@ -255,6 +278,13 @@ class RoleService {
             'avatar_url': role.avatarUrl,
             'persona': role.description,
             'core_memory': role.coreMemory,
+            'ai_model': role.aiModel,
+            'ai_api_url': role.aiApiUrl,
+            'ai_api_key': role.aiApiKey,
+            'ai_temperature': role.aiTemperature,
+            'gender': role.gender,
+            'menstruation_cycle': role.menstruationCycle,
+            'temperature': role.temperature,
           });
       return response.isSuccess;
     } catch (e) {

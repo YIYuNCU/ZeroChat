@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'settings_service.dart';
+import 'secure_backend_client.dart';
 
 /// 意图类型枚举
 enum IntentType {
@@ -63,13 +65,25 @@ class IntentService {
   /// 识别用户意图（仅使用 AI 分类，不使用关键词规则）
   static Future<IntentResult> detectIntent(String message) async {
     // 仅当启用 AI 意图识别时才调用
-    if (useAiIntent && _intentApiKey.isNotEmpty) {
+    if (useAiIntent) {
       try {
-        final aiResult = await _detectByAI(message);
-        debugPrint('Intent detected by AI: ${aiResult.type}');
-        return aiResult;
+        final backendResult = await _detectByBackend(message);
+        if (backendResult != null) {
+          debugPrint('Intent detected by backend AI: ${backendResult.type}');
+          return backendResult;
+        }
       } catch (e) {
-        debugPrint('AI intent detection failed: $e');
+        debugPrint('Backend intent detection failed: $e');
+      }
+
+      if (_intentApiKey.isNotEmpty) {
+        try {
+          final aiResult = await _detectByAI(message);
+          debugPrint('Intent detected by direct AI fallback: ${aiResult.type}');
+          return aiResult;
+        } catch (e) {
+          debugPrint('Direct AI intent detection failed: $e');
+        }
       }
     }
 
@@ -112,6 +126,31 @@ class IntentService {
   }
 
   /// AI 意图分类
+  static Future<IntentResult?> _detectByBackend(String message) async {
+    final backendUrl = SettingsService.instance.backendUrl;
+    if (backendUrl.isEmpty) return null;
+
+    final response =
+        await SecureBackendClient.post('$backendUrl/api/ai/intent', {
+          'message': message,
+          'api_url': _intentApiUrl,
+          'api_key': _intentApiKey,
+          'model': _intentModel,
+        });
+
+    if (response.statusCode != 200 || response.data is! Map<String, dynamic>) {
+      return null;
+    }
+
+    final data = response.data as Map<String, dynamic>;
+    if (data['success'] != true) {
+      return null;
+    }
+
+    return _parseIntentMap(data);
+  }
+
+  /// AI 意图分类（前端直连回退）
   static Future<IntentResult> _detectByAI(String message) async {
     const systemPrompt = '''
 你是一个意图分类器。根据用户输入，返回一个 JSON 对象，格式如下：
@@ -166,6 +205,43 @@ class IntentService {
     return IntentResult(type: IntentType.normalChat);
   }
 
+  static IntentResult _parseIntentMap(Map<String, dynamic> json) {
+    final intentStr = json['intent'] as String? ?? 'normal_chat';
+
+    IntentType type;
+    switch (intentStr) {
+      case 'set_memory':
+        type = IntentType.setMemory;
+        break;
+      case 'set_reminder':
+        type = IntentType.setReminder;
+        break;
+      case 'set_quiet_time':
+        type = IntentType.setQuietTime;
+        break;
+      case 'clear_memory':
+        type = IntentType.clearMemory;
+        break;
+      default:
+        type = IntentType.normalChat;
+    }
+
+    Duration? duration;
+    final durationSeconds = json['duration_seconds'] as int?;
+    if (durationSeconds != null) {
+      duration = Duration(seconds: durationSeconds);
+    }
+
+    return IntentResult(
+      type: type,
+      extractedContent: json['extracted_content'] as String?,
+      duration: duration,
+      startHour: json['start_hour'] as int?,
+      endHour: json['end_hour'] as int?,
+      confidence: (json['confidence'] as num?)?.toDouble() ?? 0.8,
+    );
+  }
+
   /// 解析 AI 响应
   static IntentResult _parseAIResponse(String content) {
     try {
@@ -174,40 +250,7 @@ class IntentService {
       if (jsonMatch == null) return IntentResult(type: IntentType.normalChat);
 
       final json = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
-      final intentStr = json['intent'] as String? ?? 'normal_chat';
-
-      IntentType type;
-      switch (intentStr) {
-        case 'set_memory':
-          type = IntentType.setMemory;
-          break;
-        case 'set_reminder':
-          type = IntentType.setReminder;
-          break;
-        case 'set_quiet_time':
-          type = IntentType.setQuietTime;
-          break;
-        case 'clear_memory':
-          type = IntentType.clearMemory;
-          break;
-        default:
-          type = IntentType.normalChat;
-      }
-
-      Duration? duration;
-      final durationSeconds = json['duration_seconds'] as int?;
-      if (durationSeconds != null) {
-        duration = Duration(seconds: durationSeconds);
-      }
-
-      return IntentResult(
-        type: type,
-        extractedContent: json['extracted_content'] as String?,
-        duration: duration,
-        startHour: json['start_hour'] as int?,
-        endHour: json['end_hour'] as int?,
-        confidence: (json['confidence'] as num?)?.toDouble() ?? 0.8,
-      );
+      return _parseIntentMap(json);
     } catch (e) {
       debugPrint('Error parsing AI intent response: $e');
       return IntentResult(type: IntentType.normalChat);

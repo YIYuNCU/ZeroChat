@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/role.dart';
 
 /// 角色参数设置页面
@@ -16,6 +17,14 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _nameController;
   late TextEditingController _descController;
   late TextEditingController _promptController;
+  late TextEditingController _aiModelController;
+  late TextEditingController _aiApiUrlController;
+  late TextEditingController _aiApiKeyController;
+  late TextEditingController _aiTemperatureController;
+  late TextEditingController _cycleLengthController;
+  late TextEditingController _periodLengthController;
+  late TextEditingController _lastPeriodStartController;
+  late String _gender;
   late double _temperature;
   late double _topP;
   late double _frequencyPenalty;
@@ -29,6 +38,24 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _nameController = TextEditingController(text: widget.role.name);
     _descController = TextEditingController(text: widget.role.description);
     _promptController = TextEditingController(text: widget.role.systemPrompt);
+    _aiModelController = TextEditingController(text: widget.role.aiModel);
+    _aiApiUrlController = TextEditingController(text: widget.role.aiApiUrl);
+    _aiApiKeyController = TextEditingController(text: widget.role.aiApiKey);
+    _aiTemperatureController = TextEditingController(
+      text: widget.role.aiTemperature.toStringAsFixed(1),
+    );
+    _cycleLengthController = TextEditingController(
+      text: '${widget.role.menstruationCycle['cycle_length'] ?? 30}',
+    );
+    _periodLengthController = TextEditingController(
+      text: '${widget.role.menstruationCycle['period_length'] ?? 6}',
+    );
+    _lastPeriodStartController = TextEditingController(
+      text:
+          widget.role.menstruationCycle['last_period_start']?.toString() ??
+          '${DateTime.now().year}-${DateTime.now().month.toString().padLeft(2, '0')}-${DateTime.now().day.toString().padLeft(2, '0')}',
+    );
+    _gender = widget.role.gender;
     _temperature = widget.role.temperature;
     _topP = widget.role.topP;
     _frequencyPenalty = widget.role.frequencyPenalty;
@@ -42,6 +69,13 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _nameController.dispose();
     _descController.dispose();
     _promptController.dispose();
+    _aiModelController.dispose();
+    _aiApiUrlController.dispose();
+    _aiApiKeyController.dispose();
+    _aiTemperatureController.dispose();
+    _cycleLengthController.dispose();
+    _periodLengthController.dispose();
+    _lastPeriodStartController.dispose();
     super.dispose();
   }
 
@@ -107,6 +141,90 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                   ),
                 ),
               ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 后端角色配置
+          _buildSection(
+            title: '后端角色配置',
+            children: [
+              _buildTextField(label: 'AI模型', controller: _aiModelController),
+              const Divider(height: 1, indent: 16),
+              _buildTextField(label: 'API地址', controller: _aiApiUrlController),
+              const Divider(height: 1, indent: 16),
+              _buildTextField(
+                label: '密钥',
+                controller: _aiApiKeyController,
+                obscureText: true,
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildTextField(
+                label: '温度',
+                controller: _aiTemperatureController,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+                ],
+              ),
+              const Divider(height: 1, indent: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 80,
+                      child: Text('性别', style: TextStyle(fontSize: 16)),
+                    ),
+                    Expanded(
+                      child: DropdownButton<String>(
+                        value: _gender,
+                        isExpanded: true,
+                        underline: const SizedBox.shrink(),
+                        items: const [
+                          DropdownMenuItem(value: 'men', child: Text('men')),
+                          DropdownMenuItem(
+                            value: 'women',
+                            child: Text('women'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            setState(() => _gender = value);
+                          }
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (_gender != 'men') ...[
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '周期长度',
+                  controller: _cycleLengthController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '月经时长',
+                  controller: _periodLengthController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '上次月经时间',
+                  controller: _lastPeriodStartController,
+                ),
+              ],
             ],
           ),
 
@@ -297,6 +415,11 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     required String label,
     required TextEditingController controller,
     String? hintText,
+    bool obscureText = false,
+    bool readOnly = false,
+    VoidCallback? onTap,
+    TextInputType? keyboardType,
+    List<TextInputFormatter>? inputFormatters,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -309,6 +432,11 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           Expanded(
             child: TextField(
               controller: controller,
+              obscureText: obscureText,
+              readOnly: readOnly,
+              onTap: onTap,
+              keyboardType: keyboardType,
+              inputFormatters: inputFormatters,
               decoration: InputDecoration(
                 hintText: hintText,
                 border: InputBorder.none,
@@ -377,10 +505,44 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   }
 
   void _saveRole() {
+    var parsedAiTemperature =
+        double.tryParse(_aiTemperatureController.text.trim()) ??
+        widget.role.aiTemperature;
+    if (parsedAiTemperature < 0) parsedAiTemperature = 0;
+    if (parsedAiTemperature > 2.0) parsedAiTemperature = 2.0;
+    parsedAiTemperature = (parsedAiTemperature * 10).round() / 10;
+
+    var parsedCycleLength =
+        int.tryParse(_cycleLengthController.text.trim()) ??
+        (widget.role.menstruationCycle['cycle_length'] as int? ?? 30);
+    if (parsedCycleLength < 20) parsedCycleLength = 20;
+    if (parsedCycleLength > 40) parsedCycleLength = 40;
+
+    var parsedPeriodLength =
+        int.tryParse(_periodLengthController.text.trim()) ??
+        (widget.role.menstruationCycle['period_length'] as int? ?? 6);
+    if (parsedPeriodLength < 3) parsedPeriodLength = 3;
+    if (parsedPeriodLength > 6) parsedPeriodLength = 6;
+
+    final parsedLastPeriodStart = _lastPeriodStartController.text.trim().isEmpty
+        ? (widget.role.menstruationCycle['last_period_start']?.toString() ??
+              '${DateTime.now().year}-${DateTime.now().month.toString().padLeft(2, '0')}-${DateTime.now().day.toString().padLeft(2, '0')}')
+        : _lastPeriodStartController.text.trim();
+
     final updatedRole = widget.role.copyWith(
       name: _nameController.text,
       description: _descController.text,
       systemPrompt: _promptController.text,
+      aiModel: _aiModelController.text.trim(),
+      aiApiUrl: _aiApiUrlController.text.trim(),
+      aiApiKey: _aiApiKeyController.text.trim(),
+      aiTemperature: parsedAiTemperature,
+      gender: _gender,
+      menstruationCycle: {
+        'cycle_length': parsedCycleLength,
+        'period_length': parsedPeriodLength,
+        'last_period_start': parsedLastPeriodStart,
+      },
       temperature: _temperature,
       topP: _topP,
       frequencyPenalty: _frequencyPenalty,

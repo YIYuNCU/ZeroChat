@@ -98,34 +98,6 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           const SizedBox(height: 10),
 
-          // 核心记忆总结轮数
-          _buildSection([
-            _buildItem(
-              title: '核心记忆总结轮数',
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '${_currentRole.summaryEveryNRounds} 轮',
-                    style: const TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _editMemoryRounds,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
           // 核心记忆
           _buildSection([
             _buildItem(
@@ -1293,6 +1265,12 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       description: updated.description,
       systemPrompt: updated.systemPrompt,
       avatarUrl: updated.avatarUrl,
+      aiModel: updated.aiModel,
+      aiApiUrl: updated.aiApiUrl,
+      aiApiKey: updated.aiApiKey,
+      aiTemperature: updated.aiTemperature,
+      gender: updated.gender,
+      menstruationCycle: updated.menstruationCycle,
       temperature: updated.temperature,
       topP: updated.topP,
       frequencyPenalty: updated.frequencyPenalty,

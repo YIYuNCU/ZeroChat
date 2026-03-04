@@ -160,6 +160,16 @@ chmod +x start.sh && ./start.sh
 | 模型 | `deepseek-chat` | 模型名称 |
 | 后端地址 | `http://你的服务器IP:8000` | ZeroChat 后端地址 |
 
+#### 🔐 传输安全（固定 Token + 内容加密）
+
+- 后端 `/api/*` 现已默认开启固定 Token 鉴权，请求头需携带 `X-Auth-Token`。
+- Flutter 客户端已内置安全请求封装，会自动附带 Token，并对 JSON 请求/响应进行加密传输。
+- 默认固定值如下（前后端需一致）：
+  - `auth_token = ZEROCHAT_FIXED_TOKEN_2026`
+  - `encryption_secret = ZEROCHAT_TRANSFER_SECRET_2026`
+- 后端可在 `server/config/settings.json` 中修改 `auth_token` 与 `encryption_secret`。
+- 文件上传/下载（如头像资源）走二进制流，不走 JSON 加密，但仍受 Token 鉴权保护。
+
 ---
 
 ### 🌐 没有云服务器？

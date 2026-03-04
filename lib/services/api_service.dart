@@ -76,6 +76,38 @@ class ApiService {
     List<Map<String, String>>? history,
     List<String>? coreMemory,
     bool isGroup = false,
+    bool preferBackend = true,
+  }) async {
+    if (preferBackend && role.id != 'temp' && _backendUrl.isNotEmpty) {
+      final backendResponse = await sendChatViaBackend(
+        roleId: role.id,
+        message: message,
+      );
+      if (backendResponse.success && backendResponse.content != null) {
+        debugPrint('ApiService: sendChatMessageWithRole via backend');
+        return backendResponse;
+      }
+      debugPrint(
+        'ApiService: backend-first failed, fallback to direct API: ${backendResponse.error}',
+      );
+    }
+
+    return sendChatMessageWithRoleDirect(
+      message: message,
+      role: role,
+      history: history,
+      coreMemory: coreMemory,
+      isGroup: isGroup,
+    );
+  }
+
+  /// 直连 AI 接口（用于后端不可用时显式回退）
+  static Future<ApiResponse> sendChatMessageWithRoleDirect({
+    required String message,
+    required Role role,
+    List<Map<String, String>>? history,
+    List<String>? coreMemory,
+    bool isGroup = false,
   }) async {
     // 检查 API Key
     final apiKey = _effectiveKey;
@@ -258,8 +290,14 @@ class ApiService {
   static Future<ApiResponse> sendChatViaBackend({
     required String roleId,
     required String message,
+    Map<String, dynamic>? context,
   }) async {
-    return callBackendAI(roleId: roleId, eventType: 'chat', content: message);
+    return callBackendAI(
+      roleId: roleId,
+      eventType: 'chat',
+      content: message,
+      context: context,
+    );
   }
 
   /// 检查后端是否可用

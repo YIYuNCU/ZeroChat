@@ -11,6 +11,13 @@ class Role {
   final String systemPrompt;
   final String? avatarUrl;
 
+  final String aiModel;
+  final String aiApiUrl;
+  final String aiApiKey;
+  final double aiTemperature;
+  final String gender;
+  final Map<String, dynamic> menstruationCycle;
+
   // AI 参数
   final double temperature;
   final double topP;
@@ -43,6 +50,12 @@ class Role {
     this.description = '',
     required this.systemPrompt,
     this.avatarUrl,
+    this.aiModel = 'deepseek-chat',
+    this.aiApiUrl = '',
+    this.aiApiKey = '',
+    this.aiTemperature = 0.7,
+    this.gender = 'men',
+    Map<String, dynamic>? menstruationCycle,
     this.temperature = 0.7,
     this.topP = 1.0,
     this.frequencyPenalty = 0.0,
@@ -57,6 +70,13 @@ class Role {
     DateTime? createdAt,
     DateTime? updatedAt,
   }) : coreMemory = coreMemory ?? [],
+       menstruationCycle =
+           menstruationCycle ??
+           const {
+             'cycle_length': 30,
+             'period_length': 6,
+             'last_period_start': '2026-01-24',
+           },
        proactiveConfig = proactiveConfig ?? const ProactiveConfig(),
        stickerConfig = stickerConfig ?? const StickerConfig(),
        createdAt = createdAt ?? DateTime.now(),
@@ -69,6 +89,7 @@ class Role {
       name: 'AI 助手',
       description: '默认的 AI 助手角色',
       systemPrompt: '你是一个友好、有帮助的 AI 助手。请用中文回答问题。',
+      gender: 'men',
     );
   }
 
@@ -79,6 +100,12 @@ class Role {
     String? description,
     String? systemPrompt,
     String? avatarUrl,
+    String? aiModel,
+    String? aiApiUrl,
+    String? aiApiKey,
+    double? aiTemperature,
+    String? gender,
+    Map<String, dynamic>? menstruationCycle,
     double? temperature,
     double? topP,
     double? frequencyPenalty,
@@ -98,6 +125,12 @@ class Role {
       description: description ?? this.description,
       systemPrompt: systemPrompt ?? this.systemPrompt,
       avatarUrl: avatarUrl ?? this.avatarUrl,
+      aiModel: aiModel ?? this.aiModel,
+      aiApiUrl: aiApiUrl ?? this.aiApiUrl,
+      aiApiKey: aiApiKey ?? this.aiApiKey,
+      aiTemperature: aiTemperature ?? this.aiTemperature,
+      gender: gender ?? this.gender,
+      menstruationCycle: menstruationCycle ?? this.menstruationCycle,
       temperature: temperature ?? this.temperature,
       topP: topP ?? this.topP,
       frequencyPenalty: frequencyPenalty ?? this.frequencyPenalty,
@@ -154,7 +187,25 @@ class Role {
       description: json['description'] as String? ?? '',
       systemPrompt: json['system_prompt'] as String,
       avatarUrl: json['avatar_url'] as String?,
-      temperature: (json['temperature'] as num?)?.toDouble() ?? 0.7,
+      aiModel: json['ai_model'] as String? ?? 'deepseek-chat',
+      aiApiUrl: json['ai_api_url'] as String? ?? '',
+      aiApiKey: json['ai_api_key'] as String? ?? '',
+      aiTemperature:
+          (json['ai_temperature'] as num?)?.toDouble() ??
+          (json['temperature'] as num?)?.toDouble() ??
+          0.7,
+      gender: json['gender'] as String? ?? 'men',
+      menstruationCycle:
+          (json['menstruation_cycle'] as Map<String, dynamic>?) ??
+          const {
+            'cycle_length': 30,
+            'period_length': 6,
+            'last_period_start': '2026-01-24',
+          },
+      temperature:
+          (json['temperature'] as num?)?.toDouble() ??
+          (json['ai_temperature'] as num?)?.toDouble() ??
+          0.7,
       topP: (json['top_p'] as num?)?.toDouble() ?? 1.0,
       frequencyPenalty: (json['frequency_penalty'] as num?)?.toDouble() ?? 0.0,
       presencePenalty: (json['presence_penalty'] as num?)?.toDouble() ?? 0.0,
@@ -189,6 +240,12 @@ class Role {
       'description': description,
       'system_prompt': systemPrompt,
       'avatar_url': avatarUrl,
+      'ai_model': aiModel,
+      'ai_api_url': aiApiUrl,
+      'ai_api_key': aiApiKey,
+      'ai_temperature': aiTemperature,
+      'gender': gender,
+      'menstruation_cycle': menstruationCycle,
       'temperature': temperature,
       'top_p': topP,
       'frequency_penalty': frequencyPenalty,

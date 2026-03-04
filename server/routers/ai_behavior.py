@@ -41,6 +41,24 @@ class AIResponse(BaseModel):
     error: Optional[str] = None
     metadata: Optional[Dict] = {}
 
+
+class IntentDetectRequest(BaseModel):
+    message: str
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+
+
+class IntentDetectResponse(BaseModel):
+    success: bool
+    intent: str = "normal_chat"
+    extracted_content: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    start_hour: Optional[int] = None
+    end_hour: Optional[int] = None
+    confidence: float = 0.8
+    error: Optional[str] = None
+
 # ========== 辅助函数 ==========
 
 def load_role(role_id: str) -> Optional[Dict]:
@@ -49,6 +67,36 @@ def load_role(role_id: str) -> Optional[Dict]:
         with open(profile_file, "r", encoding="utf-8") as f:
             return json.load(f)
     return None
+
+
+def _normalize_history_items(raw_history: Any) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    if not isinstance(raw_history, list):
+        return normalized
+
+    for item in raw_history:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user")
+        content = str(item.get("content") or "")
+        if not content:
+            continue
+        normalized.append({"role": role, "content": content})
+
+    return normalized
+
+
+def _normalize_core_memory(raw_core_memory: Any) -> List[str]:
+    if not isinstance(raw_core_memory, list):
+        return []
+    result: List[str] = []
+    for item in raw_core_memory:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
 
 async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) -> Optional[str]:
     """
@@ -142,6 +190,87 @@ async def handle_ai_event(event: AIEvent):
     else:
         return AIResponse(success=False, error="未知事件类型")
 
+
+@router.post("/ai/intent", response_model=IntentDetectResponse)
+async def detect_intent(request: IntentDetectRequest):
+    """通过后端代理进行意图识别"""
+    from services.ai_service import call_ai_direct
+    from services import settings_service
+
+    system_prompt = """
+你是一个意图分类器。根据用户输入，返回一个 JSON 对象，格式如下：
+{
+  "intent": "normal_chat" | "set_memory" | "set_reminder" | "set_quiet_time" | "clear_memory",
+  "extracted_content": "提取的关键内容",
+  "duration_seconds": 数字（仅提醒类有效）, 
+  "start_hour": 数字（仅安静时间有效）, 
+  "end_hour": 数字（仅安静时间有效）, 
+  "confidence": 0.0-1.0
+}
+
+意图说明：
+- normal_chat: 普通聊天对话
+- set_memory: 用户希望你记住某些信息，如"记住我喜欢猫"
+- set_reminder: 用户希望设置提醒，如"10分钟后提醒我喝水"
+- set_quiet_time: 用户希望设置免打扰时间，如"晚上11点到早上7点不要打扰我"
+- clear_memory: 用户希望清除之前的记忆
+
+只返回 JSON，不要其他内容。
+""".strip()
+
+    try:
+      local_message = (request.message or "").strip()
+      if not local_message:
+          return IntentDetectResponse(success=False, error="message is empty")
+
+      ai_config = settings_service.get_ai_config()
+      api_url = request.api_url or ai_config.get("api_url")
+      api_key = request.api_key or ai_config.get("api_key")
+      model = request.model or ai_config.get("model") or "gpt-3.5-turbo"
+
+      if not api_url or not api_key:
+          return IntentDetectResponse(success=False, error="AI API 未配置")
+
+      result = await call_ai_direct(
+          messages=[
+              {"role": "system", "content": system_prompt},
+              {"role": "user", "content": local_message},
+          ],
+          api_url=api_url,
+          api_key=api_key,
+          model=model,
+          temperature=0.1,
+          max_tokens=200,
+      )
+
+      if not result.get("success"):
+          return IntentDetectResponse(
+              success=False,
+              error=result.get("error") or "intent classify failed",
+          )
+
+      content = (result.get("content") or "").strip()
+      if not content:
+          return IntentDetectResponse(success=False, error="empty ai response")
+
+      start = content.find("{")
+      end = content.rfind("}")
+      if start == -1 or end == -1 or end <= start:
+          return IntentDetectResponse(success=False, error="invalid ai response")
+
+      parsed = json.loads(content[start : end + 1])
+      return IntentDetectResponse(
+          success=True,
+          intent=str(parsed.get("intent") or "normal_chat"),
+          extracted_content=parsed.get("extracted_content"),
+          duration_seconds=parsed.get("duration_seconds"),
+          start_hour=parsed.get("start_hour"),
+          end_hour=parsed.get("end_hour"),
+          confidence=float(parsed.get("confidence") or 0.8),
+      )
+    except Exception as exc:
+      return IntentDetectResponse(success=False, error=str(exc))
+
 # ========== 聊天处理 ==========
 
 async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
@@ -156,9 +285,17 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     
     role_id = event.role_id
     user_message = event.content or ""
-    # 获取上下文
-    history = await get_context_messages(role_id, limit=_get_memory_length())  # 获取更多历史消息，让 AI 有更完整的上下文
-    memory_context = get_memory_context_string(role_id)
+    event_context = event.context or {}
+
+    # 获取上下文：优先使用后端记忆与历史，前端传入仅作兜底
+    backend_history = await get_context_messages(role_id, limit=_get_memory_length())
+    client_history = _normalize_history_items(event_context.get("history"))
+    history = backend_history if backend_history else client_history
+
+    backend_memory_context = (get_memory_context_string(role_id) or "").strip()
+    client_core_memory = _normalize_core_memory(event_context.get("core_memory"))
+    client_memory_context = "\n".join(client_core_memory).strip()
+    memory_context = backend_memory_context if backend_memory_context else client_memory_context
     
     # 联网搜索（如果角色开启了搜索功能）
     search_context = ""
@@ -179,6 +316,9 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     extra_parts = []
     if memory_context:
         extra_parts.append(memory_context)
+    frontend_moments_context = event_context.get("moments_context")
+    if isinstance(frontend_moments_context, str) and frontend_moments_context.strip():
+        extra_parts.append(frontend_moments_context.strip())
     if search_context:
         extra_parts.append(search_context)
     in_menstruation, menstruation_day = _if_in_menstruation(role_id)
@@ -196,6 +336,8 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         print(f"生理期检测：角色 {role.get('name')} 当前不需要进行生理期检测")
     # 外挂 JSON 记录
     attached_json = role.get("attached_json_content", "")
+    if not attached_json:
+        attached_json = str(event_context.get("attached_json") or "").strip()
     if attached_json:
         extra_parts.append(f"[外挂记录]\n{attached_json}")
     
@@ -292,7 +434,10 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
     task_prompt = event.content or ""
     task_context = event.context or {}
     
-    memory_context = get_memory_context_string(role_id)
+    backend_memory_context = (get_memory_context_string(role_id) or "").strip()
+    client_core_memory = _normalize_core_memory(task_context.get("core_memory"))
+    client_memory_context = "\n".join(client_core_memory).strip()
+    memory_context = backend_memory_context if backend_memory_context else client_memory_context
     
     result = await generate_with_role(
         role_data=role,
