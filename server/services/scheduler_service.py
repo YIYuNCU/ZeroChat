@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 TASKS_DIR = DATA_DIR / "tasks"
+TOOL_ROLE_PREFIX = "1000000000"
+
+
+def _is_tool_role_id(role_id: str) -> bool:
+    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
 
 # 全局调度器实例
 _scheduler: Optional[AsyncIOScheduler] = None
@@ -66,6 +71,9 @@ def _init_proactive_jobs():
 
 def schedule_proactive_for_role(role_id: str):
     """为角色调度主动消息"""
+    if _is_tool_role_id(role_id):
+        return
+
     scheduler = get_scheduler()
     job_id = f"proactive_{role_id}"
     

@@ -10,6 +10,11 @@ import 'secure_backend_client.dart';
 class RoleService {
   static final List<Role> _roles = [];
   static String _currentRoleId = 'default';
+  static const String _toolRolePrefix = '1000000000';
+
+  static bool isToolRoleId(String? roleId) {
+    return (roleId ?? '').startsWith(_toolRolePrefix);
+  }
 
   /// 初始化角色服务
   static Future<void> init() async {
@@ -33,6 +38,9 @@ class RoleService {
     }
     _currentRoleId =
         StorageService.getString(StorageService.keyCurrentRoleId) ?? 'default';
+    if (!_roles.any((r) => r.id == _currentRoleId)) {
+      _currentRoleId = _roles.isNotEmpty ? _roles.first.id : 'default';
+    }
   }
 
   /// 保存角色列表

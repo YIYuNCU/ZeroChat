@@ -17,6 +17,11 @@ router = APIRouter()
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
+TOOL_ROLE_PREFIX = "1000000000"
+
+
+def _is_tool_role_id(role_id: str) -> bool:
+    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
 
 # ========== 数据模型 ==========
 
@@ -205,6 +210,8 @@ async def handle_ai_event(event: AIEvent):
     role = load_role(event.role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
+    if _is_tool_role_id(event.role_id):
+        return AIResponse(success=False, action="ignore", error="工具角色不处理对话/朋友圈事件")
     # 根据事件类型分发
     if event.event_type == AIEventType.CHAT:
         return await handle_chat(role, event)
@@ -490,6 +497,9 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
 
 async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
     """AI 发布朋友圈"""
+    if _is_tool_role_id(str(event.role_id or role.get("id", ""))):
+        return AIResponse(success=True, action="ignore", content=None)
+
     from services.ai_service import generate_moment_post
     
     mood = event.context.get("mood") if event.context else None

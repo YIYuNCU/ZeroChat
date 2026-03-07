@@ -470,6 +470,103 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
     });
   }
 
+  Future<void> _deleteCategoryByLongPress(String category) async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除分类'),
+        content: Text('长按删除已触发，确定删除分类 "$category" 及其所有表情吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldDelete != true) {
+      return;
+    }
+
+    final ok = _isUserTab
+        ? await EmojiService.instance.deleteUserCategory(category)
+        : (widget.roleId == null
+              ? false
+              : await EmojiService.instance.deleteAiCategory(widget.roleId!, category));
+    if (!ok) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('删除分类失败')),
+      );
+      return;
+    }
+
+    await _loadAll();
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已删除分类: $category')),
+    );
+  }
+
+  Future<void> _deleteEmojiByLongPress(EmojiItem emoji) async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除表情'),
+        content: const Text('长按删除已触发，确定删除该表情吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldDelete != true) {
+      return;
+    }
+
+    final ok = _isUserTab
+        ? await EmojiService.instance.deleteUserEmoji(emoji.id)
+        : (widget.roleId == null
+              ? false
+              : await EmojiService.instance.deleteAiEmoji(
+                  roleId: widget.roleId!,
+                  category: emoji.category,
+                  filename: emoji.filename ?? '',
+                ));
+
+    if (!ok) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('删除表情失败')),
+      );
+      return;
+    }
+
+    if (_selectedCategory != null) {
+      await _changeCategory(_selectedCategory!);
+    }
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('表情已删除')),
+    );
+  }
+
   Future<void> _addCategory() async {
     final controller = TextEditingController();
     final category = await showDialog<String>(
@@ -664,10 +761,13 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
               itemBuilder: (context, index) {
                 final category = _categories[index];
                 final selected = category == _selectedCategory;
-                return ChoiceChip(
-                  label: Text(category),
-                  selected: selected,
-                  onSelected: (_) => _changeCategory(category),
+                return GestureDetector(
+                  onLongPress: () => _deleteCategoryByLongPress(category),
+                  child: ChoiceChip(
+                    label: Text(category),
+                    selected: selected,
+                    onSelected: (_) => _changeCategory(category),
+                  ),
                 );
               },
               separatorBuilder: (_, _) => const SizedBox(width: 6),
@@ -747,6 +847,7 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
               ),
             );
           },
+          onLongPress: () => _deleteEmojiByLongPress(emoji),
           child: Container(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(8),

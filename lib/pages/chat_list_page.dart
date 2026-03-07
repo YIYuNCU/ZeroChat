@@ -49,6 +49,9 @@ class _ChatListPageState extends State<ChatListPage> {
   void _refreshLastMessages() {
     final roles = RoleService.getAllRoles();
     for (final role in roles) {
+      if (RoleService.isToolRoleId(role.id)) {
+        continue;
+      }
       final lastMessage = MessageStore.instance.getLastMessage(role.id);
       if (lastMessage != null) {
         ChatListService.instance.updateChat(
@@ -64,6 +67,11 @@ class _ChatListPageState extends State<ChatListPage> {
     // 从角色列表初始化聊天
     final roles = RoleService.getAllRoles();
     for (final role in roles) {
+      if (RoleService.isToolRoleId(role.id)) {
+        ChatListService.instance.removeFromList(role.id);
+        continue;
+      }
+
       // 初始化聊天上下文
       ChatController.instance.initChat(role.id);
 
@@ -102,7 +110,10 @@ class _ChatListPageState extends State<ChatListPage> {
   /// 获取有效的聊天列表（过滤掉孤立聊天）
   List<ChatInfo> _getValidChatList() {
     final allChats = ChatListService.instance.chatList;
-    final roleIds = RoleService.getAllRoles().map((r) => r.id).toSet();
+    final roleIds = RoleService.getAllRoles()
+        .where((r) => !RoleService.isToolRoleId(r.id))
+        .map((r) => r.id)
+        .toSet();
     final groupIds = GroupChatService.getAllGroups().map((g) => g.id).toSet();
 
     // 只保留角色存在的个人聊天和群聊

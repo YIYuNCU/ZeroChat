@@ -7,12 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
+TOOL_ROLE_PREFIX = "1000000000"
+
+
+def _is_tool_role_id(role_id: str) -> bool:
+    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
 
 class MomentCreate(BaseModel):
     author_id: str
@@ -41,7 +46,7 @@ def save_moments(moments: List[dict]):
 @router.get("/moments")
 async def list_moments(limit: int = 50):
     """获取朋友圈列表"""
-    moments = load_moments()
+    moments = [m for m in load_moments() if not _is_tool_role_id(str(m.get("author_id", "")))]
     # 按时间倒序
     moments.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return {"moments": moments[:limit]}
@@ -49,6 +54,9 @@ async def list_moments(limit: int = 50):
 @router.post("/moments")
 async def create_moment(moment: MomentCreate):
     """发布朋友圈"""
+    if _is_tool_role_id(moment.author_id):
+        raise HTTPException(status_code=403, detail="工具角色禁止发布朋友圈")
+
     moments = load_moments()
     
     new_post = {

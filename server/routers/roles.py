@@ -17,6 +17,11 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 USER_EMOJI_DIR = DATA_DIR / "user_emojis"
 USER_EMOJI_DB = DATA_DIR / "user_emojis.sqlite"
+TOOL_ROLE_PREFIX = "1000000000"
+
+
+def _is_tool_role_id(role_id: str) -> bool:
+    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
 
 
 def _normalize_category_name(name: str) -> str:
@@ -298,8 +303,9 @@ async def create_role(role: RoleCreate, request: Request):
     }
     save_role(role.id, data)
     # Ensure an empty memory database exists for the new role.
-    from services.memory_service import load_memory
-    load_memory(role.id)
+    if not _is_tool_role_id(role.id):
+        from services.memory_service import load_memory
+        load_memory(role.id)
     print(f"[ROLES] Role created: {role.id}")
     return normalize_role_avatar_url(data, request)
 

@@ -10,6 +10,11 @@ from typing import Optional, List, Dict, Any
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
+TOOL_ROLE_PREFIX = "1000000000"
+
+
+def _is_tool_role_id(role_id: str) -> bool:
+    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
 
 def get_memory_db(role_id: str) -> Path:
     role_dir = ROLES_DIR / role_id
@@ -206,6 +211,20 @@ def _get_connection(role_id: str) -> sqlite3.Connection:
 
 def load_memory(role_id: str) -> Dict:
     """加载角色记忆"""
+    if _is_tool_role_id(role_id):
+        db_path = get_memory_db(role_id)
+        json_path = get_memory_json(role_id)
+        if db_path.exists():
+            db_path.unlink()
+        if json_path.exists():
+            json_path.unlink()
+        return {
+            "core_memory": "",
+            "short_term": [],
+            "last_summarized_at": None,
+            "message_count_since_summary": 0,
+        }
+
     with _get_connection(role_id) as conn:
         core_memory = _get_meta(conn, "core_memory", "") or ""
         last_summarized_at = _get_meta(conn, "last_summarized_at")
@@ -238,6 +257,9 @@ def load_memory(role_id: str) -> Dict:
 
 def save_memory(role_id: str, memory: Dict):
     """保存角色记忆"""
+    if _is_tool_role_id(role_id):
+        return
+
     with _get_connection(role_id) as conn:
         core_memory = _normalize_core_memory(memory.get("core_memory", ""))
         _set_meta(conn, "core_memory", core_memory)
@@ -271,6 +293,9 @@ def append_short_term(role_id: str, role: str, content: str, window_size: int = 
         content: 消息内容
         window_size: 滑动窗口大小，默认为100条
     """
+    if _is_tool_role_id(role_id):
+        return
+
     with _get_connection(role_id) as conn:
         total = conn.execute("SELECT COUNT(*) FROM short_term").fetchone()[0]
 
@@ -340,6 +365,8 @@ async def get_context_messages(role_id: str, limit: int = 20) -> List[Dict]:
     """
     if limit <= 0:
         return []
+    if _is_tool_role_id(role_id):
+        return []
 
     need_trigger_summary = False
     block_start = 0
@@ -380,11 +407,15 @@ async def get_context_messages(role_id: str, limit: int = 20) -> List[Dict]:
 
 def get_core_memory(role_id: str) -> str:
     """获取核心记忆"""
+    if _is_tool_role_id(role_id):
+        return ""
     with _get_connection(role_id) as conn:
         return _get_meta(conn, "core_memory", "") or ""
 
 def update_core_memory(role_id: str, core_memory: str):
     """更新核心记忆（由 AI 总结生成）"""
+    if _is_tool_role_id(role_id):
+        return
     core_memory = _normalize_core_memory(core_memory)
     with _get_connection(role_id) as conn:
         _set_meta(conn, "core_memory", core_memory)
@@ -399,6 +430,9 @@ def should_generate_sequential_memory(role_id: str) -> bool:
     条件：
     - 距离上次生成超过 20 分钟
     """
+    if _is_tool_role_id(role_id):
+        return False
+
     with _get_connection(role_id) as conn:
         updated_at = _get_meta(conn, "updated_at")
     
@@ -419,6 +453,9 @@ def should_summarize(role_id: str) -> bool:
     条件：
     - 距离上次总结超过 60 条消息
     """
+    if _is_tool_role_id(role_id):
+        return False
+
     with _get_connection(role_id) as conn:
         count_value = _get_meta(conn, "message_count_since_summary", "0")
         try:
@@ -531,6 +568,8 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
 
 def clear_short_term(role_id: str):
     """清空短期记忆"""
+    if _is_tool_role_id(role_id):
+        return
     with _get_connection(role_id) as conn:
         conn.execute("DELETE FROM short_term")
         _set_meta(conn, "updated_at", datetime.now().isoformat())
@@ -539,6 +578,8 @@ def get_memory_context_string(role_id: str) -> str:
     """
     获取记忆上下文字符串（用于 AI 提示）
     """
+    if _is_tool_role_id(role_id):
+        return ""
     core = load_memory(role_id).get("core_memory", "")
     if core:
         return f"你的设定和对用户的理解(“我”指你自己(assistant)，用户指使用者“user”)：{core}"

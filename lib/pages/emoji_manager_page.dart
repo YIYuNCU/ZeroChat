@@ -142,8 +142,9 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
     }
   }
 
-  Future<void> _deleteCategory() async {
-    if (_selectedCategory == null) {
+  Future<void> _deleteCategory([String? categoryName]) async {
+    final targetCategory = categoryName ?? _selectedCategory;
+    if (targetCategory == null || targetCategory.isEmpty) {
       return;
     }
 
@@ -151,7 +152,7 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除分类'),
-        content: Text('确定删除分类 "$_selectedCategory" 及其所有表情吗？'),
+        content: Text('长按删除已触发，确定删除分类 "$targetCategory" 及其所有表情吗？'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
           TextButton(
@@ -166,15 +167,18 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
       return;
     }
 
-    final category = _selectedCategory!;
     final success = _aiMode
         ? (widget.roleId == null
               ? false
-              : await EmojiService.instance.deleteAiCategory(widget.roleId!, category))
-        : await EmojiService.instance.deleteUserCategory(category);
+              : await EmojiService.instance.deleteAiCategory(widget.roleId!, targetCategory))
+        : await EmojiService.instance.deleteUserCategory(targetCategory);
 
     if (success) {
       await _loadData();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已删除分类: $targetCategory')),
+      );
     }
   }
 
@@ -284,6 +288,10 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
 
     if (success && _selectedCategory != null) {
       await _selectCategory(_selectedCategory!);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('表情已删除')),
+      );
     }
   }
 
@@ -334,10 +342,13 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
               separatorBuilder: (_, _) => const SizedBox(width: 6),
               itemBuilder: (context, index) {
                 final category = _categories[index];
-                return ChoiceChip(
-                  selected: category == _selectedCategory,
-                  label: Text(category),
-                  onSelected: (_) => _selectCategory(category),
+                return GestureDetector(
+                  onLongPress: () => _deleteCategory(category),
+                  child: ChoiceChip(
+                    selected: category == _selectedCategory,
+                    label: Text(category),
+                    onSelected: (_) => _selectCategory(category),
+                  ),
                 );
               },
             ),
