@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
@@ -54,9 +56,6 @@ void main() async {
   await ProactiveMessageScheduler.instance.init();
   await MomentsScheduler.instance.init();
 
-  // ========== 后端同步 ==========
-  await _syncWithBackend();
-
   // 设置状态栏样式
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -66,6 +65,15 @@ void main() async {
   );
 
   runApp(const ZeroChatApp());
+
+  // ========== 后端同步（后台执行，不阻塞启动） ==========
+  unawaited(_syncWithBackendInBackground());
+}
+
+Future<void> _syncWithBackendInBackground() async {
+  // Let first frame render first, then start network sync.
+  await Future<void>.delayed(const Duration(milliseconds: 100));
+  await _syncWithBackend();
 }
 
 /// 后端同步状态

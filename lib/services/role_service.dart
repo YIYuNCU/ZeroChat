@@ -14,11 +14,7 @@ class RoleService {
   /// 初始化角色服务
   static Future<void> init() async {
     await _loadRoles();
-    // 如果本地无角色，从后端获取
-    if (_roles.isEmpty) {
-      debugPrint('RoleService: No local roles, fetching from backend...');
-      await fetchFromBackend();
-    }
+    // 启动阶段只做本地初始化；后端同步由 main.dart 在后台触发。
     debugPrint('RoleService initialized with ${_roles.length} roles');
   }
 
