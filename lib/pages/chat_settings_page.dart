@@ -5,6 +5,7 @@ import '../models/role.dart';
 import '../models/message.dart';
 import '../services/role_service.dart';
 import '../services/memory_service.dart';
+import '../services/settings_service.dart';
 import '../services/task_service.dart';
 import '../core/message_store.dart';
 import '../core/proactive_message_scheduler.dart';
@@ -68,6 +69,34 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           // 头像和名称
           _buildSection([_buildAvatarItem()]),
+
+          const SizedBox(height: 10),
+
+          // 聊天背景
+          _buildSection([
+            _buildItem(
+              title: '聊天背景',
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _currentRole.chatBackgroundUrl.isNotEmpty ? '角色专属' : '跟随全局',
+                    style: const TextStyle(
+                      color: Color(0xFF888888),
+                      fontSize: 15,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Icon(
+                    Icons.arrow_forward_ios,
+                    size: 16,
+                    color: Color(0xFFCCCCCC),
+                  ),
+                ],
+              ),
+              onTap: _showChatBackgroundOptions,
+            ),
+          ]),
 
           const SizedBox(height: 10),
 
@@ -584,6 +613,99 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
           },
         );
       },
+    );
+  }
+
+  Future<void> _showChatBackgroundOptions() async {
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('设置角色专属背景'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _pickRoleBackgroundImage();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.layers_clear_outlined),
+                title: const Text('恢复跟随全局背景'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _clearRoleBackground();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.info_outline),
+                title: Text(
+                  _currentRole.chatBackgroundUrl.isNotEmpty
+                      ? '当前: 角色专属背景'
+                      : '当前: 全局背景',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _pickRoleBackgroundImage() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+    );
+    if (result == null || result.files.single.path == null) {
+      return;
+    }
+
+    final path = result.files.single.path!;
+    _currentRole = _currentRole.copyWith(chatBackgroundUrl: path);
+    await RoleService.updateRole(_currentRole);
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    widget.onRoleChanged?.call();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('已设置角色专属聊天背景')),
+    );
+  }
+
+  Future<void> _clearRoleBackground() async {
+    if (_currentRole.chatBackgroundUrl.isEmpty) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('当前已是全局背景')),
+      );
+      return;
+    }
+
+    _currentRole = _currentRole.copyWith(chatBackgroundUrl: '');
+    await RoleService.updateRole(_currentRole);
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    widget.onRoleChanged?.call();
+    final globalBg = SettingsService.instance.chatBackgroundUrl;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(globalBg.isEmpty ? '已恢复默认背景' : '已恢复为全局背景'),
+      ),
     );
   }
 

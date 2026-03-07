@@ -917,14 +917,94 @@ def _load_role_chat_messages(role_id: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _build_chats_snapshot() -> Dict[str, Any]:
+def _to_absolute_backend_url(url: str, backend_base_url: Optional[str]) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return raw
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    if not backend_base_url:
+        return raw
+    base = backend_base_url.rstrip("/")
+    if raw.startswith("/"):
+        return f"{base}{raw}"
+    return raw
+
+
+def _normalize_sticker_content_for_sync(content: Any, backend_base_url: Optional[str]) -> Any:
+    if not isinstance(content, str):
+        return content
+    if not content.endswith("]"):
+        return content
+
+    # New format:
+    # [STICKER|ai|emotion|url]
+    # [STICKER|user|category|tag|emojiId|url]
+    if content.startswith("[STICKER|"):
+        inner = content[9:-1]
+        parts = inner.split("|")
+
+        if len(parts) >= 5 and parts[0] == "user":
+            category = parts[1]
+            tag = parts[2]
+            emoji_id = parts[3]
+            # Always trust emoji id to build canonical file endpoint during sync.
+            if emoji_id:
+                relative_url = f"/api/user-emojis/file/{emoji_id}"
+            else:
+                relative_url = "|".join(parts[4:])
+            final_url = _to_absolute_backend_url(relative_url, backend_base_url)
+            return f"[STICKER|user|{category}|{tag}|{emoji_id}|{final_url}]"
+
+        if len(parts) >= 4 and parts[0] == "ai":
+            emotion = parts[1]
+            image_url = "|".join(parts[2:])
+            final_url = _to_absolute_backend_url(image_url, backend_base_url)
+            return f"[STICKER|ai|{emotion}|{final_url}]"
+
+    # Legacy format: [STICKER:emotion:path]
+    if content.startswith("[STICKER:"):
+        inner = content[9:-1]
+        segs = inner.split(":")
+        if len(segs) >= 3:
+            emotion = segs[0]
+            path = ":".join(segs[1:])
+            final_url = _to_absolute_backend_url(path, backend_base_url)
+            return f"[STICKER:{emotion}:{final_url}]"
+
+    return content
+
+
+def _normalize_chat_message_for_sync(message: Dict[str, Any], backend_base_url: Optional[str]) -> Dict[str, Any]:
+    normalized = dict(message)
+    normalized["content"] = _normalize_sticker_content_for_sync(
+        normalized.get("content"),
+        backend_base_url,
+    )
+    if "quote_content" in normalized:
+        normalized["quote_content"] = _normalize_sticker_content_for_sync(
+            normalized.get("quote_content"),
+            backend_base_url,
+        )
+    if "quoted_preview_text" in normalized:
+        normalized["quoted_preview_text"] = _normalize_sticker_content_for_sync(
+            normalized.get("quoted_preview_text"),
+            backend_base_url,
+        )
+    return normalized
+
+
+def _build_chats_snapshot(backend_base_url: Optional[str] = None) -> Dict[str, Any]:
     chats: Dict[str, List[Dict[str, Any]]] = {}
     if ROLES_DIR.exists():
         for role_dir in sorted(ROLES_DIR.iterdir(), key=lambda p: p.name):
             if not role_dir.is_dir():
                 continue
             role_id = role_dir.name
-            messages = _load_role_chat_messages(role_id)
+            messages = [
+                _normalize_chat_message_for_sync(m, backend_base_url)
+                for m in _load_role_chat_messages(role_id)
+            ]
             messages.sort(key=lambda m: (str(m.get("timestamp", "")), str(m.get("id", ""))))
             chats[role_id] = messages
 
@@ -940,7 +1020,7 @@ def _build_chats_snapshot() -> Dict[str, Any]:
     }
 
 @router.get("/roles/{role_id}/chats/messages")
-async def get_chat_messages(role_id: str, limit: int = 100, offset: int = 0):
+async def get_chat_messages(role_id: str, request: Request, limit: int = 100, offset: int = 0):
     """获取角色聊天记录"""
     role_dir = get_role_dir(role_id)
     messages_file = role_dir / "chats" / "messages.json"
@@ -948,7 +1028,12 @@ async def get_chat_messages(role_id: str, limit: int = 100, offset: int = 0):
     if messages_file.exists():
         with open(messages_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-            all_messages = data.get("messages", [])
+            backend_base_url = str(request.base_url).rstrip("/")
+            all_messages = [
+                _normalize_chat_message_for_sync(m, backend_base_url)
+                for m in data.get("messages", [])
+                if isinstance(m, dict)
+            ]
             # 分页返回
             return {
                 "role_id": role_id,
@@ -959,9 +1044,10 @@ async def get_chat_messages(role_id: str, limit: int = 100, offset: int = 0):
 
 
 @router.get("/chats/messages/snapshot")
-async def get_all_chats_snapshot(client_md5: Optional[str] = None):
+async def get_all_chats_snapshot(request: Request, client_md5: Optional[str] = None):
     """获取所有聊天记录快照；传入 client_md5 相同则仅返回无需同步"""
-    snapshot = _build_chats_snapshot()
+    backend_base_url = str(request.base_url).rstrip("/")
+    snapshot = _build_chats_snapshot(backend_base_url)
     if client_md5 and client_md5 == snapshot["md5"]:
         return {
             "need_sync": False,

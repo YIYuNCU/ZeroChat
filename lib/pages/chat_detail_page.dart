@@ -50,6 +50,7 @@ class ChatDetailPage extends StatefulWidget {
 
 class _ChatDetailPageState extends State<ChatDetailPage> {
   final ScrollController _scrollController = ScrollController();
+  final InputBarController _inputBarController = InputBarController();
   static const int _messagePageSize = 50;
 
   int _visibleMessageCount = _messagePageSize;
@@ -110,8 +111,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     SettingsService.instance.removeListener(_onSettingsChanged);
     ChatController.instance.unregisterTypingCallback(widget.chatId);
     ChatController.instance.onChatPageExit(widget.chatId);
+    _inputBarController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _dismissInputControls() {
+    FocusScope.of(context).unfocus();
+    _inputBarController.closeControls();
   }
 
   void _onSettingsChanged() {
@@ -165,6 +172,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('正在处理消息，请稍后')));
+      return;
+    }
+
+    if (emoji.isAi) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('AI表情仅支持查看，不可发送')));
       return;
     }
 
@@ -397,7 +411,9 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             currentRole: _currentRole,
             onRoleChanged: () {
               setState(() {
-                _currentRole = RoleService.getCurrentRole();
+                _currentRole =
+                    RoleService.getRoleById(widget.chatId) ??
+                    RoleService.getCurrentRole();
               });
             },
             onClearHistory: () {
@@ -411,9 +427,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    final backgroundUrl = SettingsService.instance.chatBackgroundUrl;
+    final globalBackgroundUrl = SettingsService.instance.chatBackgroundUrl;
+    final backgroundUrl = _currentRole.chatBackgroundUrl.isNotEmpty
+        ? _currentRole.chatBackgroundUrl
+        : globalBackgroundUrl;
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
 
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       appBar: _buildAppBar(),
       body: Container(
         decoration: BoxDecoration(
@@ -429,126 +450,131 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
         ),
         child: Column(
           children: [
-            // 消息列表
             Expanded(
-              child: StreamBuilder<List<Message>>(
-                stream: MessageStore.instance.watchMessages(widget.chatId),
-                builder: (context, snapshot) {
-                  final messages = snapshot.data ?? [];
-                  final totalMessagesCount = messages.length;
-                  final currentVisibleCount =
-                      totalMessagesCount < _visibleMessageCount
-                      ? totalMessagesCount
-                      : _visibleMessageCount;
-                  final visibleStart = totalMessagesCount - currentVisibleCount;
-                  final visibleMessages = messages.sublist(visibleStart);
-                  final hasMoreMessages =
-                      totalMessagesCount > currentVisibleCount;
-                  final remainingMessageCount =
-                      totalMessagesCount - currentVisibleCount;
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: _dismissInputControls,
+                child: StreamBuilder<List<Message>>(
+                  stream: MessageStore.instance.watchMessages(widget.chatId),
+                  builder: (context, snapshot) {
+                    final messages = snapshot.data ?? [];
+                    final totalMessagesCount = messages.length;
+                    final currentVisibleCount =
+                        totalMessagesCount < _visibleMessageCount
+                        ? totalMessagesCount
+                        : _visibleMessageCount;
+                    final visibleStart = totalMessagesCount - currentVisibleCount;
+                    final visibleMessages = messages.sublist(visibleStart);
+                    final hasMoreMessages = totalMessagesCount > currentVisibleCount;
+                    final remainingMessageCount =
+                        totalMessagesCount - currentVisibleCount;
 
-                  if (!hasMoreMessages && _loadMoreConfirmNeeded) {
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (mounted) {
-                        setState(() {
-                          _loadMoreConfirmNeeded = false;
-                          _lastLoadMoreConfirmTime = null;
-                        });
-                      }
-                    });
-                  }
+                    if (!hasMoreMessages && _loadMoreConfirmNeeded) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (mounted) {
+                          setState(() {
+                            _loadMoreConfirmNeeded = false;
+                            _lastLoadMoreConfirmTime = null;
+                          });
+                        }
+                      });
+                    }
 
-                  if (visibleMessages.isEmpty) {
-                    return const Center(
-                      child: Text(
-                        '暂无消息',
-                        style: TextStyle(
-                          color: Color(0xFFBBBBBB),
-                          fontSize: 14,
+                    if (visibleMessages.isEmpty) {
+                      return const Center(
+                        child: Text(
+                          '暂无消息',
+                          style: TextStyle(
+                            color: Color(0xFFBBBBBB),
+                            fontSize: 14,
+                          ),
                         ),
-                      ),
-                    );
-                  }
+                      );
+                    }
 
-                  _handleAutoScroll(totalMessagesCount);
+                    _handleAutoScroll(totalMessagesCount);
 
-                  return ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    itemCount:
-                        visibleMessages.length + (hasMoreMessages ? 1 : 0),
-                    itemBuilder: (context, index) {
-                      if (hasMoreMessages && index == 0) {
-                        return Padding(
-                          padding: const EdgeInsets.only(top: 6, bottom: 10),
-                          child: Center(
-                            child: Text(
-                              _isLoadingMoreMessages
-                                  ? '正在加载更多消息...'
-                                  : _loadMoreConfirmNeeded
-                                  ? '继续上划，加载更早的 $remainingMessageCount 条消息'
-                                  : '上划查看更早消息（$remainingMessageCount 条）',
-                              style: const TextStyle(
-                                color: Color(0xFF999999),
-                                fontSize: 12,
+                    return ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      itemCount:
+                          visibleMessages.length + (hasMoreMessages ? 1 : 0),
+                      itemBuilder: (context, index) {
+                        if (hasMoreMessages && index == 0) {
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 6, bottom: 10),
+                            child: Center(
+                              child: Text(
+                                _isLoadingMoreMessages
+                                    ? '正在加载更多消息...'
+                                    : _loadMoreConfirmNeeded
+                                    ? '继续上划，加载更早的 $remainingMessageCount 条消息'
+                                    : '上划查看更早消息（$remainingMessageCount 条）',
+                                style: const TextStyle(
+                                  color: Color(0xFF999999),
+                                  fontSize: 12,
+                                ),
                               ),
                             ),
-                          ),
+                          );
+                        }
+
+                        final adjustedIndex = hasMoreMessages ? index - 1 : index;
+                        final message = visibleMessages[adjustedIndex];
+                        final showTime = _shouldShowTime(
+                          visibleMessages,
+                          adjustedIndex,
                         );
-                      }
 
-                      final adjustedIndex = hasMoreMessages ? index - 1 : index;
-                      final message = visibleMessages[adjustedIndex];
-                      final showTime = _shouldShowTime(
-                        visibleMessages,
-                        adjustedIndex,
-                      );
-
-                      return Column(
-                        children: [
-                          if (showTime)
-                            Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 10),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 4,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFCECECE),
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: Text(
-                                  _formatTime(message.timestamp),
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.white,
+                        return Column(
+                          children: [
+                            if (showTime)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 10),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFCECECE),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    _formatTime(message.timestamp),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.white,
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          _buildMessageBubble(message),
-                        ],
-                      );
-                    },
-                  );
-                },
+                            _buildMessageBubble(message),
+                          ],
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
             ),
-            // 引用预览（如果有）
-            if (_quoteState != null && !_isMultiSelectMode)
-              _buildQuotePreview(),
-            // 多选工具栏或输入栏
+            if (_quoteState != null && !_isMultiSelectMode) _buildQuotePreview(),
             if (_isMultiSelectMode)
               _buildMultiSelectToolbar()
             else
-              InputBar(
-                onSend: _sendMessage,
-                onImageSend: _sendImageMessage,
-                onEmojiSend: _sendEmojiMessage,
-                roleId: widget.isGroup
-                    ? RoleService.getCurrentRole().id
-                    : widget.chatId,
+              AnimatedPadding(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOut,
+                padding: EdgeInsets.only(bottom: bottomInset),
+                child: InputBar(
+                  controller: _inputBarController,
+                  onSend: _sendMessage,
+                  onImageSend: _sendImageMessage,
+                  onEmojiSend: _sendEmojiMessage,
+                  roleId: widget.isGroup
+                      ? RoleService.getCurrentRole().id
+                      : widget.chatId,
+                ),
               ),
           ],
         ),

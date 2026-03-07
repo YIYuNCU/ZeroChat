@@ -197,6 +197,7 @@ class RoleService {
               systemPrompt: json['system_prompt'] ?? '',
               avatarUrl: json['avatar_url'] ?? '',
               avatarHash: json['avatar_hash'] ?? '',
+              chatBackgroundUrl: json['chat_background_url'] ?? '',
               aiModel: json['ai_model'] ?? 'deepseek-chat',
               aiApiUrl: json['ai_api_url'] ?? '',
               aiApiKey: json['ai_api_key'] ?? '',
@@ -235,6 +236,9 @@ class RoleService {
                 systemPrompt: backendRole.systemPrompt,
                 avatarUrl: backendRole.avatarUrl,
                 avatarHash: backendRole.avatarHash,
+                chatBackgroundUrl: backendRole.chatBackgroundUrl.isNotEmpty
+                  ? backendRole.chatBackgroundUrl
+                  : existing.chatBackgroundUrl,
                 coreMemory: backendRole.coreMemory,
                 aiModel: backendRole.aiModel,
                 aiApiUrl: backendRole.aiApiUrl,
@@ -273,6 +277,7 @@ class RoleService {
             'description': role.description,
             'system_prompt': role.systemPrompt,
             'avatar_url': role.avatarUrl,
+            'chat_background_url': role.chatBackgroundUrl,
             'persona': role.description,
             'core_memory': role.coreMemory,
             'ai_model': role.aiModel,

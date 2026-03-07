@@ -253,6 +253,11 @@ class ChatController extends ChangeNotifier {
     String emojiId = '',
     bool fromUserLibrary = true,
   }) async {
+    if (!fromUserLibrary) {
+      debugPrint('ChatController: AI sticker sending is disabled for user actions');
+      return;
+    }
+
     if (_processingChats.contains(chatId)) {
       debugPrint('ChatController: Already processing $chatId, ignoring sticker');
       return;

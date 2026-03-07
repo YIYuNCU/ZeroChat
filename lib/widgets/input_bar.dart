@@ -6,12 +6,19 @@ import '../services/emoji_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/settings_service.dart';
 
+class InputBarController extends ChangeNotifier {
+  void closeControls() {
+    notifyListeners();
+  }
+}
+
 /// ZeroChat 风格输入栏组件
 /// 用于聊天页面底部的消息输入区域
 class InputBar extends StatefulWidget {
   final Function(String)? onSend;
   final Function(String imagePath)? onImageSend;
   final void Function(EmojiItem emoji)? onEmojiSend;
+  final InputBarController? controller;
   final String? roleId;
   final String? hintText;
 
@@ -20,6 +27,7 @@ class InputBar extends StatefulWidget {
     this.onSend,
     this.onImageSend,
     this.onEmojiSend,
+    this.controller,
     this.roleId,
     this.hintText,
   });
@@ -35,10 +43,30 @@ class _InputBarState extends State<InputBar> {
   bool _showSendButton = false;
   bool _showEmojiPicker = false;
 
+  void _handleExternalClose() {
+    final needsStateUpdate = _showEmojiPicker;
+    _focusNode.unfocus();
+    if (needsStateUpdate && mounted) {
+      setState(() {
+        _showEmojiPicker = false;
+      });
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
+    widget.controller?.addListener(_handleExternalClose);
+  }
+
+  @override
+  void didUpdateWidget(covariant InputBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller?.removeListener(_handleExternalClose);
+      widget.controller?.addListener(_handleExternalClose);
+    }
   }
 
   void _onTextChanged() {
@@ -187,6 +215,7 @@ class _InputBarState extends State<InputBar> {
   @override
   void dispose() {
     _controller.removeListener(_onTextChanged);
+    widget.controller?.removeListener(_handleExternalClose);
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();

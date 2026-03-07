@@ -11,6 +11,7 @@ class Role {
   final String systemPrompt;
   final String? avatarUrl;
   final String? avatarHash;
+  final String chatBackgroundUrl;
 
   final String aiModel;
   final String aiApiUrl;
@@ -52,6 +53,7 @@ class Role {
     required this.systemPrompt,
     this.avatarUrl,
     this.avatarHash,
+    this.chatBackgroundUrl = '',
     this.aiModel = 'deepseek-chat',
     this.aiApiUrl = '',
     this.aiApiKey = '',
@@ -103,6 +105,7 @@ class Role {
     String? systemPrompt,
     String? avatarUrl,
     String? avatarHash,
+    String? chatBackgroundUrl,
     String? aiModel,
     String? aiApiUrl,
     String? aiApiKey,
@@ -129,6 +132,7 @@ class Role {
       systemPrompt: systemPrompt ?? this.systemPrompt,
       avatarUrl: avatarUrl ?? this.avatarUrl,
       avatarHash: avatarHash ?? this.avatarHash,
+      chatBackgroundUrl: chatBackgroundUrl ?? this.chatBackgroundUrl,
       aiModel: aiModel ?? this.aiModel,
       aiApiUrl: aiApiUrl ?? this.aiApiUrl,
       aiApiKey: aiApiKey ?? this.aiApiKey,
@@ -192,6 +196,7 @@ class Role {
       systemPrompt: json['system_prompt'] as String,
       avatarUrl: json['avatar_url'] as String?,
       avatarHash: json['avatar_hash'] as String?,
+      chatBackgroundUrl: json['chat_background_url'] as String? ?? '',
       aiModel: json['ai_model'] as String? ?? 'deepseek-chat',
       aiApiUrl: json['ai_api_url'] as String? ?? '',
       aiApiKey: json['ai_api_key'] as String? ?? '',
@@ -246,6 +251,7 @@ class Role {
       'system_prompt': systemPrompt,
       'avatar_url': avatarUrl,
       'avatar_hash': avatarHash,
+      'chat_background_url': chatBackgroundUrl,
       'ai_model': aiModel,
       'ai_api_url': aiApiUrl,
       'ai_api_key': aiApiKey,
