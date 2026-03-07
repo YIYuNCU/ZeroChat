@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../models/role.dart';
 import 'storage_service.dart';
@@ -201,6 +200,7 @@ class RoleService {
               description: json['description'] ?? '',
               systemPrompt: json['system_prompt'] ?? '',
               avatarUrl: json['avatar_url'] ?? '',
+              avatarHash: json['avatar_hash'] ?? '',
               aiModel: json['ai_model'] ?? 'deepseek-chat',
               aiApiUrl: json['ai_api_url'] ?? '',
               aiApiKey: json['ai_api_key'] ?? '',
@@ -238,6 +238,7 @@ class RoleService {
                 description: backendRole.description,
                 systemPrompt: backendRole.systemPrompt,
                 avatarUrl: backendRole.avatarUrl,
+                avatarHash: backendRole.avatarHash,
                 coreMemory: backendRole.coreMemory,
                 aiModel: backendRole.aiModel,
                 aiApiUrl: backendRole.aiApiUrl,

@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import '../models/role.dart';
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
@@ -161,13 +160,11 @@ class ApiService {
       );
       debugPrint('───────────────────────────────────────────────────────────');
 
-      final response = await http.post(
-        Uri.parse('$_effectiveUrl/chat/completions'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $apiKey',
-        },
-        body: jsonEncode({
+      final response = await SecureBackendClient.postRawJson(
+        '$_effectiveUrl/chat/completions',
+        headers: {'Authorization': 'Bearer $apiKey'},
+        includeAuth: false,
+        body: {
           'model': _effectiveModel,
           'messages': messages,
           'temperature': role.temperature,
@@ -175,7 +172,7 @@ class ApiService {
           'frequency_penalty': role.frequencyPenalty,
           'presence_penalty': role.presencePenalty,
           'max_tokens': 2000,
-        }),
+        },
       );
 
       debugPrint('📡 API Response: ${response.statusCode}');

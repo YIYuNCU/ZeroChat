@@ -131,6 +131,24 @@ def load_role(role_id: str) -> Optional[Dict]:
             return json.load(f)
     return None
 
+
+def _get_role_avatar_path(role_id: str) -> Optional[Path]:
+    role_dir = get_role_dir(role_id)
+    assets_dir = role_dir / "assets"
+    for ext in ["jpg", "jpeg", "png", "gif", "webp"]:
+        avatar_path = assets_dir / f"avatar.{ext}"
+        if avatar_path.exists():
+            return avatar_path
+    return None
+
+
+def _get_role_avatar_hash(role_id: str) -> str:
+    avatar_path = _get_role_avatar_path(role_id)
+    if avatar_path is None:
+        return ""
+    with open(avatar_path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
 def save_role(role_id: str, data: Dict):
     profile_file = get_role_dir(role_id) / "profile.json"
     data["updated_at"] = datetime.now().isoformat()
@@ -144,6 +162,7 @@ def normalize_role_avatar_url(role: Dict[str, Any], request: Request) -> Dict[st
         if not role_copy.get("avatar_url",None):
             return role_copy
         role_copy["avatar_url"] = str(request.url_for("get_role_avatar_file", role_id=role_id))
+        role_copy["avatar_hash"] = _get_role_avatar_hash(role_id)
     return role_copy
 
 @router.get("/roles")
@@ -510,22 +529,21 @@ async def upload_role_avatar_file(role_id: str, request: Request, file: UploadFi
     avatar_url = str(request.url_for("get_role_avatar_file", role_id=role_id))
     role["avatar_url"] = avatar_url
     save_role(role_id, role)
-    
-    return {"success": True, "avatar_url": avatar_url}
+
+    return {
+        "success": True,
+        "avatar_url": avatar_url,
+        "avatar_hash": _get_role_avatar_hash(role_id),
+    }
 
 @router.get("/roles/{role_id}/avatar/file")
 async def get_role_avatar_file(role_id: str):
     """获取角色头像文件"""
     from fastapi.responses import FileResponse
     
-    role_dir = get_role_dir(role_id)
-    assets_dir = role_dir / "assets"
-    
-    # 查找头像文件
-    for ext in ["jpg", "jpeg", "png", "gif", "webp"]:
-        avatar_path = assets_dir / f"avatar.{ext}"
-        if avatar_path.exists():
-            return FileResponse(avatar_path)
+    avatar_path = _get_role_avatar_path(role_id)
+    if avatar_path is not None:
+        return FileResponse(avatar_path)
     
     raise HTTPException(status_code=404, detail="Avatar not found")
 

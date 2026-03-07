@@ -4,9 +4,9 @@ import '../models/chat_info.dart';
 import '../services/chat_list_service.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
-import '../services/secure_backend_client.dart';
 import '../core/message_store.dart';
 import '../core/chat_controller.dart';
+import '../widgets/smart_avatar_image.dart';
 import 'chat_detail_page.dart';
 
 /// 聊天列表页面
@@ -225,14 +225,18 @@ class _ChatListPageState extends State<ChatListPage> {
     if (avatarUrl != null && avatarUrl.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
-          avatarUrl,
-          headers: SecureBackendClient.authHeaders,
+        child: SmartAvatarImage(
+          remoteUrl: avatarUrl,
+          cacheKey: chat.isGroup
+              ? 'chat_${chat.id}_avatar'
+              : 'role_${chat.id}_avatar',
+          backendHash: chat.isGroup
+              ? null
+              : RoleService.getRoleById(chat.id)?.avatarHash,
           width: 48,
           height: 48,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
-              _buildDefaultAvatar(chat, colors[colorIndex]),
+          fallbackBuilder: () => _buildDefaultAvatar(chat, colors[colorIndex]),
         ),
       );
     }

@@ -3,7 +3,7 @@ import 'package:lpinyin/lpinyin.dart';
 import '../models/role.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
-import '../services/secure_backend_client.dart';
+import '../widgets/smart_avatar_image.dart';
 import 'role_detail_page.dart';
 import 'group_settings_page.dart';
 
@@ -334,14 +334,14 @@ class ContactsPageState extends State<ContactsPage>
     if (role.avatarUrl != null && role.avatarUrl!.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
-          role.avatarUrl!,
-          headers: SecureBackendClient.authHeaders,
+        child: SmartAvatarImage(
+          remoteUrl: role.avatarUrl!,
+          cacheKey: 'role_${role.id}_avatar',
+          backendHash: role.avatarHash,
           width: 40,
           height: 40,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
-              _buildDefaultAvatar(role, colors[colorIndex]),
+          fallbackBuilder: () => _buildDefaultAvatar(role, colors[colorIndex]),
         ),
       );
     }

@@ -5,6 +5,8 @@ import '../models/message.dart';
 import '../services/sticker_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
+import '../services/role_service.dart';
+import 'smart_avatar_image.dart';
 
 /// ZeroChat 风格聊天气泡组件
 /// 支持文字、表情包、引用显示和长按操作
@@ -12,6 +14,7 @@ class ChatBubble extends StatelessWidget {
   final Message message;
   final bool isSender;
   final String? avatarUrl;
+  final String? avatarHash;
   final String senderName;
 
   /// 长按回调
@@ -31,6 +34,7 @@ class ChatBubble extends StatelessWidget {
     required this.message,
     required this.isSender,
     this.avatarUrl,
+    this.avatarHash,
     this.senderName = '',
     this.onLongPress,
     this.onQuote,
@@ -222,7 +226,7 @@ class ChatBubble extends StatelessWidget {
         child: imagePath.startsWith('http')
             ? CachedNetworkImage(
                 imageUrl: imagePath,
-              httpHeaders: SecureBackendClient.authHeaders,
+                httpHeaders: SecureBackendClient.authHeaders,
                 fit: BoxFit.contain,
                 placeholder: (_, __) => _buildStickerPlaceholder(emotion),
                 errorWidget: (_, __, ___) => _buildStickerPlaceholder(emotion),
@@ -354,6 +358,16 @@ class ChatBubble extends StatelessWidget {
       }
     }
 
+    String? effectiveAvatarHash = avatarHash;
+    if (!isSender && message.senderId.isNotEmpty) {
+      final role = RoleService.getRoleById(message.senderId);
+      effectiveAvatarHash = role?.avatarHash ?? effectiveAvatarHash;
+    }
+
+    final cacheKey = isSender
+        ? 'user_self_avatar'
+        : 'role_${message.senderId}_avatar';
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(4),
       child: Container(
@@ -361,22 +375,17 @@ class ChatBubble extends StatelessWidget {
         height: 40,
         color: isSender ? const Color(0xFF7EB7E7) : const Color(0xFFE7C77E),
         child: effectiveAvatarUrl != null && effectiveAvatarUrl.isNotEmpty
-            ? (effectiveAvatarUrl.startsWith('http')
-                  ? Image.network(
-                      effectiveAvatarUrl,
-                      headers: SecureBackendClient.authHeaders,
-                      width: 40,
-                      height: 40,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => _buildDefaultAvatar(),
-                    )
-                  : Image.file(
-                      File(effectiveAvatarUrl),
-                      width: 40,
-                      height: 40,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => _buildDefaultAvatar(),
-                    ))
+            ? SmartAvatarImage(
+                remoteUrl: effectiveAvatarUrl,
+                cacheKey: cacheKey,
+                backendHash: isSender
+                    ? SettingsService.instance.userAvatarHash
+                    : effectiveAvatarHash,
+                width: 40,
+                height: 40,
+                fit: BoxFit.cover,
+                fallbackBuilder: _buildDefaultAvatar,
+              )
             : _buildDefaultAvatar(),
       ),
     );

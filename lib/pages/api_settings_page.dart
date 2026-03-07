@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
 
@@ -551,15 +550,14 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
       modelsUrl += 'models';
 
-      final response = await http
-          .get(
-            Uri.parse(modelsUrl),
-            headers: {
-              'Authorization': 'Bearer $key',
-              'Content-Type': 'application/json',
-            },
-          )
-          .timeout(const Duration(seconds: 10));
+      final response = await SecureBackendClient.getRaw(
+        modelsUrl,
+        headers: {
+          'Authorization': 'Bearer $key',
+          'Content-Type': 'application/json',
+        },
+        includeAuth: false,
+      ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);

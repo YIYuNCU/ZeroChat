@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
@@ -9,6 +8,7 @@ import '../services/memory_service.dart';
 import '../services/chat_list_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
+import '../widgets/smart_avatar_image.dart';
 import 'role_settings_page.dart';
 import 'chat_detail_page.dart';
 
@@ -188,13 +188,14 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
     if (_role.avatarUrl != null && _role.avatarUrl!.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.network(
-          _role.avatarUrl!,
-          headers: SecureBackendClient.authHeaders,
+        child: SmartAvatarImage(
+          remoteUrl: _role.avatarUrl!,
+          cacheKey: 'role_${_role.id}_avatar',
+          backendHash: _role.avatarHash,
           width: size,
           height: size,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _buildDefaultAvatar(size: size),
+          fallbackBuilder: () => _buildDefaultAvatar(size: size),
         ),
       );
     }
@@ -388,33 +389,36 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
       }
 
       // 上传到后端
-      final uri = Uri.parse('$backendUrl/api/roles/${_role.id}/avatar/upload');
-      final request = http.MultipartRequest('POST', uri);
-      request.headers.addAll(SecureBackendClient.authHeaders);
-
       final bytes = await pickedFile.readAsBytes();
       final ext = pickedFile.path.split('.').last.toLowerCase();
 
-      request.files.add(
-        http.MultipartFile.fromBytes(
-          'file',
-          bytes,
-          filename: 'avatar.$ext',
-          contentType: MediaType('image', ext == 'jpg' ? 'jpeg' : ext),
-        ),
+      final response = await SecureBackendClient.multipartPost(
+        '$backendUrl/api/roles/${_role.id}/avatar/upload',
+        files: [
+          http.MultipartFile.fromBytes(
+            'file',
+            bytes,
+            filename: 'avatar.$ext',
+            contentType: MediaType('image', ext == 'jpg' ? 'jpeg' : ext),
+          ),
+        ],
       );
-
-      final response = await request.send();
       if (response.statusCode == 200) {
         final respStr = await response.stream.bytesToString();
         final data =
             SecureBackendClient.decodeResponseBodyString(respStr)
                 as Map<String, dynamic>;
         final avatarUrl = data['avatar_url'] as String?;
+        final avatarHash = data['avatar_hash'] as String?;
 
         if (avatarUrl != null) {
-          final fullUrl = '$backendUrl$avatarUrl';
-          final updatedRole = _role.copyWith(avatarUrl: fullUrl);
+          final fullUrl = avatarUrl.startsWith('http')
+              ? avatarUrl
+              : '$backendUrl$avatarUrl';
+          final updatedRole = _role.copyWith(
+            avatarUrl: fullUrl,
+            avatarHash: avatarHash,
+          );
           await RoleService.updateRole(updatedRole);
           if (!mounted) return;
           setState(() => _role = updatedRole);

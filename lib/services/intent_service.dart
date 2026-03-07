@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
 
@@ -174,13 +173,11 @@ class IntentService {
 ''';
 
     try {
-      final response = await http.post(
-        Uri.parse('$_intentApiUrl/chat/completions'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $_intentApiKey',
-        },
-        body: jsonEncode({
+      final response = await SecureBackendClient.postRawJson(
+        '$_intentApiUrl/chat/completions',
+        headers: {'Authorization': 'Bearer $_intentApiKey'},
+        includeAuth: false,
+        body: {
           'model': _intentModel,
           'messages': [
             {'role': 'system', 'content': systemPrompt},
@@ -188,7 +185,7 @@ class IntentService {
           ],
           'temperature': 0.1,
           'max_tokens': 200,
-        }),
+        },
       );
 
       if (response.statusCode == 200) {

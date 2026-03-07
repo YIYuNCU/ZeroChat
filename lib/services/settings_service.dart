@@ -15,6 +15,7 @@ class SettingsService extends ChangeNotifier {
   // ========== 用户信息 ==========
   String _userNickname = 'ZeroChat';
   String _userAvatarUrl = '';
+  String _userAvatarHash = '';
 
   // ========== 显示设置 ==========
   String _coverImageUrl = '';
@@ -54,6 +55,7 @@ class SettingsService extends ChangeNotifier {
 
   String get userNickname => _userNickname;
   String get userAvatarUrl => _userAvatarUrl;
+  String get userAvatarHash => _userAvatarHash;
 
   String get chatApiUrl => _chatApiUrl;
   String get chatApiKey => _chatApiKey;
@@ -91,6 +93,7 @@ class SettingsService extends ChangeNotifier {
     // 用户信息
     _userNickname = StorageService.getString('user_nickname') ?? 'ZeroChat';
     _userAvatarUrl = StorageService.getString('user_avatar_url') ?? '';
+    _userAvatarHash = StorageService.getString('user_avatar_hash') ?? '';
 
     // 主聊天 API
     _chatApiUrl = StorageService.getString('chat_api_url') ?? '';
@@ -132,7 +135,11 @@ class SettingsService extends ChangeNotifier {
   // ========== 更新方法 ==========
 
   /// 更新用户信息
-  Future<void> updateUserProfile({String? nickname, String? avatarUrl}) async {
+  Future<void> updateUserProfile({
+    String? nickname,
+    String? avatarUrl,
+    String? avatarHash,
+  }) async {
     if (nickname != null) {
       _userNickname = nickname;
       await StorageService.setString('user_nickname', nickname);
@@ -140,6 +147,10 @@ class SettingsService extends ChangeNotifier {
     if (avatarUrl != null) {
       _userAvatarUrl = avatarUrl;
       await StorageService.setString('user_avatar_url', avatarUrl);
+    }
+    if (avatarHash != null) {
+      _userAvatarHash = avatarHash;
+      await StorageService.setString('user_avatar_hash', avatarHash);
     }
     notifyListeners();
   }

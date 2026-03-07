@@ -20,10 +20,24 @@ class SecureBackendClient {
 
   static Map<String, String> get authHeaders => {'X-Auth-Token': _authToken};
 
+  static Map<String, String> _buildHeaders({
+    Map<String, String>? headers,
+    bool includeAuth = true,
+  }) {
+    final merged = <String, String>{};
+    if (includeAuth) {
+      merged['X-Auth-Token'] = _authToken;
+    }
+    if (headers != null) {
+      merged.addAll(headers);
+    }
+    return merged;
+  }
+
   static Future<SecureBackendResponse> get(String url) async {
     final response = await http.get(
       Uri.parse(url),
-      headers: {'X-Auth-Token': _authToken, 'Accept': 'application/json'},
+      headers: _buildHeaders(headers: {'Accept': 'application/json'}),
     );
 
     return _decodeResponse(response);
@@ -35,7 +49,7 @@ class SecureBackendClient {
   ) async {
     final response = await http.post(
       Uri.parse(url),
-      headers: {'Content-Type': 'application/json', 'X-Auth-Token': _authToken},
+      headers: _buildHeaders(headers: {'Content-Type': 'application/json'}),
       body: jsonEncode({'payload': _encryptPayload(body)}),
     );
 
@@ -48,7 +62,7 @@ class SecureBackendClient {
   ) async {
     final response = await http.put(
       Uri.parse(url),
-      headers: {'Content-Type': 'application/json', 'X-Auth-Token': _authToken},
+      headers: _buildHeaders(headers: {'Content-Type': 'application/json'}),
       body: jsonEncode({'payload': _encryptPayload(body)}),
     );
 
@@ -58,7 +72,7 @@ class SecureBackendClient {
   static Future<SecureBackendResponse> delete(String url) async {
     final response = await http.delete(
       Uri.parse(url),
-      headers: {'X-Auth-Token': _authToken, 'Accept': 'application/json'},
+      headers: _buildHeaders(headers: {'Accept': 'application/json'}),
     );
 
     return _decodeResponse(response);
@@ -97,6 +111,55 @@ class SecureBackendClient {
       return _decryptPayload(decoded['payload']);
     }
     return decoded;
+  }
+
+  // Raw requests for non-encrypted endpoints or binary content.
+  static Future<http.Response> getRaw(
+    String url, {
+    Map<String, String>? headers,
+    bool includeAuth = true,
+  }) async {
+    return http.get(
+      Uri.parse(url),
+      headers: _buildHeaders(headers: headers, includeAuth: includeAuth),
+    );
+  }
+
+  static Future<http.Response> postRawJson(
+    String url, {
+    required Map<String, dynamic> body,
+    Map<String, String>? headers,
+    bool includeAuth = true,
+  }) async {
+    final merged = <String, String>{'Content-Type': 'application/json'};
+    if (headers != null) {
+      merged.addAll(headers);
+    }
+    return http.post(
+      Uri.parse(url),
+      headers: _buildHeaders(headers: merged, includeAuth: includeAuth),
+      body: jsonEncode(body),
+    );
+  }
+
+  static Future<http.StreamedResponse> multipartPost(
+    String url, {
+    List<http.MultipartFile>? files,
+    Map<String, String>? fields,
+    Map<String, String>? headers,
+    bool includeAuth = true,
+  }) async {
+    final request = http.MultipartRequest('POST', Uri.parse(url));
+    request.headers.addAll(
+      _buildHeaders(headers: headers, includeAuth: includeAuth),
+    );
+    if (fields != null) {
+      request.fields.addAll(fields);
+    }
+    if (files != null) {
+      request.files.addAll(files);
+    }
+    return request.send();
   }
 
   static Map<String, String> _encryptPayload(Map<String, dynamic> data) {

@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
+import '../widgets/smart_avatar_image.dart';
 import 'api_settings_page.dart';
 import 'global_prompts_page.dart';
 import 'favorites_page.dart';
@@ -106,6 +107,9 @@ class _ProfilePageState extends State<ProfilePage> {
 
   Widget _buildProfileCard() {
     final settings = SettingsService.instance;
+    final avatarUrl = settings.userAvatarUrl.startsWith('http')
+        ? settings.userAvatarUrl
+        : '${settings.backendUrl}${settings.userAvatarUrl}';
     return InkWell(
       onTap: _editProfile,
       child: Container(
@@ -117,15 +121,14 @@ class _ProfilePageState extends State<ProfilePage> {
             ClipRRect(
               borderRadius: BorderRadius.circular(8),
               child: settings.userAvatarUrl.isNotEmpty
-                  ? Image.network(
-                      settings.userAvatarUrl.startsWith('http')
-                          ? settings.userAvatarUrl
-                          : '${settings.backendUrl}${settings.userAvatarUrl}',
-                      headers: SecureBackendClient.authHeaders,
+                  ? SmartAvatarImage(
+                      remoteUrl: avatarUrl,
+                      cacheKey: 'user_self_avatar',
+                      backendHash: settings.userAvatarHash,
                       width: 64,
                       height: 64,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => _buildDefaultAvatar(),
+                      fallbackBuilder: _buildDefaultAvatar,
                     )
                   : _buildDefaultAvatar(),
             ),
@@ -178,6 +181,7 @@ class _ProfilePageState extends State<ProfilePage> {
     );
     String? selectedImagePath;
     String currentAvatarUrl = SettingsService.instance.userAvatarUrl;
+    String currentAvatarHash = SettingsService.instance.userAvatarHash;
 
     final result = await showDialog<bool>(
       context: context,
@@ -217,13 +221,16 @@ class _ProfilePageState extends State<ProfilePage> {
                             fit: BoxFit.cover,
                           )
                         : (currentAvatarUrl.isNotEmpty
-                              ? Image.network(
-                                  currentAvatarUrl.startsWith('http')
+                              ? SmartAvatarImage(
+                                  remoteUrl: currentAvatarUrl.startsWith('http')
                                       ? currentAvatarUrl
                                       : '${SettingsService.instance.backendUrl}$currentAvatarUrl',
-                                  headers: SecureBackendClient.authHeaders,
+                                  cacheKey: 'user_self_avatar',
+                                  backendHash: currentAvatarHash,
+                                  width: 80,
+                                  height: 80,
                                   fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) => const Icon(
+                                  fallbackBuilder: () => const Icon(
                                     Icons.add_a_photo,
                                     size: 32,
                                     color: Colors.grey,
@@ -268,28 +275,29 @@ class _ProfilePageState extends State<ProfilePage> {
 
     if (result == true) {
       String? newAvatarUrl;
+      String? newAvatarHash;
 
       // 上传头像到后端
       if (selectedImagePath != null) {
         try {
           final backendUrl = SettingsService.instance.backendUrl;
-          final uri = Uri.parse('$backendUrl/api/settings/avatar');
-          final request = http.MultipartRequest('POST', uri);
-          request.headers.addAll(SecureBackendClient.authHeaders);
-          request.files.add(
-            await http.MultipartFile.fromPath(
-              'file',
-              selectedImagePath!,
-              contentType: MediaType('image', 'jpeg'),
-            ),
+          final response = await SecureBackendClient.multipartPost(
+            '$backendUrl/api/settings/avatar',
+            files: [
+              await http.MultipartFile.fromPath(
+                'file',
+                selectedImagePath!,
+                contentType: MediaType('image', 'jpeg'),
+              ),
+            ],
           );
-          final response = await request.send();
           if (response.statusCode == 200) {
             final respStr = await response.stream.bytesToString();
             final data =
                 SecureBackendClient.decodeResponseBodyString(respStr)
                     as Map<String, dynamic>;
             newAvatarUrl = data['path'] as String?;
+            newAvatarHash = data['hash'] as String?;
             debugPrint('Avatar uploaded: $newAvatarUrl');
           }
         } catch (e) {
@@ -302,6 +310,7 @@ class _ProfilePageState extends State<ProfilePage> {
             ? nicknameController.text
             : null,
         avatarUrl: newAvatarUrl ?? currentAvatarUrl,
+        avatarHash: newAvatarHash ?? currentAvatarHash,
       );
     }
   }

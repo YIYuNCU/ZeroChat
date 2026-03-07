@@ -3,6 +3,7 @@
 管理全局配置的 API 端点
 """
 from typing import Optional
+import hashlib
 from pydantic import BaseModel
 from fastapi import APIRouter
 
@@ -125,12 +126,16 @@ async def upload_avatar(file: UploadFile = File(...)):
     # 保存文件
     with open(filepath, "wb") as f:
         shutil.copyfileobj(file.file, f)
+
+    with open(filepath, "rb") as f:
+        avatar_hash = hashlib.md5(f.read()).hexdigest()
     
     # 返回相对路径
     return {
         "success": True,
         "filename": filename,
-        "path": f"/api/avatars/{filename}"
+        "path": f"/api/avatars/{filename}",
+        "hash": avatar_hash,
     }
 
 @router.get("/avatars/{filename}")

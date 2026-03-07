@@ -134,6 +134,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         if not path.startswith("/api"):
             return await call_next(request)
 
+        # Let CORS preflight pass before auth/decrypt checks.
+        if request.method.upper() == "OPTIONS":
+            return await call_next(request)
+
         auth_token = CONFIG.get("auth_token") or DEFAULT_AUTH_TOKEN
         encryption_secret = CONFIG.get("encryption_secret") or DEFAULT_ENCRYPTION_SECRET
 
