@@ -134,6 +134,36 @@ class MessageStore extends ChangeNotifier {
     }
   }
 
+  /// 更新已存在消息（用于占位消息替换等场景）
+  Future<bool> updateMessage(
+    String chatId,
+    String messageId, {
+    String? content,
+    MessageType? type,
+    String? quotedPreviewText,
+  }) async {
+    final messages = _messages[chatId];
+    if (messages == null || messages.isEmpty) {
+      return false;
+    }
+
+    final index = messages.indexWhere((m) => m.id == messageId);
+    if (index < 0) {
+      return false;
+    }
+
+    final current = messages[index];
+    messages[index] = current.copyWith(
+      content: content,
+      type: type,
+      quotedPreviewText: quotedPreviewText,
+    );
+
+    await _saveMessages(chatId);
+    _notifyMessageUpdate(chatId);
+    return true;
+  }
+
   /// 同步删除消息到后端
   Future<void> _syncDeleteMessageToBackend(
     String chatId,

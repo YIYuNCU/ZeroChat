@@ -475,7 +475,7 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除分类'),
-        content: Text('长按删除已触发，确定删除分类 "$category" 及其所有表情吗？'),
+        content: Text('确定删除分类 "$category" 及其所有表情吗？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -520,7 +520,7 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除表情'),
-        content: const Text('长按删除已触发，确定删除该表情吗？'),
+        content: const Text('确定删除该表情吗？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),

@@ -152,7 +152,7 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除分类'),
-        content: Text('长按删除已触发，确定删除分类 "$targetCategory" 及其所有表情吗？'),
+        content: Text('确定删除分类 "$targetCategory" 及其所有表情吗？'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
           TextButton(

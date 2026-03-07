@@ -841,6 +841,22 @@ class ChatController extends ChangeNotifier {
 
       // 如果有情绪标签，从后端获取随机表情包并发送
       if (emotion != null) {
+        final placeholderStickerId =
+            '${DateTime.now().millisecondsSinceEpoch}_sticker_${emotion.hashCode}';
+        final placeholderContent = StickerService.createStickerMessageContent(
+          emotion,
+          'placeholder://$emotion',
+        );
+        final placeholderStickerMessage = Message(
+          id: placeholderStickerId,
+          senderId: roleId,
+          receiverId: 'me',
+          content: placeholderContent,
+          type: MessageType.sticker,
+          timestamp: DateTime.now(),
+        );
+        await MessageStore.instance.addMessage(chatId, placeholderStickerMessage);
+
         try {
           final backendUrl = SettingsService.instance.backendUrl;
           final resp = await SecureBackendClient.get(
@@ -859,16 +875,13 @@ class ChatController extends ChangeNotifier {
                 emotion,
                 stickerUrl,
               );
-              final stickerMessage = Message(
-                id: '${DateTime.now().millisecondsSinceEpoch}_sticker_${emotion.hashCode}',
-                senderId: roleId,
-                receiverId: 'me',
+              await MessageStore.instance.updateMessage(
+                chatId,
+                placeholderStickerId,
                 content: stickerContent,
                 type: MessageType.sticker,
-                timestamp: DateTime.now(),
               );
-              await MessageStore.instance.addMessage(chatId, stickerMessage);
-              debugPrint('ChatController: Sent sticker for emotion: $emotion');
+              debugPrint('ChatController: Replaced placeholder sticker for emotion: $emotion');
             }
           }
         } catch (e) {

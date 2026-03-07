@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 
@@ -927,13 +928,27 @@ def _to_absolute_backend_url(url: str, backend_base_url: Optional[str]) -> str:
     raw = str(url or "").strip()
     if not raw:
         return raw
-    if raw.startswith("http://") or raw.startswith("https://"):
-        return raw
     if not backend_base_url:
         return raw
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        api_path = parsed.path or ""
+        # Rewrite historical/stale hosts to current backend for emoji-related endpoints.
+        if api_path.startswith("/api/emojis/") or api_path.startswith("/api/user-emojis/"):
+            base = backend_base_url.rstrip("/")
+            tail = api_path
+            if parsed.query:
+                tail += f"?{parsed.query}"
+            if parsed.fragment:
+                tail += f"#{parsed.fragment}"
+            return f"{base}{tail}"
+        return raw
+
     base = backend_base_url.rstrip("/")
     if raw.startswith("/"):
         return f"{base}{raw}"
+    if raw.startswith("api/"):
+        return f"{base}/{raw}"
     return raw
 
 

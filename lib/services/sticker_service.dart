@@ -80,6 +80,20 @@ class StickerService {
     return _random.nextDouble() < config.sendProbability;
   }
 
+  static String? _normalizeEmotionTag(String raw) {
+    final value = raw.trim().toLowerCase();
+    const aliases = {
+      'suprised': 'surprised',
+      'surprise': 'surprised',
+      'sleep': 'sleepy',
+    };
+    final mapped = aliases[value] ?? value;
+    if (EmotionTypes.all.contains(mapped)) {
+      return mapped;
+    }
+    return null;
+  }
+
   /// 解析情绪标签并提取内容
   /// 返回 (cleanedText, emotion?)
   static (String, String?) parseEmotionTag(String text) {
@@ -87,11 +101,11 @@ class StickerService {
     final match = regex.firstMatch(text);
 
     if (match != null) {
-      final emotion = match.group(1)!;
+      final normalizedEmotion = _normalizeEmotionTag(match.group(1) ?? '');
       // 验证是否是有效的情绪类型
-      if (EmotionTypes.all.contains(emotion)) {
+      if (normalizedEmotion != null) {
         final cleanedText = text.replaceFirst(regex, '').trim();
-        return (cleanedText, emotion);
+        return (cleanedText, normalizedEmotion);
       }
     }
 
@@ -100,7 +114,9 @@ class StickerService {
 
   /// 为表情包消息生成内容标识
   static String createStickerMessageContent(String emotion, String imagePath) {
-    return '[STICKER|ai|$emotion|$imagePath]';
+    // Keep AI sticker payload in legacy format to stay compatible with
+    // historical records and existing backend-side processors.
+    return '[STICKER:$emotion:$imagePath]';
   }
 
   /// 为用户表情消息生成内容标识
@@ -116,13 +132,15 @@ class StickerService {
   /// 解析表情包消息内容
   /// 返回 (isSticker, emotion?, imagePath?)
   static (bool, String?, String?) parseStickerMessage(String content) {
-    if (!content.endsWith(']')) {
+    final normalized = content.trim();
+
+    if (!normalized.endsWith(']')) {
       return (false, null, null);
     }
 
     // 新格式: [STICKER|ai|emotion|url] / [STICKER|user|category|tag|emojiId|url]
-    if (content.startsWith('[STICKER|')) {
-      final inner = content.substring(9, content.length - 1);
+    if (normalized.startsWith('[STICKER|')) {
+      final inner = normalized.substring(9, normalized.length - 1);
       final parts = inner.split('|');
       if (parts.length >= 4) {
         if (parts[0] == 'ai') {
@@ -138,7 +156,7 @@ class StickerService {
 
     // 兼容旧格式: [STICKER:emotion:path]
     final regex = RegExp(r'\[STICKER:(\w+):(.+)\]');
-    final match = regex.firstMatch(content);
+    final match = regex.firstMatch(normalized);
 
     if (match != null) {
       return (true, match.group(1), match.group(2));
