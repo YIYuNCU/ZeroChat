@@ -58,8 +58,12 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   bool _isLoadingMoreMessages = false;
   bool _isUserNearBottom = true;
   bool _loadMoreConfirmNeeded = false;
+  double _lastKeyboardInset = 0;
+  double _lastEmojiPanelHeight = 300;
+  bool _isSwitchingEmojiToKeyboard = false;
   DateTime? _lastLoadMoreConfirmTime;
   bool _showTyping = false;
+  bool _isEmojiPanelVisible = false;
   late Role _currentRole;
 
   /// 当前引用状态
@@ -118,7 +122,60 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
 
   void _dismissInputControls() {
     FocusScope.of(context).unfocus();
+    _isSwitchingEmojiToKeyboard = false;
     _inputBarController.closeControls();
+  }
+
+  void _onEmojiPanelHeightChanged(double height) {
+    if (height <= 0) {
+      return;
+    }
+    _lastEmojiPanelHeight = height;
+  }
+
+  void _onEmojiPanelVisibilityChanged(bool visible) {
+    if (_isEmojiPanelVisible == visible) {
+      return;
+    }
+    setState(() {
+      _isEmojiPanelVisible = visible;
+      if (visible) {
+        _isSwitchingEmojiToKeyboard = false;
+      }
+    });
+    if (_isUserNearBottom) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _scrollToBottom();
+        }
+      });
+    }
+  }
+
+  void _onInputActivated() {
+    if (_isEmojiPanelVisible) {
+      _isSwitchingEmojiToKeyboard = true;
+    }
+    if (_isUserNearBottom) {
+      _ensureBottomMessageVisible();
+    }
+  }
+
+  void _ensureBottomMessageVisible() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) {
+        return;
+      }
+      _scrollToBottom(animate: false);
+
+      // Keyboard/padding transitions may update maxScrollExtent one frame later.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) {
+          return;
+        }
+        _scrollToBottom(animate: false);
+      });
+    });
   }
 
   void _onSettingsChanged() {
@@ -433,6 +490,26 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
         : globalBackgroundUrl;
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
 
+    if (bottomInset != _lastKeyboardInset) {
+      final oldInset = _lastKeyboardInset;
+      _lastKeyboardInset = bottomInset;
+      if (bottomInset > oldInset && _isUserNearBottom) {
+        if (_isSwitchingEmojiToKeyboard) {
+          _isSwitchingEmojiToKeyboard = false;
+        }
+        _ensureBottomMessageVisible();
+      }
+      if (bottomInset == 0 && oldInset > 0) {
+        _isSwitchingEmojiToKeyboard = false;
+      }
+    }
+
+    final inputBottomInset = _isEmojiPanelVisible
+        ? 0.0
+        : (_isSwitchingEmojiToKeyboard && bottomInset == 0
+              ? _lastEmojiPanelHeight
+              : bottomInset);
+
     return Scaffold(
       resizeToAvoidBottomInset: false,
       appBar: _buildAppBar(),
@@ -562,12 +639,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             if (_isMultiSelectMode)
               _buildMultiSelectToolbar()
             else
-              AnimatedPadding(
-                duration: const Duration(milliseconds: 180),
-                curve: Curves.easeOut,
-                padding: EdgeInsets.only(bottom: bottomInset),
+              Padding(
+                padding: EdgeInsets.only(bottom: inputBottomInset),
                 child: InputBar(
                   controller: _inputBarController,
+                  onInputActivated: _onInputActivated,
+                  onEmojiPanelVisibilityChanged: _onEmojiPanelVisibilityChanged,
+                  onEmojiPanelHeightChanged: _onEmojiPanelHeightChanged,
                   onSend: _sendMessage,
                   onImageSend: _sendImageMessage,
                   onEmojiSend: _sendEmojiMessage,

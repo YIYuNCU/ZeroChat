@@ -18,6 +18,9 @@ class InputBar extends StatefulWidget {
   final Function(String)? onSend;
   final Function(String imagePath)? onImageSend;
   final void Function(EmojiItem emoji)? onEmojiSend;
+  final VoidCallback? onInputActivated;
+  final ValueChanged<bool>? onEmojiPanelVisibilityChanged;
+  final ValueChanged<double>? onEmojiPanelHeightChanged;
   final InputBarController? controller;
   final String? roleId;
   final String? hintText;
@@ -27,6 +30,9 @@ class InputBar extends StatefulWidget {
     this.onSend,
     this.onImageSend,
     this.onEmojiSend,
+    this.onInputActivated,
+    this.onEmojiPanelVisibilityChanged,
+    this.onEmojiPanelHeightChanged,
     this.controller,
     this.roleId,
     this.hintText,
@@ -42,14 +48,36 @@ class _InputBarState extends State<InputBar> {
   final ImagePicker _imagePicker = ImagePicker();
   bool _showSendButton = false;
   bool _showEmojiPicker = false;
+  double _emojiPanelHeight = 300;
+
+  void _setEmojiPanelVisible(bool visible) {
+    if (_showEmojiPicker == visible) {
+      return;
+    }
+    setState(() {
+      _showEmojiPicker = visible;
+    });
+    if (visible) {
+      widget.onEmojiPanelHeightChanged?.call(_emojiPanelHeight);
+    }
+    widget.onEmojiPanelVisibilityChanged?.call(visible);
+  }
 
   void _handleExternalClose() {
     final needsStateUpdate = _showEmojiPicker;
     _focusNode.unfocus();
     if (needsStateUpdate && mounted) {
-      setState(() {
-        _showEmojiPicker = false;
-      });
+      _setEmojiPanelVisible(false);
+    }
+  }
+
+  void _onFocusChanged() {
+    if (!_focusNode.hasFocus) {
+      return;
+    }
+    widget.onInputActivated?.call();
+    if (_showEmojiPicker) {
+      _setEmojiPanelVisible(false);
     }
   }
 
@@ -57,6 +85,7 @@ class _InputBarState extends State<InputBar> {
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
+    _focusNode.addListener(_onFocusChanged);
     widget.controller?.addListener(_handleExternalClose);
   }
 
@@ -84,9 +113,7 @@ class _InputBarState extends State<InputBar> {
       widget.onSend?.call(text);
       _controller.clear();
       if (_showEmojiPicker) {
-        setState(() {
-          _showEmojiPicker = false;
-        });
+        _setEmojiPanelVisible(false);
       }
     }
   }
@@ -95,10 +122,12 @@ class _InputBarState extends State<InputBar> {
     if (widget.onEmojiSend == null) {
       return;
     }
+    final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+    if (keyboardInset > 0) {
+      _emojiPanelHeight = keyboardInset;
+    }
     _focusNode.unfocus();
-    setState(() {
-      _showEmojiPicker = !_showEmojiPicker;
-    });
+    _setEmojiPanelVisible(!_showEmojiPicker);
   }
 
   /// 显示附件选项菜单
@@ -215,6 +244,7 @@ class _InputBarState extends State<InputBar> {
   @override
   void dispose() {
     _controller.removeListener(_onTextChanged);
+    _focusNode.removeListener(_onFocusChanged);
     widget.controller?.removeListener(_handleExternalClose);
     _controller.dispose();
     _focusNode.dispose();
@@ -236,12 +266,12 @@ class _InputBarState extends State<InputBar> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
               child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   _buildIconButton(Icons.keyboard_voice_outlined, onPressed: () {}),
                   Expanded(
                     child: Container(
-                      constraints: const BoxConstraints(minHeight: 36, maxHeight: 120),
+                      constraints: const BoxConstraints(minHeight: 40, maxHeight: 120),
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(4),
@@ -255,13 +285,6 @@ class _InputBarState extends State<InputBar> {
                         focusNode: _focusNode,
                         maxLines: null,
                         textInputAction: TextInputAction.send,
-                        onTap: () {
-                          if (_showEmojiPicker) {
-                            setState(() {
-                              _showEmojiPicker = false;
-                            });
-                          }
-                        },
                         onSubmitted: (_) => _handleSend(),
                         style: const TextStyle(
                           fontSize: 17,
@@ -295,14 +318,15 @@ class _InputBarState extends State<InputBar> {
               ),
             ),
             if (_showEmojiPicker)
-              _EmojiPickerPanel(
-                roleId: widget.roleId,
-                onEmojiSelected: (emoji) {
-                  widget.onEmojiSend?.call(emoji);
-                  setState(() {
-                    _showEmojiPicker = false;
-                  });
-                },
+              SizedBox(
+                height: _emojiPanelHeight,
+                child: _EmojiPickerPanel(
+                  roleId: widget.roleId,
+                  onEmojiSelected: (emoji) {
+                    widget.onEmojiSend?.call(emoji);
+                    _setEmojiPanelVisible(false);
+                  },
+                ),
               ),
           ],
         ),
@@ -506,6 +530,10 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
       maxWidth: 1200,
     );
     if (picked == null) {
+      return;
+    }
+
+    if (!mounted) {
       return;
     }
 
