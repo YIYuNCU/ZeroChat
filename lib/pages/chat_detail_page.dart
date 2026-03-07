@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import '../models/message.dart';
+import '../models/emoji_item.dart';
 import '../models/role.dart';
 import '../widgets/chat_bubble.dart';
 import '../widgets/input_bar.dart';
@@ -155,6 +156,26 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
 
     // 发送图片消息
     ChatController.instance.sendUserImageMessage(widget.chatId, imagePath);
+
+    _scrollToBottom();
+  }
+
+  void _sendEmojiMessage(EmojiItem emoji) {
+    if (ChatController.instance.isProcessing(widget.chatId)) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('正在处理消息，请稍后')));
+      return;
+    }
+
+    ChatController.instance.sendUserStickerMessage(
+      chatId: widget.chatId,
+      stickerUrl: emoji.url,
+      category: emoji.category,
+      tag: emoji.tag ?? emoji.category,
+      emojiId: emoji.id,
+      fromUserLibrary: !emoji.isAi,
+    );
 
     _scrollToBottom();
   }
@@ -521,7 +542,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             if (_isMultiSelectMode)
               _buildMultiSelectToolbar()
             else
-              InputBar(onSend: _sendMessage, onImageSend: _sendImageMessage),
+              InputBar(
+                onSend: _sendMessage,
+                onImageSend: _sendImageMessage,
+                onEmojiSend: _sendEmojiMessage,
+                roleId: widget.isGroup
+                    ? RoleService.getCurrentRole().id
+                    : widget.chatId,
+              ),
           ],
         ),
       ),

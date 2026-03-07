@@ -100,12 +100,43 @@ class StickerService {
 
   /// 为表情包消息生成内容标识
   static String createStickerMessageContent(String emotion, String imagePath) {
-    return '[STICKER:$emotion:$imagePath]';
+    return '[STICKER|ai|$emotion|$imagePath]';
+  }
+
+  /// 为用户表情消息生成内容标识
+  static String createUserStickerMessageContent({
+    required String category,
+    required String tag,
+    required String emojiId,
+    required String imagePath,
+  }) {
+    return '[STICKER|user|$category|$tag|$emojiId|$imagePath]';
   }
 
   /// 解析表情包消息内容
   /// 返回 (isSticker, emotion?, imagePath?)
   static (bool, String?, String?) parseStickerMessage(String content) {
+    if (!content.endsWith(']')) {
+      return (false, null, null);
+    }
+
+    // 新格式: [STICKER|ai|emotion|url] / [STICKER|user|category|tag|emojiId|url]
+    if (content.startsWith('[STICKER|')) {
+      final inner = content.substring(9, content.length - 1);
+      final parts = inner.split('|');
+      if (parts.length >= 4) {
+        if (parts[0] == 'ai') {
+          return (true, parts[1], parts.sublist(2).join('|'));
+        }
+        // user format: [STICKER|user|category|tag|emojiId|url]
+        // inner parts: [user, category, tag, emojiId, url]
+        if (parts[0] == 'user' && parts.length >= 5) {
+          return (true, parts[1], parts.sublist(4).join('|'));
+        }
+      }
+    }
+
+    // 兼容旧格式: [STICKER:emotion:path]
     final regex = RegExp(r'\[STICKER:(\w+):(.+)\]');
     final match = regex.firstMatch(content);
 

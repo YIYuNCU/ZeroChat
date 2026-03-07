@@ -3,16 +3,78 @@
 """
 import json
 import hashlib
+import sqlite3
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 
 router = APIRouter()
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
+USER_EMOJI_DIR = DATA_DIR / "user_emojis"
+USER_EMOJI_DB = DATA_DIR / "user_emojis.sqlite"
+
+
+def _normalize_category_name(name: str) -> str:
+    normalized = str(name or "").strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="分类不能为空")
+    if any(c in normalized for c in ["..", "/", "\\"]):
+        raise HTTPException(status_code=400, detail="分类名不合法")
+    return normalized
+
+
+def _init_user_emoji_db(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_emoji_categories (
+            name TEXT PRIMARY KEY,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_emojis (
+            id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            created_at TEXT,
+            FOREIGN KEY (category) REFERENCES user_emoji_categories(name)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_user_emojis_category ON user_emojis(category)")
+
+
+def _get_user_emoji_connection() -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    USER_EMOJI_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(USER_EMOJI_DB)
+    conn.row_factory = sqlite3.Row
+    _init_user_emoji_db(conn)
+    return conn
+
+
+def _guess_ext(filename: str) -> str:
+    ext = filename.split(".")[-1].lower() if "." in filename else "png"
+    if ext not in {"png", "jpg", "jpeg", "gif", "webp"}:
+        ext = "png"
+    return ext
+
+
+class EmojiCategoryPayload(BaseModel):
+    category: str
+
+
+class ResolveUserEmojiTagPayload(BaseModel):
+    emoji_id: str
 
 class ProactiveConfig(BaseModel):
     """主动消息配置"""
@@ -450,6 +512,100 @@ async def list_assets_by_type(role_id: str, asset_type: str):
 
 # ========== 表情包接口 ==========
 
+@router.get("/roles/{role_id}/emoji-categories")
+async def list_role_emoji_categories(role_id: str):
+    role_dir = get_role_dir(role_id)
+    emojis_dir = role_dir / "emojis"
+    if not emojis_dir.exists():
+        return {"role_id": role_id, "categories": []}
+
+    categories = sorted([d.name for d in emojis_dir.iterdir() if d.is_dir()])
+    return {"role_id": role_id, "categories": categories}
+
+
+@router.post("/roles/{role_id}/emoji-categories")
+async def create_role_emoji_category(role_id: str, payload: EmojiCategoryPayload):
+    category = _normalize_category_name(payload.category)
+    category_dir = get_role_dir(role_id) / "emojis" / category
+    category_dir.mkdir(parents=True, exist_ok=True)
+    return {"success": True, "role_id": role_id, "category": category}
+
+
+@router.delete("/roles/{role_id}/emoji-categories/{category}")
+async def delete_role_emoji_category(role_id: str, category: str):
+    import shutil
+
+    normalized = _normalize_category_name(category)
+    category_dir = get_role_dir(role_id) / "emojis" / normalized
+    if not category_dir.exists():
+        raise HTTPException(status_code=404, detail="分类不存在")
+    shutil.rmtree(category_dir)
+    return {"success": True, "role_id": role_id, "category": normalized}
+
+
+@router.get("/roles/{role_id}/emojis/{category}/list")
+async def list_role_emojis(role_id: str, category: str):
+    normalized = _normalize_category_name(category)
+    emoji_dir = get_role_dir(role_id) / "emojis" / normalized
+    if not emoji_dir.exists():
+        return {"role_id": role_id, "category": normalized, "emojis": []}
+
+    supported_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    files = sorted(
+        [f for f in emoji_dir.iterdir() if f.is_file() and f.suffix.lower() in supported_ext],
+        key=lambda p: p.name,
+    )
+
+    emojis = [
+        {
+            "id": f"{normalized}:{f.name}",
+            "filename": f.name,
+            "category": normalized,
+            "url": f"/api/emojis/{role_id}/{normalized}/{f.name}",
+        }
+        for f in files
+    ]
+    return {"role_id": role_id, "category": normalized, "emojis": emojis}
+
+
+@router.post("/roles/{role_id}/emojis/{category}/upload")
+async def upload_role_emoji(role_id: str, category: str, file: UploadFile = File(...)):
+    import shutil
+
+    normalized = _normalize_category_name(category)
+    emoji_dir = get_role_dir(role_id) / "emojis" / normalized
+    emoji_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = _guess_ext(file.filename or "")
+    filename = f"emoji_{uuid.uuid4().hex[:10]}.{ext}"
+    file_path = emoji_dir / filename
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    return {
+        "success": True,
+        "role_id": role_id,
+        "emoji": {
+            "id": f"{normalized}:{filename}",
+            "filename": filename,
+            "category": normalized,
+            "url": f"/api/emojis/{role_id}/{normalized}/{filename}",
+        },
+    }
+
+
+@router.delete("/roles/{role_id}/emojis/{category}/{filename}")
+async def delete_role_emoji(role_id: str, category: str, filename: str):
+    normalized = _normalize_category_name(category)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="文件名不合法")
+
+    file_path = get_role_dir(role_id) / "emojis" / normalized / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="表情不存在")
+    file_path.unlink()
+    return {"success": True}
+
 @router.get("/emojis/{role_id}/{emotion}/{filename}")
 async def get_emoji(role_id: str, emotion: str, filename: str):
     """获取角色表情包文件"""
@@ -485,6 +641,190 @@ async def get_random_emoji(role_id: str, emotion: str):
         "emotion": emotion,
         "filename": chosen.name,
         "url": f"/api/emojis/{role_id}/{emotion}/{chosen.name}"
+    }
+
+
+# ========== 用户表情（SQLite 映射） ==========
+
+@router.get("/user-emojis/categories")
+async def list_user_emoji_categories():
+    with _get_user_emoji_connection() as conn:
+        rows = conn.execute(
+            "SELECT name FROM user_emoji_categories ORDER BY created_at ASC"
+        ).fetchall()
+        categories = [str(r["name"]) for r in rows]
+    return {"categories": categories}
+
+
+@router.post("/user-emojis/categories")
+async def create_user_emoji_category(payload: EmojiCategoryPayload):
+    category = _normalize_category_name(payload.category)
+    with _get_user_emoji_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO user_emoji_categories(name, created_at) VALUES(?, ?)",
+            (category, datetime.now().isoformat()),
+        )
+    (USER_EMOJI_DIR / category).mkdir(parents=True, exist_ok=True)
+    return {"success": True, "category": category}
+
+
+@router.delete("/user-emojis/categories/{category}")
+async def delete_user_emoji_category(category: str):
+    import shutil
+
+    normalized = _normalize_category_name(category)
+    with _get_user_emoji_connection() as conn:
+        rows = conn.execute(
+            "SELECT file_path FROM user_emojis WHERE category = ?",
+            (normalized,),
+        ).fetchall()
+        for row in rows:
+            path = Path(str(row["file_path"]))
+            if path.exists():
+                path.unlink()
+        conn.execute("DELETE FROM user_emojis WHERE category = ?", (normalized,))
+        conn.execute("DELETE FROM user_emoji_categories WHERE name = ?", (normalized,))
+
+    category_dir = USER_EMOJI_DIR / normalized
+    if category_dir.exists():
+        shutil.rmtree(category_dir)
+
+    return {"success": True, "category": normalized}
+
+
+@router.get("/user-emojis")
+async def list_user_emojis(category: Optional[str] = None):
+    with _get_user_emoji_connection() as conn:
+        if category:
+            normalized = _normalize_category_name(category)
+            rows = conn.execute(
+                "SELECT id, category, tag, filename, created_at FROM user_emojis WHERE category = ? ORDER BY created_at DESC",
+                (normalized,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, category, tag, filename, created_at FROM user_emojis ORDER BY created_at DESC"
+            ).fetchall()
+
+    emojis = [
+        {
+            "id": str(r["id"]),
+            "category": str(r["category"]),
+            "tag": str(r["tag"]),
+            "filename": str(r["filename"]),
+            "created_at": str(r["created_at"]),
+            "url": f"/api/user-emojis/file/{r['id']}",
+        }
+        for r in rows
+    ]
+    return {"emojis": emojis}
+
+
+@router.post("/user-emojis/upload")
+async def upload_user_emoji(
+    category: str = Form(...),
+    tag: str = Form(...),
+    file: UploadFile = File(...),
+):
+    import shutil
+
+    normalized = _normalize_category_name(category)
+    tag_value = str(tag or "").strip()
+    if not tag_value:
+        raise HTTPException(status_code=400, detail="标签不能为空")
+
+    with _get_user_emoji_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO user_emoji_categories(name, created_at) VALUES(?, ?)",
+            (normalized, datetime.now().isoformat()),
+        )
+
+        ext = _guess_ext(file.filename or "")
+        emoji_id = f"u_{uuid.uuid4().hex[:12]}"
+        filename = f"{emoji_id}.{ext}"
+        category_dir = USER_EMOJI_DIR / normalized
+        category_dir.mkdir(parents=True, exist_ok=True)
+        file_path = category_dir / filename
+
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        conn.execute(
+            "INSERT INTO user_emojis(id, category, tag, filename, file_path, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+            (
+                emoji_id,
+                normalized,
+                tag_value,
+                filename,
+                str(file_path),
+                datetime.now().isoformat(),
+            ),
+        )
+
+    return {
+        "success": True,
+        "emoji": {
+            "id": emoji_id,
+            "category": normalized,
+            "tag": tag_value,
+            "filename": filename,
+            "url": f"/api/user-emojis/file/{emoji_id}",
+        },
+    }
+
+
+@router.get("/user-emojis/file/{emoji_id}")
+async def get_user_emoji_file(emoji_id: str):
+    from fastapi.responses import FileResponse
+
+    with _get_user_emoji_connection() as conn:
+        row = conn.execute(
+            "SELECT file_path FROM user_emojis WHERE id = ?",
+            (emoji_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="表情不存在")
+
+    file_path = Path(str(row["file_path"]))
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="表情文件不存在")
+    return FileResponse(file_path)
+
+
+@router.delete("/user-emojis/{emoji_id}")
+async def delete_user_emoji(emoji_id: str):
+    with _get_user_emoji_connection() as conn:
+        row = conn.execute(
+            "SELECT file_path FROM user_emojis WHERE id = ?",
+            (emoji_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="表情不存在")
+
+        file_path = Path(str(row["file_path"]))
+        if file_path.exists():
+            file_path.unlink()
+
+        conn.execute("DELETE FROM user_emojis WHERE id = ?", (emoji_id,))
+
+    return {"success": True}
+
+
+@router.post("/user-emojis/resolve-tag")
+async def resolve_user_emoji_tag(payload: ResolveUserEmojiTagPayload):
+    with _get_user_emoji_connection() as conn:
+        row = conn.execute(
+            "SELECT tag, category FROM user_emojis WHERE id = ?",
+            (payload.emoji_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="表情不存在")
+
+    return {
+        "found": True,
+        "emoji_id": payload.emoji_id,
+        "tag": str(row["tag"]),
+        "category": str(row["category"]),
     }
 
 # ========== 角色头像上传 ==========

@@ -11,6 +11,7 @@ import '../core/proactive_message_scheduler.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'role_settings_page.dart';
 import 'task_manager_page.dart';
+import 'emoji_manager_page.dart';
 
 /// 聊天设置页面
 /// ZeroChat 风格的聊天信息页面
@@ -247,6 +248,16 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 ],
               ),
               onTap: _openRoleSettings,
+            ),
+            const Divider(height: 1, indent: 16),
+            _buildItem(
+              title: '表情管理',
+              trailing: const Icon(
+                Icons.arrow_forward_ios,
+                size: 16,
+                color: Color(0xFFCCCCCC),
+              ),
+              onTap: _openEmojiManager,
             ),
           ]),
 
@@ -1068,6 +1079,15 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       });
       widget.onRoleChanged?.call();
     }
+  }
+
+  void _openEmojiManager() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => EmojiManagerPage(roleId: _currentRole.id),
+      ),
+    );
   }
 
   void _openTaskManager() {

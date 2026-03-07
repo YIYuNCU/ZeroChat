@@ -98,6 +98,31 @@ def _normalize_core_memory(raw_core_memory: Any) -> List[str]:
             result.append(text)
     return result
 
+
+def _get_available_emoji_categories(role_id: str) -> List[str]:
+    """Scan role emoji folders and return categories that contain at least one image."""
+    emoji_root = ROLES_DIR / role_id / "emojis"
+    if not emoji_root.exists() or not emoji_root.is_dir():
+        return []
+
+    image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    categories: List[str] = []
+
+    for category_dir in emoji_root.iterdir():
+        if not category_dir.is_dir():
+            continue
+        has_image = any(
+            f.is_file() and f.suffix.lower() in image_extensions
+            for f in category_dir.iterdir()
+        )
+        if has_image:
+            category_name = category_dir.name.strip()
+            if category_name:
+                categories.append(category_name)
+
+    # Keep stable order and avoid duplicates caused by inconsistent folder naming.
+    return sorted(set(categories))
+
 async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) -> Optional[str]:
     """
     检测文本情绪并返回对应表情包路径
@@ -119,15 +144,17 @@ async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) ->
     if not model or not api_url or not api_key:
         return None
 
+    configured_categories = _get_available_emoji_categories(role_id)
+    fallback_categories = ["happy", "sad", "angry", "surprised", "love", "confused", "excited", "tired"]
+    candidate_categories = configured_categories if configured_categories else fallback_categories
+    category_text = ", ".join(candidate_categories)
+
     system_prompt = role_data.get("system_prompt", "")
     emotion_prompt = (
-        "你是情绪分类器。根据给定文本判断最主要的情绪。\n可选标签: happy, sad, angry, surprised, love, confused, excited, tired, none。\n要求: 只输出一个标签, 不要解释, 不要多余文本。\n如果没有明显情绪, 输出 none。"
+        f"你是情绪分类器。根据给定文本判断最主要的情绪。\n可选标签: {category_text}, none。\n"
+        "要求: 只输出一个标签, 不要解释, 不要多余文本。\n如果没有明显情绪, 输出 none。"
     )
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    else:
-        messages.append({"role": "system", "content": emotion_prompt})
+    messages = [{"role": "system", "content": emotion_prompt}]
     messages.append({"role": "user", "content": text})
 
     result = await call_ai_direct(
@@ -140,13 +167,17 @@ async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) ->
     if not result.get("success"):
         return None
 
-    detected_emotion = (result.get("content") or "").strip().lower()
-    allowed = {"happy", "sad", "angry", "surprised", "love", "confused", "excited", "tired", "none"}
-    if detected_emotion not in allowed or detected_emotion == "none":
+    raw_detected = (result.get("content") or "").strip().lower()
+    detected_emotion = (raw_detected.split()[0] if raw_detected else "").strip("`'\"[](){}<>.,，。!！?？:：;；")
+
+    category_map = {c.lower(): c for c in candidate_categories}
+    if detected_emotion == "none" or detected_emotion not in category_map:
         return None
-    
+
+    selected_category = category_map[detected_emotion]
+
     # 检查对应表情包目录
-    emoji_dir = ROLES_DIR / role_id / "emojis" / detected_emotion
+    emoji_dir = ROLES_DIR / role_id / "emojis" / selected_category
     if not emoji_dir.exists():
         return None
     
@@ -159,8 +190,8 @@ async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) ->
     
     # 随机选择一个
     selected = random.choice(emoji_files)
-    return detected_emotion
-    # return f"/api/emojis/{role_id}/{detected_emotion}/{selected.name}"
+    return selected_category
+    # return f"/api/emojis/{role_id}/{selected_category}/{selected.name}"
 
 # ========== 统一入口 ==========
 

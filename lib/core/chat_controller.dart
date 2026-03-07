@@ -244,6 +244,57 @@ class ChatController extends ChangeNotifier {
     _processImageMessageInBackground(chatId, imagePath, context.isGroup);
   }
 
+  /// 发送用户表情（支持用户表情标签注入给 AI）
+  Future<void> sendUserStickerMessage({
+    required String chatId,
+    required String stickerUrl,
+    required String category,
+    required String tag,
+    String emojiId = '',
+    bool fromUserLibrary = true,
+  }) async {
+    if (_processingChats.contains(chatId)) {
+      debugPrint('ChatController: Already processing $chatId, ignoring sticker');
+      return;
+    }
+
+    final context = await initChat(chatId);
+
+    final stickerContent = fromUserLibrary
+        ? StickerService.createUserStickerMessageContent(
+            category: category,
+            tag: tag,
+            emojiId: emojiId,
+            imagePath: stickerUrl,
+          )
+        : StickerService.createStickerMessageContent(category, stickerUrl);
+
+    final userStickerMessage = Message(
+      id: '${DateTime.now().millisecondsSinceEpoch}_user_sticker',
+      senderId: 'me',
+      receiverId: 'ai',
+      content: stickerContent,
+      type: MessageType.sticker,
+      timestamp: DateTime.now(),
+    );
+
+    await MessageStore.instance.addMessage(chatId, userStickerMessage);
+
+    _contexts[chatId] = context.copyWith(
+      messageCount: MessageStore.instance.getMessageCount(chatId),
+      lastMessageTime: DateTime.now(),
+    );
+
+    _processingChats.add(chatId);
+    notifyListeners();
+
+    final aiPrompt = fromUserLibrary
+        ? '用户发送了一个表情，标签是"$tag"。请根据这个标签和上下文自然回复。'
+        : '用户发送了一个表情，分类是"$category"。请结合上下文自然回复。';
+
+    _processMessageInBackground(chatId, aiPrompt, context.isGroup);
+  }
+
   /// 后台处理图片消息
   Future<void> _processImageMessageInBackground(
     String chatId,
