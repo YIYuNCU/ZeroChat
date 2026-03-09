@@ -911,6 +911,12 @@ class ChatMessagesSync(BaseModel):
     messages: List[ChatMessage]
 
 
+class ChatMessageUpdate(BaseModel):
+    content: Optional[str] = None
+    type: Optional[str] = None
+    quote_content: Optional[str] = None
+
+
 def _load_role_chat_messages(role_id: str) -> List[Dict[str, Any]]:
     role_dir = get_role_dir(role_id)
     messages_file = role_dir / "chats" / "messages.json"
@@ -1108,6 +1114,46 @@ async def save_chat_message(role_id: str, message: ChatMessage):
         json.dump(data, f, ensure_ascii=False, indent=2)
     
     return {"success": True, "message_id": message.id}
+
+
+@router.put("/roles/{role_id}/chats/messages/{message_id}")
+async def update_chat_message(role_id: str, message_id: str, payload: ChatMessageUpdate):
+    """更新单条聊天消息内容（用于占位消息修复等场景）"""
+    role_dir = get_role_dir(role_id)
+    messages_file = role_dir / "chats" / "messages.json"
+
+    if not messages_file.exists():
+        raise HTTPException(status_code=404, detail="消息文件不存在")
+
+    with open(messages_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    messages = data.get("messages", [])
+    if not isinstance(messages, list):
+        raise HTTPException(status_code=400, detail="消息格式错误")
+
+    updated = False
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id", "")) != message_id:
+            continue
+        if payload.content is not None:
+            item["content"] = payload.content
+        if payload.type is not None:
+            item["type"] = payload.type
+        if payload.quote_content is not None:
+            item["quote_content"] = payload.quote_content
+        updated = True
+        break
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="消息不存在")
+
+    with open(messages_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return {"success": True, "message_id": message_id}
 
 @router.post("/roles/{role_id}/chats/sync")
 async def sync_chat_messages(role_id: str, sync: ChatMessagesSync):

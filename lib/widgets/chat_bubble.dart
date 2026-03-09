@@ -219,28 +219,74 @@ class ChatBubble extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
+    final resolvedPath = imagePath.trim();
+
     return Container(
       constraints: const BoxConstraints(maxWidth: 120, maxHeight: 120),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: imagePath.startsWith('http')
-            ? CachedNetworkImage(
-                imageUrl: imagePath,
-                httpHeaders: SecureBackendClient.authHeaders,
-                fit: BoxFit.contain,
-                placeholder: (_, __) => _buildStickerPlaceholder(emotion),
-                errorWidget: (_, __, ___) => _buildStickerPlaceholder(emotion),
-                fadeInDuration: const Duration(milliseconds: 150),
-              )
-            : File(imagePath).existsSync()
+        child: resolvedPath.startsWith('http')
+            ? _buildNetworkStickerWithRetry(resolvedPath, emotion)
+            : File(resolvedPath).existsSync()
             ? Image.file(
-                File(imagePath),
+                File(resolvedPath),
                 fit: BoxFit.contain,
                 errorBuilder: (_, __, ___) => _buildStickerPlaceholder(emotion),
               )
             : _buildStickerPlaceholder(emotion),
       ),
     );
+  }
+
+  Widget _buildNetworkStickerWithRetry(String imageUrl, String? emotion) {
+    return CachedNetworkImage(
+      imageUrl: imageUrl,
+      httpHeaders: SecureBackendClient.authHeaders,
+      fit: BoxFit.contain,
+      placeholder: (_, __) => _buildStickerPlaceholder(emotion),
+      errorWidget: (_, __, ___) {
+        final retryUrl = _buildBaseRetryUrl(imageUrl);
+        if (retryUrl == null || retryUrl == imageUrl) {
+          return _buildStickerPlaceholder(emotion);
+        }
+
+        return CachedNetworkImage(
+          imageUrl: retryUrl,
+          httpHeaders: SecureBackendClient.authHeaders,
+          fit: BoxFit.contain,
+          placeholder: (_, __) => _buildStickerPlaceholder(emotion),
+          errorWidget: (_, __, ___) => _buildStickerPlaceholder(emotion),
+          fadeInDuration: const Duration(milliseconds: 100),
+        );
+      },
+      fadeInDuration: const Duration(milliseconds: 150),
+    );
+  }
+
+  String? _buildBaseRetryUrl(String imageUrl) {
+    final base = SettingsService.instance.backendUrl.trim();
+    if (base.isEmpty) {
+      return null;
+    }
+
+    final uri = Uri.tryParse(imageUrl);
+    if (uri == null || !uri.hasAbsolutePath) {
+      return null;
+    }
+
+    final path = uri.path;
+    if (!(path.startsWith('/api/emojis/') || path.startsWith('/api/user-emojis/'))) {
+      return null;
+    }
+
+    var candidate = '${base.replaceAll(RegExp(r'/+$'), '')}$path';
+    if (uri.hasQuery) {
+      candidate = '$candidate?${uri.query}';
+    }
+    if (uri.hasFragment) {
+      candidate = '$candidate#${uri.fragment}';
+    }
+    return candidate;
   }
 
   /// 表情包占位符

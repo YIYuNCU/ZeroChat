@@ -843,6 +843,7 @@ class ChatController extends ChangeNotifier {
       if (emotion != null) {
         final placeholderStickerId =
             '${DateTime.now().millisecondsSinceEpoch}_sticker_${emotion.hashCode}';
+        var placeholderResolved = false;
         final placeholderContent = StickerService.createStickerMessageContent(
           emotion,
           'placeholder://$emotion',
@@ -881,11 +882,17 @@ class ChatController extends ChangeNotifier {
                 content: stickerContent,
                 type: MessageType.sticker,
               );
+              placeholderResolved = true;
               debugPrint('ChatController: Replaced placeholder sticker for emotion: $emotion');
             }
           }
         } catch (e) {
           debugPrint('ChatController: Sticker fetch error: $e');
+        }
+
+        if (!placeholderResolved) {
+          await MessageStore.instance.deleteMessage(chatId, placeholderStickerId);
+          debugPrint('ChatController: Removed unresolved placeholder sticker: $emotion');
         }
       }
 

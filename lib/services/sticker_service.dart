@@ -144,12 +144,12 @@ class StickerService {
       final parts = inner.split('|');
       if (parts.length >= 4) {
         if (parts[0] == 'ai') {
-          return (true, parts[1], parts.sublist(2).join('|'));
+          return (true, parts[1], parts.sublist(2).join('|').trim());
         }
         // user format: [STICKER|user|category|tag|emojiId|url]
         // inner parts: [user, category, tag, emojiId, url]
         if (parts[0] == 'user' && parts.length >= 5) {
-          return (true, parts[1], parts.sublist(4).join('|'));
+          return (true, parts[1], parts.sublist(4).join('|').trim());
         }
       }
     }
@@ -159,7 +159,7 @@ class StickerService {
     final match = regex.firstMatch(normalized);
 
     if (match != null) {
-      return (true, match.group(1), match.group(2));
+      return (true, match.group(1), (match.group(2) ?? '').trim());
     }
 
     return (false, null, null);

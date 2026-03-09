@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:crypto/crypto.dart';
 import '../models/message.dart';
+import '../services/sticker_service.dart';
 import '../services/storage_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
@@ -28,6 +29,11 @@ class MessageStore extends ChangeNotifier {
 
   /// 消息 Stream 控制器（按 chatId）
   final Map<String, StreamController<List<Message>>> _streamControllers = {};
+
+  /// 占位表情修复状态，避免在频繁重建时重复触发
+  final Set<String> _placeholderRepairInProgress = <String>{};
+  final Map<String, DateTime> _placeholderRepairLastAttempt =
+      <String, DateTime>{};
 
   /// 初始化（确保只执行一次）
   static Future<void> init() async {
@@ -161,7 +167,110 @@ class MessageStore extends ChangeNotifier {
 
     await _saveMessages(chatId);
     _notifyMessageUpdate(chatId);
+    _syncUpdateMessageToBackend(chatId, messages[index]);
     return true;
+  }
+
+  Future<void> _syncUpdateMessageToBackend(String chatId, Message message) async {
+    try {
+      final backendUrl = SettingsService.instance.backendUrl;
+      if (backendUrl.isEmpty) {
+        return;
+      }
+
+      await SecureBackendClient.put(
+        '$backendUrl/api/roles/$chatId/chats/messages/${message.id}',
+        {
+          'content': message.content,
+          'type': message.type.name,
+          'quote_content': message.quotedPreviewText,
+        },
+      );
+    } catch (e) {
+      debugPrint('MessageStore: Backend update sync error: $e');
+    }
+  }
+
+  bool _isPlaceholderStickerContent(String content) {
+    final (_, _, imagePath) = StickerService.parseStickerMessage(content);
+    return (imagePath ?? '').toLowerCase().startsWith('placeholder://');
+  }
+
+  Future<void> repairVisiblePlaceholderStickers(
+    String chatId,
+    List<Message> visibleMessages,
+  ) async {
+    if (visibleMessages.isEmpty) {
+      return;
+    }
+
+    final backendUrl = SettingsService.instance.backendUrl;
+    if (backendUrl.isEmpty) {
+      return;
+    }
+
+    for (final msg in List<Message>.from(visibleMessages)) {
+      if (msg.type != MessageType.sticker) {
+        continue;
+      }
+      if (!_isPlaceholderStickerContent(msg.content)) {
+        continue;
+      }
+
+      final repairKey = '$chatId::${msg.id}';
+      final now = DateTime.now();
+      final lastAttempt = _placeholderRepairLastAttempt[repairKey];
+      if (_placeholderRepairInProgress.contains(repairKey)) {
+        continue;
+      }
+      if (lastAttempt != null && now.difference(lastAttempt).inSeconds < 15) {
+        continue;
+      }
+
+      _placeholderRepairInProgress.add(repairKey);
+      _placeholderRepairLastAttempt[repairKey] = now;
+
+      final (_, emotion, _) = StickerService.parseStickerMessage(msg.content);
+      final safeEmotion = (emotion ?? '').trim().toLowerCase();
+      if (safeEmotion.isEmpty) {
+        _placeholderRepairInProgress.remove(repairKey);
+        continue;
+      }
+
+      final roleId = (msg.senderId == 'me' || msg.senderId == 'unknown')
+          ? chatId
+          : msg.senderId;
+
+      try {
+        final resp = await SecureBackendClient.get(
+          '$backendUrl/api/roles/$roleId/emojis/$safeEmotion/random',
+        ).timeout(const Duration(seconds: 5));
+
+        if (resp.statusCode != 200) {
+          continue;
+        }
+        final data = resp.data;
+        if (data['found'] != true || data['url'] == null) {
+          continue;
+        }
+
+        final stickerUrl = '$backendUrl${data['url']}';
+        final fixedContent = StickerService.createStickerMessageContent(
+          safeEmotion,
+          stickerUrl,
+        );
+        await updateMessage(
+          chatId,
+          msg.id,
+          content: fixedContent,
+          type: MessageType.sticker,
+        );
+      } catch (e) {
+        debugPrint('MessageStore: placeholder repair failed for ${msg.id}: $e');
+      } finally {
+        _placeholderRepairInProgress.remove(repairKey);
+      }
+    }
   }
 
   /// 同步删除消息到后端

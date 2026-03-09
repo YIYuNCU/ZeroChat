@@ -569,6 +569,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                       );
                     }
 
+                    // Only repair placeholder stickers for currently visible items
+                    // to avoid scanning entire history and causing jank.
+                    MessageStore.instance.repairVisiblePlaceholderStickers(
+                      widget.chatId,
+                      visibleMessages,
+                    );
+
                     _handleAutoScroll(totalMessagesCount);
 
                     return ListView.builder(
