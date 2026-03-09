@@ -958,6 +958,83 @@ def _to_absolute_backend_url(url: str, backend_base_url: Optional[str]) -> str:
     return raw
 
 
+def _to_relative_emoji_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return raw
+
+    parsed = urlparse(raw)
+    path = parsed.path or ""
+
+    # Store AI emoji assets as relative API paths to avoid binding records
+    # to a specific backend host/port.
+    if path.startswith("/api/emojis/"):
+        out = path
+        if parsed.query:
+            out += f"?{parsed.query}"
+        if parsed.fragment:
+            out += f"#{parsed.fragment}"
+        return out
+
+    return raw
+
+
+def _normalize_sticker_content_for_storage(content: Any) -> Any:
+    if not isinstance(content, str):
+        return content
+    if not content.endswith("]"):
+        return content
+
+    # New format:
+    # [STICKER|ai|emotion|url]
+    # [STICKER|user|category|tag|emojiId|url]
+    if content.startswith("[STICKER|"):
+        inner = content[9:-1]
+        parts = inner.split("|")
+
+        if len(parts) >= 4 and parts[0] == "ai":
+            emotion = parts[1]
+            image_url = "|".join(parts[2:])
+            stored_url = _to_relative_emoji_url(image_url)
+            return f"[STICKER|ai|{emotion}|{stored_url}]"
+
+        if len(parts) >= 5 and parts[0] == "user":
+            category = parts[1]
+            tag = parts[2]
+            emoji_id = parts[3]
+            image_url = "|".join(parts[4:])
+            stored_url = _to_relative_emoji_url(image_url)
+            return f"[STICKER|user|{category}|{tag}|{emoji_id}|{stored_url}]"
+
+    # Legacy format: [STICKER:emotion:path]
+    if content.startswith("[STICKER:"):
+        inner = content[9:-1]
+        segs = inner.split(":")
+        if len(segs) >= 3:
+            emotion = segs[0]
+            path = ":".join(segs[1:])
+            stored_url = _to_relative_emoji_url(path)
+            return f"[STICKER:{emotion}:{stored_url}]"
+
+    return content
+
+
+def _normalize_chat_message_for_storage(message: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(message)
+    normalized["content"] = _normalize_sticker_content_for_storage(
+        normalized.get("content"),
+    )
+    if "quote_content" in normalized:
+        normalized["quote_content"] = _normalize_sticker_content_for_storage(
+            normalized.get("quote_content"),
+        )
+    if "quoted_preview_text" in normalized:
+        normalized["quoted_preview_text"] = _normalize_sticker_content_for_storage(
+            normalized.get("quoted_preview_text"),
+        )
+    return normalized
+
+
 def _normalize_sticker_content_for_sync(content: Any, backend_base_url: Optional[str]) -> Any:
     if not isinstance(content, str):
         return content
@@ -1107,7 +1184,9 @@ async def save_chat_message(role_id: str, message: ChatMessage):
     # 避免重复添加
     existing_ids = {m.get("id") for m in data["messages"]}
     if message.id not in existing_ids:
-        data["messages"].append(message.model_dump())
+        data["messages"].append(
+            _normalize_chat_message_for_storage(message.model_dump())
+        )
     
     # 保存
     with open(messages_file, "w", encoding="utf-8") as f:
@@ -1139,11 +1218,11 @@ async def update_chat_message(role_id: str, message_id: str, payload: ChatMessag
         if str(item.get("id", "")) != message_id:
             continue
         if payload.content is not None:
-            item["content"] = payload.content
+            item["content"] = _normalize_sticker_content_for_storage(payload.content)
         if payload.type is not None:
             item["type"] = payload.type
         if payload.quote_content is not None:
-            item["quote_content"] = payload.quote_content
+            item["quote_content"] = _normalize_sticker_content_for_storage(payload.quote_content)
         updated = True
         break
 
@@ -1173,7 +1252,9 @@ async def sync_chat_messages(role_id: str, sync: ChatMessagesSync):
     added = 0
     for msg in sync.messages:
         if msg.id not in existing_ids:
-            data["messages"].append(msg.model_dump())
+            data["messages"].append(
+                _normalize_chat_message_for_storage(msg.model_dump())
+            )
             existing_ids.add(msg.id)
             added += 1
     

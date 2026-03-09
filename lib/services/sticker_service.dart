@@ -114,9 +114,32 @@ class StickerService {
 
   /// 为表情包消息生成内容标识
   static String createStickerMessageContent(String emotion, String imagePath) {
+    final storedPath = normalizeAiStickerStoragePath(imagePath);
     // Keep AI sticker payload in legacy format to stay compatible with
     // historical records and existing backend-side processors.
-    return '[STICKER:$emotion:$imagePath]';
+    return '[STICKER:$emotion:$storedPath]';
+  }
+
+  static String normalizeAiStickerStoragePath(String imagePath) {
+    final raw = imagePath.trim();
+    if (raw.isEmpty) return raw;
+
+    final uri = Uri.tryParse(raw);
+    if (uri != null && uri.hasScheme) {
+      final path = uri.path;
+      if (path.startsWith('/api/emojis/')) {
+        var out = path;
+        if (uri.hasQuery) {
+          out = '$out?${uri.query}';
+        }
+        if (uri.hasFragment) {
+          out = '$out#${uri.fragment}';
+        }
+        return out;
+      }
+    }
+
+    return raw;
   }
 
   /// 为用户表情消息生成内容标识

@@ -219,7 +219,7 @@ class ChatBubble extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
-    final resolvedPath = imagePath.trim();
+    final resolvedPath = _resolveStickerImagePath(imagePath.trim());
 
     return Container(
       constraints: const BoxConstraints(maxWidth: 120, maxHeight: 120),
@@ -236,6 +236,17 @@ class ChatBubble extends StatelessWidget {
             : _buildStickerPlaceholder(emotion),
       ),
     );
+  }
+
+  String _resolveStickerImagePath(String rawPath) {
+    if (rawPath.startsWith('/api/emojis/') ||
+        rawPath.startsWith('/api/user-emojis/')) {
+      final base = SettingsService.instance.backendUrl.trim();
+      if (base.isNotEmpty) {
+        return '${base.replaceAll(RegExp(r'/+$'), '')}$rawPath';
+      }
+    }
+    return rawPath;
   }
 
   Widget _buildNetworkStickerWithRetry(String imageUrl, String? emotion) {
