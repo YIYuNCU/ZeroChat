@@ -17,6 +17,35 @@ class MomentsService extends ChangeNotifier {
 
   List<MomentPost> _posts = [];
 
+  String _normalizeContent(String value) {
+    return value.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
+  bool _isLikelyDuplicatePost(MomentPost a, MomentPost b) {
+    if (a.authorId != b.authorId) return false;
+    if (_normalizeContent(a.content) != _normalizeContent(b.content)) {
+      return false;
+    }
+    if (a.imageUrls.length != b.imageUrls.length) return false;
+    for (var i = 0; i < a.imageUrls.length; i++) {
+      if (a.imageUrls[i].trim() != b.imageUrls[i].trim()) return false;
+    }
+    final seconds = a.createdAt.difference(b.createdAt).inSeconds.abs();
+    return seconds <= 180;
+  }
+
+  void _dedupePostsInMemory() {
+    final deduped = <MomentPost>[];
+    for (final post in _posts) {
+      final exists = deduped.any((kept) => _isLikelyDuplicatePost(kept, post));
+      if (!exists) {
+        deduped.add(post);
+      }
+    }
+    _posts = deduped;
+    _posts.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  }
+
   /// 获取所有动态（按时间倒序）
   List<MomentPost> get posts => List.unmodifiable(_posts);
 
@@ -35,8 +64,7 @@ class MomentsService extends ChangeNotifier {
     final jsonList = StorageService.getJsonList(_storageKey);
     if (jsonList != null) {
       _posts = jsonList.map((json) => MomentPost.fromJson(json)).toList();
-      // 按时间倒序
-      _posts.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      _dedupePostsInMemory();
     }
   }
 
@@ -70,6 +98,7 @@ class MomentsService extends ChangeNotifier {
     );
 
     _posts.insert(0, post);
+    _dedupePostsInMemory();
     await _savePosts();
     notifyListeners();
 
@@ -105,6 +134,7 @@ class MomentsService extends ChangeNotifier {
     );
 
     _posts.insert(0, post);
+    _dedupePostsInMemory();
     _unreadCount++;
     await _savePosts();
     notifyListeners();
@@ -250,34 +280,43 @@ class MomentsService extends ChangeNotifier {
         final List<dynamic> momentsJson = response['moments'];
         for (final json in momentsJson) {
           try {
-            // 检查本地是否已存在
-            final existingIndex = _posts.indexWhere((p) => p.id == json['id']);
-            if (existingIndex == -1) {
-              // 转换后端格式到本地格式
-              final post = MomentPost(
-                id: json['id'] ?? '',
-                authorId: json['author_id'] ?? '',
-                authorName: json['author_name'] ?? '',
-                content: json['content'] ?? '',
-                imageUrls: List<String>.from(json['image_urls'] ?? []),
-                createdAt: DateTime.parse(
-                  json['created_at'] ?? DateTime.now().toIso8601String(),
-                ),
-                type: MomentType.text,
-                likedBy:
-                    (json['liked_by'] as List<dynamic>?)
-                        ?.map((l) => l['name']?.toString() ?? '')
-                        .toList() ??
-                    [],
-              );
-              _posts.add(post);
+            final backendPost = MomentPost(
+              id: json['id'] ?? '',
+              authorId: json['author_id'] ?? '',
+              authorName: json['author_name'] ?? '',
+              content: json['content'] ?? '',
+              imageUrls: List<String>.from(json['image_urls'] ?? []),
+              createdAt: DateTime.parse(
+                json['created_at'] ?? DateTime.now().toIso8601String(),
+              ),
+              type: MomentType.text,
+              likedBy:
+                  (json['liked_by'] as List<dynamic>?)
+                      ?.map((l) => l['name']?.toString() ?? '')
+                      .toList() ??
+                  [],
+            );
+
+            final existingById = _posts.indexWhere((p) => p.id == backendPost.id);
+            if (existingById != -1) {
+              _posts[existingById] = backendPost;
+              continue;
+            }
+
+            final duplicateIndex = _posts.indexWhere(
+              (p) => _isLikelyDuplicatePost(p, backendPost),
+            );
+            if (duplicateIndex != -1) {
+              // Replace local temp-id copy with backend canonical record.
+              _posts[duplicateIndex] = backendPost;
+            } else {
+              _posts.add(backendPost);
             }
           } catch (e) {
             debugPrint('MomentsService: Error parsing backend moment: $e');
           }
         }
-        // 按时间倒序
-        _posts.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        _dedupePostsInMemory();
         await _savePosts();
         notifyListeners();
         debugPrint(
@@ -301,6 +340,41 @@ class MomentsService extends ChangeNotifier {
             'content': post.content,
             'image_urls': post.imageUrls,
           });
+      if (response.isSuccess && response.data is Map<String, dynamic>) {
+        final payload = response.data as Map<String, dynamic>;
+        final serverId = payload['id']?.toString();
+        if (serverId != null && serverId.isNotEmpty) {
+          final localIndex = _posts.indexWhere((p) => p.id == post.id);
+          if (localIndex != -1) {
+            final localPost = _posts[localIndex];
+            final serverPost = localPost.copyWith(
+              id: serverId,
+              createdAt:
+                  DateTime.tryParse(payload['created_at']?.toString() ?? '') ??
+                  localPost.createdAt,
+            );
+
+            final duplicateServerIdIndex = _posts.indexWhere(
+              (p) => p.id == serverId,
+            );
+            if (duplicateServerIdIndex != -1 &&
+                duplicateServerIdIndex != localIndex) {
+              _posts.removeAt(duplicateServerIdIndex);
+              final adjustedLocalIndex =
+                  duplicateServerIdIndex < localIndex
+                  ? localIndex - 1
+                  : localIndex;
+              _posts[adjustedLocalIndex] = serverPost;
+            } else {
+              _posts[localIndex] = serverPost;
+            }
+
+            _dedupePostsInMemory();
+            await _savePosts();
+            notifyListeners();
+          }
+        }
+      }
       return response.isSuccess;
     } catch (e) {
       debugPrint('MomentsService: Publish to backend failed: $e');
