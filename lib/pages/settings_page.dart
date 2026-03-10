@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../services/settings_service.dart';
 import '../services/image_service.dart';
+import '../services/background_runtime_service.dart';
 import '../services/secure_backend_client.dart';
 
 /// 设置页面
@@ -57,6 +58,19 @@ class _SettingsPageState extends State<SettingsPage> {
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Text(
               '消息等待时间：发送消息后等待指定秒数，期间发送的消息会合并为一条发送给AI，方便多段输入。设为 0 表示立即发送。',
+              style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          _buildSectionHeader('运行'),
+          _buildSection([_buildBackgroundRuntimeItem()]),
+
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Text(
+              '开启后应用切到后台仍会保持运行（仅 Android 生效）。关闭后将停止后台常驻服务。',
               style: TextStyle(color: Color(0xFF888888), fontSize: 12),
             ),
           ),
@@ -144,6 +158,29 @@ class _SettingsPageState extends State<SettingsPage> {
         title,
         style: const TextStyle(color: Color(0xFF888888), fontSize: 13),
       ),
+    );
+  }
+
+  Widget _buildBackgroundRuntimeItem() {
+    final enabled = SettingsService.instance.backgroundRuntimeEnabled;
+    return SwitchListTile(
+      title: const Text('后台运行', style: TextStyle(fontSize: 16)),
+      subtitle: const Text('退出前台后继续保持任务与消息能力'),
+      activeThumbColor: const Color(0xFF07C160),
+      value: enabled,
+      onChanged: (value) async {
+        await SettingsService.instance.updateBackgroundRuntimeEnabled(value);
+        await BackgroundRuntimeService.applyEnabled(value);
+        if (!mounted) return;
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(value ? '已开启后台运行' : '已关闭后台运行'),
+            duration: const Duration(seconds: 1),
+          ),
+        );
+      },
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
     );
   }
 

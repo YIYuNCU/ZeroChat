@@ -51,6 +51,9 @@ class SettingsService extends ChangeNotifier {
   // ========== 消息等待时间 ==========
   int _messageWaitSeconds = 0; // 0 表示禁用
 
+  // ========== 后台运行 ==========
+  bool _backgroundRuntimeEnabled = true;
+
   // ========== Getters ==========
 
   String get userNickname => _userNickname;
@@ -81,6 +84,7 @@ class SettingsService extends ChangeNotifier {
   String get backendUrl => _backendUrl;
 
   int get messageWaitSeconds => _messageWaitSeconds;
+  bool get backgroundRuntimeEnabled => _backgroundRuntimeEnabled;
 
   /// 初始化
   static Future<void> init() async {
@@ -130,6 +134,10 @@ class SettingsService extends ChangeNotifier {
 
     // 消息等待时间
     _messageWaitSeconds = StorageService.getInt('message_wait_seconds') ?? 0;
+
+    // 后台运行
+    _backgroundRuntimeEnabled =
+        StorageService.getBool('background_runtime_enabled') ?? true;
   }
 
   // ========== 更新方法 ==========
@@ -175,6 +183,13 @@ class SettingsService extends ChangeNotifier {
   Future<void> updateMessageWaitSeconds(int seconds) async {
     _messageWaitSeconds = seconds;
     await StorageService.setInt('message_wait_seconds', seconds);
+    notifyListeners();
+  }
+
+  /// 更新后台运行开关
+  Future<void> updateBackgroundRuntimeEnabled(bool enabled) async {
+    _backgroundRuntimeEnabled = enabled;
+    await StorageService.setBool('background_runtime_enabled', enabled);
     notifyListeners();
   }
 

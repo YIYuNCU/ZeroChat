@@ -21,6 +21,7 @@ import 'services/moments_service.dart';
 import 'services/image_service.dart';
 import 'services/api_service.dart';
 import 'services/notification_service.dart';
+import 'services/background_runtime_service.dart';
 import 'services/intent_service.dart';
 import 'core/chat_controller.dart';
 import 'core/proactive_message_scheduler.dart';
@@ -52,6 +53,9 @@ void main() async {
   await MomentsService.init();
   await ImageService.init();
   await NotificationService.instance.init();
+  await BackgroundRuntimeService.init(
+    enabled: SettingsService.instance.backgroundRuntimeEnabled,
+  );
   await ChatController.init();
   await ProactiveMessageScheduler.instance.init();
   await MomentsScheduler.instance.init();

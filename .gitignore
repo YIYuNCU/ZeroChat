@@ -220,3 +220,7 @@ devtools_options.yaml
 zerochat.iml
 .idea/
 .dart_tool/
+
+*.properties
+*.lock
+*.bin
