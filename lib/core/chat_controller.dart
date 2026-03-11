@@ -11,6 +11,7 @@ import '../services/group_chat_service.dart';
 import '../services/chat_list_service.dart';
 import '../services/settings_service.dart';
 import '../services/notification_service.dart';
+import '../services/background_runtime_service.dart';
 import 'message_store.dart';
 import 'segment_sender.dart';
 import 'group_scheduler.dart';
@@ -38,6 +39,9 @@ class ChatController extends ChangeNotifier {
 
   /// 正在处理的聊天 ID 集合
   final Set<String> _processingChats = {};
+
+  /// 后台等待中的请求 ID（按 chatId）
+  final Map<String, String> _activeRequestIds = {};
 
   /// "正在输入"状态回调（按 chatId）- 仅用于单聊
   final Map<String, void Function(bool)> _typingCallbacks = {};
@@ -197,6 +201,7 @@ class ChatController extends ChangeNotifier {
 
     // 标记正在处理
     _processingChats.add(chatId);
+    _beginBackgroundTrackedRequest(chatId);
     notifyListeners();
 
     // 根据聊天类型处理（后台执行）
@@ -238,6 +243,7 @@ class ChatController extends ChangeNotifier {
 
     // 标记正在处理
     _processingChats.add(chatId);
+    _beginBackgroundTrackedRequest(chatId);
     notifyListeners();
 
     // 3. 后台处理图片消息（调用 vision API）
@@ -254,12 +260,16 @@ class ChatController extends ChangeNotifier {
     bool fromUserLibrary = true,
   }) async {
     if (!fromUserLibrary) {
-      debugPrint('ChatController: AI sticker sending is disabled for user actions');
+      debugPrint(
+        'ChatController: AI sticker sending is disabled for user actions',
+      );
       return;
     }
 
     if (_processingChats.contains(chatId)) {
-      debugPrint('ChatController: Already processing $chatId, ignoring sticker');
+      debugPrint(
+        'ChatController: Already processing $chatId, ignoring sticker',
+      );
       return;
     }
 
@@ -291,6 +301,7 @@ class ChatController extends ChangeNotifier {
     );
 
     _processingChats.add(chatId);
+    _beginBackgroundTrackedRequest(chatId);
     notifyListeners();
 
     final aiPrompt = fromUserLibrary
@@ -356,6 +367,7 @@ class ChatController extends ChangeNotifier {
     } finally {
       _hideTyping(chatId);
       _processingChats.remove(chatId);
+      _completeBackgroundTrackedRequest(chatId);
       notifyListeners();
     }
   }
@@ -407,10 +419,31 @@ class ChatController extends ChangeNotifier {
         debugPrint('ChatController: Error processing message: $e');
       } finally {
         _processingChats.remove(chatId);
+        _completeBackgroundTrackedRequest(chatId);
         notifyListeners();
         _updateChatList(chatId);
       }
     });
+  }
+
+  void _beginBackgroundTrackedRequest(String chatId) {
+    final requestId = '${DateTime.now().microsecondsSinceEpoch}_$chatId';
+    final baselineMessageId =
+        MessageStore.instance.getLastMessage(chatId)?.id ?? '';
+    _activeRequestIds[chatId] = requestId;
+    BackgroundRuntimeService.registerPendingRequest(
+      requestId: requestId,
+      chatId: chatId,
+      baselineMessageId: baselineMessageId,
+    );
+  }
+
+  void _completeBackgroundTrackedRequest(String chatId) {
+    final requestId = _activeRequestIds.remove(chatId);
+    if (requestId == null || requestId.isEmpty) {
+      return;
+    }
+    BackgroundRuntimeService.completePendingRequest(requestId);
   }
 
   /// 进入聊天页
@@ -856,7 +889,10 @@ class ChatController extends ChangeNotifier {
           type: MessageType.sticker,
           timestamp: DateTime.now(),
         );
-        await MessageStore.instance.addMessage(chatId, placeholderStickerMessage);
+        await MessageStore.instance.addMessage(
+          chatId,
+          placeholderStickerMessage,
+        );
 
         try {
           final backendUrl = SettingsService.instance.backendUrl;
@@ -883,7 +919,9 @@ class ChatController extends ChangeNotifier {
                 type: MessageType.sticker,
               );
               placeholderResolved = true;
-              debugPrint('ChatController: Replaced placeholder sticker for emotion: $emotion');
+              debugPrint(
+                'ChatController: Replaced placeholder sticker for emotion: $emotion',
+              );
             }
           }
         } catch (e) {
@@ -891,8 +929,13 @@ class ChatController extends ChangeNotifier {
         }
 
         if (!placeholderResolved) {
-          await MessageStore.instance.deleteMessage(chatId, placeholderStickerId);
-          debugPrint('ChatController: Removed unresolved placeholder sticker: $emotion');
+          await MessageStore.instance.deleteMessage(
+            chatId,
+            placeholderStickerId,
+          );
+          debugPrint(
+            'ChatController: Removed unresolved placeholder sticker: $emotion',
+          );
         }
       }
 

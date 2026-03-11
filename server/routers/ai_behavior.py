@@ -17,6 +17,7 @@ router = APIRouter()
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
+MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
 TOOL_ROLE_PREFIX = "1000000000"
 
 
@@ -102,6 +103,88 @@ def _normalize_core_memory(raw_core_memory: Any) -> List[str]:
         if text:
             result.append(text)
     return result
+
+
+def _load_moments_posts() -> List[Dict[str, Any]]:
+    if not MOMENTS_FILE.exists():
+        return []
+    try:
+        with open(MOMENTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+    except Exception:
+        return []
+    return []
+
+
+def _build_moments_chat_context(role_id: str, max_items: int = 4) -> str:
+    posts = _load_moments_posts()
+    if not posts:
+        return ""
+
+    role_posts = [
+        p for p in posts
+        if str(p.get("author_id", "")) == role_id
+    ]
+    role_posts.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    unresolved_user_comments: List[str] = []
+    for post in role_posts[:20]:
+        post_content = str(post.get("content", "")).strip()
+        comments = post.get("comments") if isinstance(post.get("comments"), list) else []
+
+        for c in comments:
+            if not isinstance(c, dict):
+                continue
+            if str(c.get("author_id", "")) != "me":
+                continue
+
+            user_comment = str(c.get("content", "")).strip()
+            user_comment_id = str(c.get("id", "")).strip()
+            if not user_comment:
+                continue
+
+            has_ai_reply = False
+            for maybe_reply in comments:
+                if not isinstance(maybe_reply, dict):
+                    continue
+                if str(maybe_reply.get("author_id", "")) != role_id:
+                    continue
+
+                reply_to_id = str(maybe_reply.get("reply_to_id", "") or "").strip()
+                reply_to_name = str(maybe_reply.get("reply_to_name", "") or "").strip().lower()
+                if user_comment_id and reply_to_id == user_comment_id:
+                    has_ai_reply = True
+                    break
+                if reply_to_id == "me" or reply_to_name in {"me", "我"}:
+                    has_ai_reply = True
+                    break
+
+            if not has_ai_reply:
+                unresolved_user_comments.append(
+                    f"- 你的朋友圈:「{post_content[:80]}」用户评论:「{user_comment[:80]}」(尚未回应)"
+                )
+
+    user_posts = [
+        p for p in posts
+        if str(p.get("author_id", "")) == "me"
+    ]
+    user_posts.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    user_moments_lines: List[str] = []
+    for p in user_posts[:2]:
+        content = str(p.get("content", "")).strip()
+        if content:
+            user_moments_lines.append(f"- 用户朋友圈:「{content[:80]}」")
+
+    parts: List[str] = []
+    if unresolved_user_comments:
+        parts.append("[朋友圈待回应上下文]\n" + "\n".join(unresolved_user_comments[:max_items]))
+    if user_moments_lines:
+        parts.append("[用户近期朋友圈]\n" + "\n".join(user_moments_lines))
+
+    return "\n\n".join(parts).strip()
 
 
 def _get_available_emoji_categories(role_id: str) -> List[str]:
@@ -357,6 +440,9 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     frontend_moments_context = event_context.get("moments_context")
     if isinstance(frontend_moments_context, str) and frontend_moments_context.strip():
         extra_parts.append(frontend_moments_context.strip())
+    backend_moments_context = _build_moments_chat_context(role_id)
+    if backend_moments_context:
+        extra_parts.append(backend_moments_context)
     if search_context:
         extra_parts.append(search_context)
     in_menstruation, menstruation_day = _if_in_menstruation(role_id)

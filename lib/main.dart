@@ -137,8 +137,41 @@ Future<void> _requestPermissions() async {
   debugPrint('✅ Permissions requested');
 }
 
-class ZeroChatApp extends StatelessWidget {
+class ZeroChatApp extends StatefulWidget {
   const ZeroChatApp({super.key});
+
+  @override
+  State<ZeroChatApp> createState() => _ZeroChatAppState();
+}
+
+class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // App starts in foreground.
+    BackgroundRuntimeService.notifyAppLifecycle(inForeground: true);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      BackgroundRuntimeService.notifyAppLifecycle(inForeground: true);
+      return;
+    }
+
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
+      BackgroundRuntimeService.notifyAppLifecycle(inForeground: false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

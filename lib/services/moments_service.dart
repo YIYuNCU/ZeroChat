@@ -17,6 +17,73 @@ class MomentsService extends ChangeNotifier {
 
   List<MomentPost> _posts = [];
 
+  bool _looksLikeUuid(String id) {
+    return RegExp(
+      r'^[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}$',
+    ).hasMatch(id);
+  }
+
+  MomentPost? _parseBackendMoment(Map<String, dynamic> json) {
+    try {
+      final commentsRaw = json['comments'];
+      final comments = <MomentComment>[];
+      if (commentsRaw is List) {
+        for (final item in commentsRaw) {
+          if (item is! Map) continue;
+          final map = Map<String, dynamic>.from(item);
+          comments.add(
+            MomentComment(
+              id:
+                  map['id']?.toString() ??
+                  DateTime.now().millisecondsSinceEpoch.toString(),
+              authorId: map['author_id']?.toString() ?? '',
+              authorName: map['author_name']?.toString() ?? '',
+              content: map['content']?.toString() ?? '',
+              createdAt:
+                  DateTime.tryParse(map['created_at']?.toString() ?? '') ??
+                  DateTime.now(),
+              replyToId: map['reply_to_id']?.toString(),
+              replyToName: map['reply_to_name']?.toString(),
+            ),
+          );
+        }
+      }
+
+      final likedByRaw = json['liked_by'];
+      final likedBy = <String>[];
+      if (likedByRaw is List) {
+        for (final like in likedByRaw) {
+          if (like is Map) {
+            final id = like['id']?.toString() ?? '';
+            final name = like['name']?.toString() ?? '';
+            final value = id.isNotEmpty ? id : name;
+            if (value.isNotEmpty) likedBy.add(value);
+          } else {
+            final value = like?.toString() ?? '';
+            if (value.isNotEmpty) likedBy.add(value);
+          }
+        }
+      }
+
+      return MomentPost(
+        id: json['id']?.toString() ?? '',
+        authorId: json['author_id']?.toString() ?? '',
+        authorName: json['author_name']?.toString() ?? '',
+        content: json['content']?.toString() ?? '',
+        imageUrls: List<String>.from(json['image_urls'] ?? const []),
+        createdAt:
+            DateTime.tryParse(json['created_at']?.toString() ?? '') ??
+            DateTime.now(),
+        type: MomentType.text,
+        likedBy: likedBy,
+        comments: comments,
+      );
+    } catch (e) {
+      debugPrint('MomentsService: Error parsing backend moment: $e');
+      return null;
+    }
+  }
+
   String _normalizeContent(String value) {
     return value.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
@@ -278,44 +345,29 @@ class MomentsService extends ChangeNotifier {
           : null;
       if (response != null && response['moments'] != null) {
         final List<dynamic> momentsJson = response['moments'];
+        final backendPosts = <MomentPost>[];
+
         for (final json in momentsJson) {
-          try {
-            final backendPost = MomentPost(
-              id: json['id'] ?? '',
-              authorId: json['author_id'] ?? '',
-              authorName: json['author_name'] ?? '',
-              content: json['content'] ?? '',
-              imageUrls: List<String>.from(json['image_urls'] ?? []),
-              createdAt: DateTime.parse(
-                json['created_at'] ?? DateTime.now().toIso8601String(),
-              ),
-              type: MomentType.text,
-              likedBy:
-                  (json['liked_by'] as List<dynamic>?)
-                      ?.map((l) => l['name']?.toString() ?? '')
-                      .toList() ??
-                  [],
-            );
-
-            final existingById = _posts.indexWhere((p) => p.id == backendPost.id);
-            if (existingById != -1) {
-              _posts[existingById] = backendPost;
-              continue;
-            }
-
-            final duplicateIndex = _posts.indexWhere(
-              (p) => _isLikelyDuplicatePost(p, backendPost),
-            );
-            if (duplicateIndex != -1) {
-              // Replace local temp-id copy with backend canonical record.
-              _posts[duplicateIndex] = backendPost;
-            } else {
-              _posts.add(backendPost);
-            }
-          } catch (e) {
-            debugPrint('MomentsService: Error parsing backend moment: $e');
+          if (json is! Map<String, dynamic>) {
+            continue;
+          }
+          final parsed = _parseBackendMoment(json);
+          if (parsed != null && parsed.id.isNotEmpty) {
+            backendPosts.add(parsed);
           }
         }
+
+        // Keep local unsynced posts (temporary IDs) and reconcile with backend snapshot.
+        final localUnsynced = _posts.where((local) {
+          if (local.id.isEmpty || _looksLikeUuid(local.id)) {
+            return false;
+          }
+          return !backendPosts.any(
+            (remote) => _isLikelyDuplicatePost(local, remote),
+          );
+        }).toList();
+
+        _posts = [...backendPosts, ...localUnsynced];
         _dedupePostsInMemory();
         await _savePosts();
         notifyListeners();
@@ -360,8 +412,7 @@ class MomentsService extends ChangeNotifier {
             if (duplicateServerIdIndex != -1 &&
                 duplicateServerIdIndex != localIndex) {
               _posts.removeAt(duplicateServerIdIndex);
-              final adjustedLocalIndex =
-                  duplicateServerIdIndex < localIndex
+              final adjustedLocalIndex = duplicateServerIdIndex < localIndex
                   ? localIndex - 1
                   : localIndex;
               _posts[adjustedLocalIndex] = serverPost;
