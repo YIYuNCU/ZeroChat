@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:crypto/crypto.dart';
 import '../models/moment_post.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
@@ -14,14 +16,10 @@ class MomentsService extends ChangeNotifier {
   static MomentsService get instance => _instance;
 
   static const String _storageKey = 'moments_posts';
+  static const String _hashStorageKey = 'moments_posts_hash';
 
   List<MomentPost> _posts = [];
-
-  bool _looksLikeUuid(String id) {
-    return RegExp(
-      r'^[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}$',
-    ).hasMatch(id);
-  }
+  String _localHash = '';
 
   MomentPost? _parseBackendMoment(Map<String, dynamic> json) {
     try {
@@ -129,16 +127,57 @@ class MomentsService extends ChangeNotifier {
   /// 加载动态
   Future<void> _loadPosts() async {
     final jsonList = StorageService.getJsonList(_storageKey);
+    _localHash = StorageService.getString(_hashStorageKey) ?? '';
     if (jsonList != null) {
       _posts = jsonList.map((json) => MomentPost.fromJson(json)).toList();
       _dedupePostsInMemory();
+      if (_localHash.isEmpty) {
+        _localHash = _computePostsHashFromJson(jsonList);
+      }
     }
   }
 
   /// 保存动态
-  Future<void> _savePosts() async {
+  Future<void> _savePosts({String? hash}) async {
     final jsonList = _posts.map((p) => p.toJson()).toList();
     await StorageService.setJsonList(_storageKey, jsonList);
+    _localHash = hash ?? _computePostsHashFromJson(jsonList);
+    await StorageService.setString(_hashStorageKey, _localHash);
+  }
+
+  String _computePostsHashFromJson(List<Map<String, dynamic>> jsonList) {
+    final normalized = jsonEncode(jsonList);
+    return sha256.convert(utf8.encode(normalized)).toString();
+  }
+
+  Future<String?> _fetchBackendHash({int limit = 50}) async {
+    try {
+      final secureResponse = await SecureBackendClient.get(
+        '$_backendUrl/api/moments/hash?limit=$limit',
+      );
+      final response = secureResponse.isSuccess
+          ? secureResponse.data as Map<String, dynamic>?
+          : null;
+      final hash = response?['hash']?.toString();
+      if (hash != null && hash.isNotEmpty) {
+        return hash;
+      }
+    } catch (e) {
+      debugPrint('MomentsService: Fetch backend hash failed: $e');
+    }
+    return null;
+  }
+
+  /// 进入朋友圈时调用：仅在 hash 不一致时同步数据
+  Future<bool> syncIfHashMismatch({int limit = 50}) async {
+    final backendHash = await _fetchBackendHash(limit: limit);
+    if (backendHash == null || backendHash.isEmpty) {
+      return false;
+    }
+    if (_localHash == backendHash) {
+      return false;
+    }
+    return fetchFromBackend(limit: limit, expectedHash: backendHash);
   }
 
   /// 发布动态（用户）
@@ -164,17 +203,11 @@ class MomentsService extends ChangeNotifier {
       type: type,
     );
 
-    _posts.insert(0, post);
-    _dedupePostsInMemory();
-    await _savePosts();
-    notifyListeners();
-
-    // 自动同步到后端
-    await publishToBackend(post);
+    final backendPost = await publishToBackend(post);
     debugPrint(
       'MomentsService: Published user post ${post.id} (synced to backend)',
     );
-    return post;
+    return backendPost ?? post;
   }
 
   /// 发布动态（AI 角色）- 预留入口
@@ -200,27 +233,30 @@ class MomentsService extends ChangeNotifier {
       type: type,
     );
 
-    _posts.insert(0, post);
-    _dedupePostsInMemory();
-    _unreadCount++;
-    await _savePosts();
-    notifyListeners();
-
-    // 自动同步到后端
-    await publishToBackend(post);
+    final backendPost = await publishToBackend(post);
+    if (backendPost != null) {
+      _unreadCount++;
+      notifyListeners();
+    }
     debugPrint(
       'MomentsService: Published AI post from $roleName (synced to backend)',
     );
-    return post;
+    return backendPost ?? post;
   }
 
   /// 删除动态
   Future<void> deletePost(String postId) async {
-    _posts.removeWhere((p) => p.id == postId);
-    await _savePosts();
-    notifyListeners();
-
-    debugPrint('MomentsService: Deleted post $postId');
+    try {
+      final response = await SecureBackendClient.delete(
+        '$_backendUrl/api/moments/$postId',
+      );
+      if (response.isSuccess) {
+        await fetchFromBackend();
+        debugPrint('MomentsService: Deleted post $postId from backend');
+      }
+    } catch (e) {
+      debugPrint('MomentsService: Delete post failed: $e');
+    }
   }
 
   /// 点赞/取消点赞
@@ -229,43 +265,42 @@ class MomentsService extends ChangeNotifier {
     if (index == -1) return;
 
     final post = _posts[index];
-    final isLiking = !post.isLikedByMe;
-    if (post.isLikedByMe) {
-      _posts[index] = post.removeLike('me');
-    } else {
-      _posts[index] = post.addLike('me');
-    }
 
-    await _savePosts();
-    notifyListeners();
-
-    // 自动同步到后端
-    if (isLiking) {
-      await SecureBackendClient.post(
-        '$_backendUrl/api/moments/$postId/like?user_id=me&user_name=我',
-        {},
-      );
-    } else {
-      await SecureBackendClient.delete(
-        '$_backendUrl/api/moments/$postId/like/me',
-      );
+    try {
+      if (!post.isLikedByMe) {
+        await SecureBackendClient.post(
+          '$_backendUrl/api/moments/$postId/like?user_id=me&user_name=我',
+          {},
+        );
+      } else {
+        await SecureBackendClient.delete(
+          '$_backendUrl/api/moments/$postId/like/me',
+        );
+      }
+      await fetchFromBackend();
+    } catch (e) {
+      debugPrint('MomentsService: Toggle like failed: $e');
     }
   }
 
   /// AI 点赞
-  Future<void> aiLike(String postId, String roleId) async {
-    final index = _posts.indexWhere((p) => p.id == postId);
-    if (index == -1) return;
+  Future<void> aiLike(String postId, String roleId, String roleName) async {
+    final post = _posts.where((p) => p.id == postId).firstOrNull;
+    if (post == null || post.likedBy.contains(roleId)) return;
 
-    final post = _posts[index];
-    if (!post.likedBy.contains(roleId)) {
-      _posts[index] = post.addLike(roleId);
-      // 如果是用户的帖子被点赞，增加未读
-      if (post.authorId == 'me') {
-        _unreadCount++;
+    try {
+      final response = await SecureBackendClient.post(
+        '$_backendUrl/api/moments/$postId/like?user_id=$roleId&user_name=$roleName',
+        {},
+      );
+      if (response.isSuccess) {
+        if (post.authorId == 'me') {
+          _unreadCount++;
+        }
+        await fetchFromBackend();
       }
-      await _savePosts();
-      notifyListeners();
+    } catch (e) {
+      debugPrint('MomentsService: AI like failed: $e');
     }
   }
 
@@ -278,36 +313,30 @@ class MomentsService extends ChangeNotifier {
     String? replyToId,
     String? replyToName,
   }) async {
-    final index = _posts.indexWhere((p) => p.id == postId);
-    if (index == -1) return;
+    final post = _posts.where((p) => p.id == postId).firstOrNull;
+    if (post == null) return;
 
-    final comment = MomentComment(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      authorId: authorId,
-      authorName: authorName,
-      content: content,
-      createdAt: DateTime.now(),
-      replyToId: replyToId,
-      replyToName: replyToName,
-    );
+    try {
+      final response = await SecureBackendClient.post(
+        '$_backendUrl/api/moments/$postId/comment',
+        {
+          'author_id': authorId,
+          'author_name': authorName,
+          'content': content,
+          'reply_to_id': replyToId,
+          'reply_to_name': replyToName,
+        },
+      );
 
-    final post = _posts[index];
-    _posts[index] = post.addComment(comment);
-    // 如果是用户的帖子被评论，或被回复，增加未读
-    if (post.authorId == 'me' || replyToId == 'me') {
-      _unreadCount++;
+      if (response.isSuccess) {
+        if (post.authorId == 'me' || replyToId == 'me') {
+          _unreadCount++;
+        }
+        await fetchFromBackend();
+      }
+    } catch (e) {
+      debugPrint('MomentsService: Add comment failed: $e');
     }
-    await _savePosts();
-
-    // 自动同步到后端
-    await SecureBackendClient.post('$_backendUrl/api/moments/$postId/comment', {
-      'author_id': authorId,
-      'author_name': authorName,
-      'content': content,
-      'reply_to': replyToName,
-    });
-
-    notifyListeners();
   }
 
   /// 清除未读
@@ -335,16 +364,17 @@ class MomentsService extends ChangeNotifier {
   String get _backendUrl => SettingsService.instance.backendUrl;
 
   /// 从后端获取朋友圈列表
-  Future<bool> fetchFromBackend() async {
+  Future<bool> fetchFromBackend({int limit = 50, String? expectedHash}) async {
     try {
       final secureResponse = await SecureBackendClient.get(
-        '$_backendUrl/api/moments',
+        '$_backendUrl/api/moments?limit=$limit',
       );
       final response = secureResponse.isSuccess
           ? secureResponse.data as Map<String, dynamic>?
           : null;
       if (response != null && response['moments'] != null) {
         final List<dynamic> momentsJson = response['moments'];
+        final responseHash = response['hash']?.toString();
         final backendPosts = <MomentPost>[];
 
         for (final json in momentsJson) {
@@ -357,19 +387,9 @@ class MomentsService extends ChangeNotifier {
           }
         }
 
-        // Keep local unsynced posts (temporary IDs) and reconcile with backend snapshot.
-        final localUnsynced = _posts.where((local) {
-          if (local.id.isEmpty || _looksLikeUuid(local.id)) {
-            return false;
-          }
-          return !backendPosts.any(
-            (remote) => _isLikelyDuplicatePost(local, remote),
-          );
-        }).toList();
-
-        _posts = [...backendPosts, ...localUnsynced];
+        _posts = backendPosts;
         _dedupePostsInMemory();
-        await _savePosts();
+        await _savePosts(hash: expectedHash ?? responseHash);
         notifyListeners();
         debugPrint(
           'MomentsService: Synced ${momentsJson.length} moments from backend',
@@ -383,7 +403,7 @@ class MomentsService extends ChangeNotifier {
   }
 
   /// 发布动态到后端
-  Future<bool> publishToBackend(MomentPost post) async {
+  Future<MomentPost?> publishToBackend(MomentPost post) async {
     try {
       final response =
           await SecureBackendClient.post('$_backendUrl/api/moments', {
@@ -394,42 +414,14 @@ class MomentsService extends ChangeNotifier {
           });
       if (response.isSuccess && response.data is Map<String, dynamic>) {
         final payload = response.data as Map<String, dynamic>;
-        final serverId = payload['id']?.toString();
-        if (serverId != null && serverId.isNotEmpty) {
-          final localIndex = _posts.indexWhere((p) => p.id == post.id);
-          if (localIndex != -1) {
-            final localPost = _posts[localIndex];
-            final serverPost = localPost.copyWith(
-              id: serverId,
-              createdAt:
-                  DateTime.tryParse(payload['created_at']?.toString() ?? '') ??
-                  localPost.createdAt,
-            );
-
-            final duplicateServerIdIndex = _posts.indexWhere(
-              (p) => p.id == serverId,
-            );
-            if (duplicateServerIdIndex != -1 &&
-                duplicateServerIdIndex != localIndex) {
-              _posts.removeAt(duplicateServerIdIndex);
-              final adjustedLocalIndex = duplicateServerIdIndex < localIndex
-                  ? localIndex - 1
-                  : localIndex;
-              _posts[adjustedLocalIndex] = serverPost;
-            } else {
-              _posts[localIndex] = serverPost;
-            }
-
-            _dedupePostsInMemory();
-            await _savePosts();
-            notifyListeners();
-          }
-        }
+        final serverPost = _parseBackendMoment(payload);
+        await fetchFromBackend();
+        return serverPost;
       }
-      return response.isSuccess;
+      return null;
     } catch (e) {
       debugPrint('MomentsService: Publish to backend failed: $e');
-      return false;
+      return null;
     }
   }
 }

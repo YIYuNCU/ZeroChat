@@ -213,7 +213,7 @@ class MomentsScheduler {
   Future<void> _performLike(Role role, MomentPost post) async {
     if (post.likedBy.contains(role.id)) return;
 
-    await MomentsService.instance.aiLike(post.id, role.id);
+    await MomentsService.instance.aiLike(post.id, role.id, role.name);
     debugPrint(
       'MomentsScheduler: ${role.name} liked ${post.authorName}\'s post',
     );

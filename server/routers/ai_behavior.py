@@ -118,69 +118,119 @@ def _load_moments_posts() -> List[Dict[str, Any]]:
     return []
 
 
+def _load_moments_hint_state(role_id: str) -> Dict[str, Any]:
+    """加载朋友圈已提示状态，避免重复注入相同内容。
+    结构：{
+        "hinted_no_reply_post_ids": [...],  # AI帖子已提示"用户未回复"的帖子ID
+        "hinted_user_post_ids": [...]       # 用户帖子已注入过的帖子ID
+    }
+    """
+    state_file = ROLES_DIR / role_id / "moments" / "moments_hint_state.json"
+    if state_file.exists():
+        try:
+            print(f"加载朋友圈提示状态：角色 {role_id} 的状态文件已找到，正在加载...")
+            with open(state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            print(f"加载朋友圈提示状态失败: {e}")
+            pass
+    return {"hinted_no_reply_post_ids": [], "hinted_user_post_ids": []}
+
+
+def _save_moments_hint_state(role_id: str, state: Dict[str, Any]) -> None:
+    state_file = ROLES_DIR / role_id / "moments" / "moments_hint_state.json"
+    try:
+        print(f"保存朋友圈提示状态：角色 {role_id} 的状态已更新，hinted_no_reply_post_ids={state.get('hinted_no_reply_post_ids')}, hinted_user_post_ids={state.get('hinted_user_post_ids')}")
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"保存朋友圈提示状态失败: {e}")
+        pass
+
+
 def _build_moments_chat_context(role_id: str, max_items: int = 4) -> str:
     posts = _load_moments_posts()
     if not posts:
         return ""
 
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    hint_state = _load_moments_hint_state(role_id)
+    hinted_no_reply: List[str] = hint_state.get("hinted_no_reply_post_ids") or []
+    hinted_user: List[str] = hint_state.get("hinted_user_post_ids") or []
+    state_dirty = False
+
     role_posts = [
         p for p in posts
         if str(p.get("author_id", "")) == role_id
+        and str(p.get("created_at", "")).startswith(today_str)
     ]
     role_posts.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    role_posts = role_posts[:1]  # 仅取当天最后一条
 
-    unresolved_user_comments: List[str] = []
-    for post in role_posts[:20]:
+    role_post_lines: List[str] = []
+    for post in role_posts:
         post_content = str(post.get("content", "")).strip()
+        if not post_content:
+            continue
+        post_id = str(post.get("id", "")).strip() or post_content[:40]
         comments = post.get("comments") if isinstance(post.get("comments"), list) else []
 
-        for c in comments:
-            if not isinstance(c, dict):
-                continue
-            if str(c.get("author_id", "")) != "me":
-                continue
+        user_comments = [
+            c for c in comments
+            if isinstance(c, dict) and str(c.get("author_id", "")) == "me"
+        ]
 
-            user_comment = str(c.get("content", "")).strip()
-            user_comment_id = str(c.get("id", "")).strip()
-            if not user_comment:
-                continue
-
-            has_ai_reply = False
-            for maybe_reply in comments:
-                if not isinstance(maybe_reply, dict):
-                    continue
-                if str(maybe_reply.get("author_id", "")) != role_id:
-                    continue
-
-                reply_to_id = str(maybe_reply.get("reply_to_id", "") or "").strip()
-                reply_to_name = str(maybe_reply.get("reply_to_name", "") or "").strip().lower()
-                if user_comment_id and reply_to_id == user_comment_id:
-                    has_ai_reply = True
-                    break
-                if reply_to_id == "me" or reply_to_name in {"me", "我"}:
-                    has_ai_reply = True
-                    break
-
-            if not has_ai_reply:
-                unresolved_user_comments.append(
-                    f"- 你的朋友圈:「{post_content[:80]}」用户评论:「{user_comment[:80]}」(尚未回应)"
+        if user_comments:
+            # 有用户回复：总是注入，并从已提示列表中移除（允许再次提示"无回复"如果回复被删除）
+            if post_id in hinted_no_reply:
+                hinted_no_reply.remove(post_id)
+                state_dirty = True
+            for c in user_comments:
+                user_comment = str(c.get("content", "")).strip()
+                if user_comment:
+                    role_post_lines.append(
+                        f"- 你的朋友圈:「{post_content[:80]}」用户回复了:「{user_comment[:80]}」(请结合此内容进行回应)"
+                    )
+        else:
+            # 无用户回复：仅提示一次
+            if post_id not in hinted_no_reply:
+                role_post_lines.append(
+                    f"- 你今天发了朋友圈:「{post_content[:80]}」，用户还没有查看或回复，可以适当提及，询问对方是否看到了"
                 )
+                hinted_no_reply.append(post_id)
+                state_dirty = True
 
     user_posts = [
         p for p in posts
         if str(p.get("author_id", "")) == "me"
+        and str(p.get("created_at", "")).startswith(today_str)
     ]
     user_posts.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    user_posts = user_posts[:1]  # 仅取当天最后一条
 
     user_moments_lines: List[str] = []
-    for p in user_posts[:2]:
+    for p in user_posts:
         content = str(p.get("content", "")).strip()
-        if content:
+        if not content:
+            continue
+        post_id = str(p.get("id", "")).strip() or content[:40]
+        if post_id not in hinted_user:
             user_moments_lines.append(f"- 用户朋友圈:「{content[:80]}」")
+            hinted_user.append(post_id)
+            state_dirty = True
+
+    if state_dirty:
+        _save_moments_hint_state(role_id, {
+            "hinted_no_reply_post_ids": hinted_no_reply,
+            "hinted_user_post_ids": hinted_user,
+        })
 
     parts: List[str] = []
-    if unresolved_user_comments:
-        parts.append("[朋友圈待回应上下文]\n" + "\n".join(unresolved_user_comments[:max_items]))
+    if role_post_lines:
+        parts.append("[朋友圈上下文]\n" + "\n".join(role_post_lines))
     if user_moments_lines:
         parts.append("[用户近期朋友圈]\n" + "\n".join(user_moments_lines))
 
@@ -437,9 +487,6 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     extra_parts = []
     if memory_context:
         extra_parts.append(memory_context)
-    frontend_moments_context = event_context.get("moments_context")
-    if isinstance(frontend_moments_context, str) and frontend_moments_context.strip():
-        extra_parts.append(frontend_moments_context.strip())
     backend_moments_context = _build_moments_chat_context(role_id)
     if backend_moments_context:
         extra_parts.append(backend_moments_context)

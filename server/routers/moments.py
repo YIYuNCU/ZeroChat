@@ -2,6 +2,7 @@
 朋友圈路由
 """
 import json
+import hashlib
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,9 @@ router = APIRouter()
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
+MOMENTS_HASH_FILE = DATA_DIR / "moments" / "posts.hash"
 TOOL_ROLE_PREFIX = "1000000000"
+DEFAULT_HASH_LIMIT = 50
 
 
 def _is_tool_role_id(role_id: str) -> bool:
@@ -88,6 +91,41 @@ def _dedupe_moments_for_render(moments: List[dict]) -> List[dict]:
             deduped.append(post)
     return deduped
 
+
+def _build_rendered_moments(limit: int) -> List[dict]:
+    moments = [m for m in load_moments() if not _is_tool_role_id(str(m.get("author_id", "")))]
+    moments = _dedupe_moments_for_render(moments)
+    moments.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return moments[:limit]
+
+
+def _compute_moments_hash(moments: List[dict]) -> str:
+    canonical = json.dumps(moments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _read_cached_moments_hash() -> Optional[str]:
+    if not MOMENTS_HASH_FILE.exists():
+        return None
+    try:
+        value = MOMENTS_HASH_FILE.read_text(encoding="utf-8").strip()
+        return value or None
+    except Exception:
+        return None
+
+
+def _write_cached_moments_hash(value: str):
+    try:
+        MOMENTS_HASH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MOMENTS_HASH_FILE.write_text(value, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _refresh_default_moments_hash_cache():
+    rendered = _build_rendered_moments(DEFAULT_HASH_LIMIT)
+    _write_cached_moments_hash(_compute_moments_hash(rendered))
+
 class MomentCreate(BaseModel):
     author_id: str
     author_name: str
@@ -111,15 +149,33 @@ def save_moments(moments: List[dict]):
     MOMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(MOMENTS_FILE, "w", encoding="utf-8") as f:
         json.dump(moments, f, indent=2, ensure_ascii=False)
+    _refresh_default_moments_hash_cache()
 
 @router.get("/moments")
 async def list_moments(limit: int = 50):
     """获取朋友圈列表"""
-    moments = [m for m in load_moments() if not _is_tool_role_id(str(m.get("author_id", "")))]
-    moments = _dedupe_moments_for_render(moments)
-    # 按时间倒序
-    moments.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    return {"moments": moments[:limit]}
+    moments = _build_rendered_moments(limit)
+    if limit == DEFAULT_HASH_LIMIT:
+        moments_hash = _read_cached_moments_hash() or _compute_moments_hash(moments)
+        _write_cached_moments_hash(moments_hash)
+    else:
+        moments_hash = _compute_moments_hash(moments)
+    return {"moments": moments, "hash": moments_hash}
+
+
+@router.get("/moments/hash")
+async def get_moments_hash(limit: int = 50):
+    """获取朋友圈列表 hash，用于前后端快速一致性校验"""
+    if limit == DEFAULT_HASH_LIMIT:
+        cached = _read_cached_moments_hash()
+        if cached:
+            return {"hash": cached, "limit": limit}
+
+    moments = _build_rendered_moments(limit)
+    moments_hash = _compute_moments_hash(moments)
+    if limit == DEFAULT_HASH_LIMIT:
+        _write_cached_moments_hash(moments_hash)
+    return {"hash": moments_hash, "limit": limit}
 
 @router.post("/moments")
 async def create_moment(moment: MomentCreate):

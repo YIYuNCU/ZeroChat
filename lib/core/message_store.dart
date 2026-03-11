@@ -34,6 +34,7 @@ class MessageStore extends ChangeNotifier {
   final Set<String> _placeholderRepairInProgress = <String>{};
   final Map<String, DateTime> _placeholderRepairLastAttempt =
       <String, DateTime>{};
+  static const Duration _placeholderRepairGraceWindow = Duration(seconds: 8);
 
   /// 初始化（确保只执行一次）
   static Future<void> init() async {
@@ -171,7 +172,10 @@ class MessageStore extends ChangeNotifier {
     return true;
   }
 
-  Future<void> _syncUpdateMessageToBackend(String chatId, Message message) async {
+  Future<void> _syncUpdateMessageToBackend(
+    String chatId,
+    Message message,
+  ) async {
     try {
       final backendUrl = SettingsService.instance.backendUrl;
       if (backendUrl.isEmpty) {
@@ -219,6 +223,11 @@ class MessageStore extends ChangeNotifier {
 
       final repairKey = '$chatId::${msg.id}';
       final now = DateTime.now();
+      // Newly created placeholders are likely being resolved by ChatController.
+      // Skip immediate repair attempts to avoid duplicate emoji fetch requests.
+      if (now.difference(msg.timestamp) < _placeholderRepairGraceWindow) {
+        continue;
+      }
       final lastAttempt = _placeholderRepairLastAttempt[repairKey];
       if (_placeholderRepairInProgress.contains(repairKey)) {
         continue;
@@ -493,7 +502,7 @@ class MessageStore extends ChangeNotifier {
           if (item is! Map) {
             continue;
           }
-          final map = Map<String, dynamic>.from(item as Map);
+          final map = Map<String, dynamic>.from(item);
           final typeName = (map['type'] ?? 'text').toString();
           final type = MessageType.values.firstWhere(
             (e) => e.name == typeName,

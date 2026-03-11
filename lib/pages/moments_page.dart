@@ -28,6 +28,11 @@ class _MomentsPageState extends State<MomentsPage> {
     SettingsService.instance.addListener(_onSettingsChanged);
     MomentsService.instance.clearUnread();
     _scrollController.addListener(_onScroll);
+    _checkAndSyncMomentsOnEnter();
+  }
+
+  Future<void> _checkAndSyncMomentsOnEnter() async {
+    await MomentsService.instance.syncIfHashMismatch();
   }
 
   @override
