@@ -181,7 +181,11 @@ async def generate_with_role(
     # 系统提示词
     system_prompt = role_data.get("system_prompt", "")
     persona = role_data.get("persona", "")
-    
+    # 注入当前日期时间
+    from datetime import datetime
+    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    now = datetime.now()
+    weekday = weekdays[now.weekday()]
     if persona or system_prompt:
         system_content = ""
         if persona:
@@ -191,11 +195,6 @@ async def generate_with_role(
         if extra_context:
             system_content += f"\n\n额外上下文：{extra_context}"
         system_content += "用户消息格式为：message: <消息内容>\ntime: <消息时间> <星期几>，请严格按照这个格式理解用户消息，并在回复中体现对时间的理解和关联。"
-        # 注入当前日期时间
-        from datetime import datetime
-        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-        now = datetime.now()
-        weekday = weekdays[now.weekday()]
         
         messages.append({"role": "system", "content": system_content})
     # 历史消息

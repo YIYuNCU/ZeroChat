@@ -476,7 +476,11 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     #     if should_search(user_message):
     #         search_results = await web_search(user_message, max_results=5)
     #         search_context = format_search_results(search_results)
-    result = await sequential_memory_generation(role_id, "1000000000003", user_message)
+    enable_connection = role.get("enable_connection", False)  
+    if enable_connection:
+        result = await sequential_memory_generation(role_id, "1000000000003", user_message)
+    else:
+        result = "noneed"
     if result != "noneed" and result is not None:
         print(f"衔接事件生成：角色 {role.get('name')} 生成了新的衔接事件记忆: {result}")
     elif result == "noneed":
