@@ -301,10 +301,12 @@ class ApiService {
   /// 检查后端是否可用
   static Future<bool> isBackendAvailable() async {
     try {
-      final response = await SecureBackendClient.get(
-        '$_backendUrl/api/health',
-      ).timeout(const Duration(seconds: 3));
-      return response.statusCode == 200;
+      final response = await SecureWebSocketClient.instance.request(
+        'health',
+        const <String, dynamic>{},
+        timeout: const Duration(seconds: 3),
+      );
+      return response['status']?.toString() == 'healthy';
     } catch (e) {
       return false;
     }
@@ -325,22 +327,17 @@ class ApiService {
       final ext = imagePath.split('.').last.toLowerCase();
       final mimeType = ext == 'png' ? 'image/png' : 'image/jpeg';
 
-      // 调用后端 vision API
-      final response =
-          await SecureBackendClient.post('$_backendUrl/api/chat/vision', {
-            'image_base64': base64Image,
-            'mime_type': mimeType,
-            'user_prompt': userPrompt,
-            'system_prompt': rolePersona,
-          }).timeout(const Duration(seconds: 60));
-
-      if (response.statusCode == 200) {
-        final data = response.data;
-        return data['reply'] ?? '图片识别失败';
-      } else {
-        debugPrint('Vision API error: ${response.statusCode} ${response.data}');
-        return '图片识别失败：服务器错误 ${response.statusCode}';
-      }
+      final response = await SecureWebSocketClient.instance.request(
+        'chat_vision',
+        {
+          'image_base64': base64Image,
+          'mime_type': mimeType,
+          'user_prompt': userPrompt,
+          'system_prompt': rolePersona,
+        },
+        timeout: const Duration(seconds: 60),
+      );
+      return response['reply']?.toString() ?? '图片识别失败';
     } catch (e) {
       debugPrint('chatWithImage error: $e');
       return '图片识别失败：$e';

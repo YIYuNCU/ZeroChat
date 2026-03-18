@@ -1,8 +1,8 @@
-import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:io';
 
 import '../models/emoji_item.dart';
-import 'secure_backend_client.dart';
-import 'settings_service.dart';
+import 'secure_websocket_client.dart';
 
 class EmojiService {
   static EmojiService? _instance;
@@ -10,17 +10,12 @@ class EmojiService {
 
   EmojiService._();
 
-  Future<String> _baseUrl() async {
-    return SettingsService.instance.backendUrl;
-  }
-
   Future<List<String>> getAiCategories(String roleId) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.get('$base/api/roles/$roleId/emoji-categories');
-    if (resp.statusCode != 200 || resp.data == null) {
-      return [];
-    }
-    final raw = resp.data!['categories'];
+    final resp = await SecureWebSocketClient.instance.request(
+      'role_emoji_categories_list',
+      {'role_id': roleId},
+    );
+    final raw = resp['categories'];
     if (raw is! List) {
       return [];
     }
@@ -28,29 +23,27 @@ class EmojiService {
   }
 
   Future<bool> addAiCategory(String roleId, String category) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.post(
-      '$base/api/roles/$roleId/emoji-categories',
-      {'category': category},
+    final resp = await SecureWebSocketClient.instance.request(
+      'role_emoji_category_create',
+      {'role_id': roleId, 'category': category},
     );
-    return resp.statusCode == 200;
+    return resp['success'] == true;
   }
 
   Future<bool> deleteAiCategory(String roleId, String category) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.delete(
-      '$base/api/roles/$roleId/emoji-categories/$category',
+    final resp = await SecureWebSocketClient.instance.request(
+      'role_emoji_category_delete',
+      {'role_id': roleId, 'category': category},
     );
-    return resp.statusCode == 200;
+    return resp['success'] == true;
   }
 
   Future<List<EmojiItem>> getAiEmojis(String roleId, String category) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.get('$base/api/roles/$roleId/emojis/$category/list');
-    if (resp.statusCode != 200 || resp.data == null) {
-      return [];
-    }
-    final raw = resp.data!['emojis'];
+    final resp = await SecureWebSocketClient.instance.request(
+      'role_emojis_list',
+      {'role_id': roleId, 'category': category},
+    );
+    final raw = resp['emojis'];
     if (raw is! List) {
       return [];
     }
@@ -65,24 +58,21 @@ class EmojiService {
     required String category,
     required String filePath,
   }) async {
-    final base = await _baseUrl();
-    final file = await http.MultipartFile.fromPath('file', filePath);
-    final resp = await SecureBackendClient.multipartPost(
-      '$base/api/roles/$roleId/emojis/$category/upload',
-      files: [file],
+    final bytes = await File(filePath).readAsBytes();
+    final filename = filePath.split(RegExp(r'[\\/]')).last;
+    final resp = await SecureWebSocketClient.instance.request(
+      'role_emoji_upload',
+      {
+        'role_id': roleId,
+        'category': category,
+        'filename': filename,
+        'content_base64': base64Encode(bytes),
+      },
     );
-    if (resp.statusCode != 200) {
+    if (resp['emoji'] is! Map) {
       return null;
     }
-    final body = await resp.stream.bytesToString();
-    final decoded = SecureBackendClient.decodeResponseBodyString(body);
-    final jsonMap = decoded is Map<String, dynamic>
-        ? decoded
-        : (decoded is Map ? decoded.cast<String, dynamic>() : null);
-    if (jsonMap == null || jsonMap['emoji'] is! Map) {
-      return null;
-    }
-    return EmojiItem.fromAiJson((jsonMap['emoji'] as Map).cast<String, dynamic>());
+    return EmojiItem.fromAiJson((resp['emoji'] as Map).cast<String, dynamic>());
   }
 
   Future<bool> deleteAiEmoji({
@@ -90,20 +80,19 @@ class EmojiService {
     required String category,
     required String filename,
   }) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.delete(
-      '$base/api/roles/$roleId/emojis/$category/$filename',
+    final resp = await SecureWebSocketClient.instance.request(
+      'role_emoji_delete',
+      {'role_id': roleId, 'category': category, 'filename': filename},
     );
-    return resp.statusCode == 200;
+    return resp['success'] == true;
   }
 
   Future<List<String>> getUserCategories() async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.get('$base/api/user-emojis/categories');
-    if (resp.statusCode != 200 || resp.data == null) {
-      return [];
-    }
-    final raw = resp.data!['categories'];
+    final resp = await SecureWebSocketClient.instance.request(
+      'user_emoji_categories_list',
+      const <String, dynamic>{},
+    );
+    final raw = resp['categories'];
     if (raw is! List) {
       return [];
     }
@@ -111,30 +100,27 @@ class EmojiService {
   }
 
   Future<bool> addUserCategory(String category) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.post(
-      '$base/api/user-emojis/categories',
+    final resp = await SecureWebSocketClient.instance.request(
+      'user_emoji_category_create',
       {'category': category},
     );
-    return resp.statusCode == 200;
+    return resp['success'] == true;
   }
 
   Future<bool> deleteUserCategory(String category) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.delete('$base/api/user-emojis/categories/$category');
-    return resp.statusCode == 200;
+    final resp = await SecureWebSocketClient.instance.request(
+      'user_emoji_category_delete',
+      {'category': category},
+    );
+    return resp['success'] == true;
   }
 
   Future<List<EmojiItem>> getUserEmojis({String? category}) async {
-    final base = await _baseUrl();
-    final suffix = (category == null || category.isEmpty)
-        ? ''
-        : '?category=${Uri.encodeComponent(category)}';
-    final resp = await SecureBackendClient.get('$base/api/user-emojis$suffix');
-    if (resp.statusCode != 200 || resp.data == null) {
-      return [];
-    }
-    final raw = resp.data!['emojis'];
+    final resp = await SecureWebSocketClient.instance.request(
+      'user_emojis_list',
+      {'category': category},
+    );
+    final raw = resp['emojis'];
     if (raw is! List) {
       return [];
     }
@@ -149,56 +135,53 @@ class EmojiService {
     required String tag,
     required String filePath,
   }) async {
-    final base = await _baseUrl();
-    final file = await http.MultipartFile.fromPath('file', filePath);
-    final resp = await SecureBackendClient.multipartPost(
-      '$base/api/user-emojis/upload',
-      files: [file],
-      fields: {
+    final bytes = await File(filePath).readAsBytes();
+    final filename = filePath.split(RegExp(r'[\\/]')).last;
+    final resp = await SecureWebSocketClient.instance.request(
+      'user_emoji_upload',
+      {
         'category': category,
         'tag': tag,
+        'filename': filename,
+        'content_base64': base64Encode(bytes),
       },
     );
-    if (resp.statusCode != 200) {
+    if (resp['emoji'] is! Map) {
       return null;
     }
-    final body = await resp.stream.bytesToString();
-    final decoded = SecureBackendClient.decodeResponseBodyString(body);
-    final jsonMap = decoded is Map<String, dynamic>
-        ? decoded
-        : (decoded is Map ? decoded.cast<String, dynamic>() : null);
-    if (jsonMap == null || jsonMap['emoji'] is! Map) {
-      return null;
-    }
-    return EmojiItem.fromUserJson((jsonMap['emoji'] as Map).cast<String, dynamic>());
+    return EmojiItem.fromUserJson((resp['emoji'] as Map).cast<String, dynamic>());
   }
 
   Future<bool> deleteUserEmoji(String emojiId) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.delete('$base/api/user-emojis/$emojiId');
-    return resp.statusCode == 200;
+    final resp = await SecureWebSocketClient.instance.request(
+      'user_emoji_delete',
+      {'emoji_id': emojiId},
+    );
+    return resp['success'] == true;
   }
 
   Future<String?> resolveUserEmojiTag(String emojiId) async {
-    final base = await _baseUrl();
-    final resp = await SecureBackendClient.post(
-      '$base/api/user-emojis/resolve-tag',
+    final resp = await SecureWebSocketClient.instance.request(
+      'user_emoji_resolve_tag',
       {'emoji_id': emojiId},
     );
-    if (resp.statusCode != 200 || resp.data == null) {
+    if (resp['found'] != true) {
       return null;
     }
-    return resp.data!['tag']?.toString();
+    return resp['tag']?.toString();
   }
 
   String withBase(String relativeUrl, String baseUrl) {
-    if (relativeUrl.startsWith('http://') || relativeUrl.startsWith('https://')) {
+    if (relativeUrl.startsWith('http://') ||
+        relativeUrl.startsWith('https://') ||
+        relativeUrl.startsWith('data:') ||
+        relativeUrl.startsWith('file://')) {
       return relativeUrl;
     }
     return '$baseUrl$relativeUrl';
   }
 
   Future<String> getImageUrl(String relativeUrl) async {
-    return withBase(relativeUrl, await _baseUrl());
+    return withBase(relativeUrl, '');
   }
 }

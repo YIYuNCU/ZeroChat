@@ -239,11 +239,22 @@ class ChatBubble extends StatelessWidget {
   }
 
   String _resolveStickerImagePath(String rawPath) {
+    if (rawPath.startsWith('/files/emojis/') ||
+        rawPath.startsWith('/files/user-emojis/')) {
+      final base = SettingsService.instance.backendUrl.trim();
+      if (base.isNotEmpty) {
+        return '${base.replaceAll(RegExp(r'/+$'), '')}$rawPath';
+      }
+    }
+
     if (rawPath.startsWith('/api/emojis/') ||
         rawPath.startsWith('/api/user-emojis/')) {
       final base = SettingsService.instance.backendUrl.trim();
       if (base.isNotEmpty) {
-        return '${base.replaceAll(RegExp(r'/+$'), '')}$rawPath';
+        final normalized = rawPath
+            .replaceFirst('/api/emojis/', '/files/emojis/')
+            .replaceFirst('/api/user-emojis/', '/files/user-emojis/');
+        return '${base.replaceAll(RegExp(r'/+$'), '')}$normalized';
       }
     }
     return rawPath;
@@ -286,11 +297,18 @@ class ChatBubble extends StatelessWidget {
     }
 
     final path = uri.path;
-    if (!(path.startsWith('/api/emojis/') || path.startsWith('/api/user-emojis/'))) {
+    if (!(path.startsWith('/api/emojis/') ||
+        path.startsWith('/api/user-emojis/') ||
+        path.startsWith('/files/emojis/') ||
+        path.startsWith('/files/user-emojis/'))) {
       return null;
     }
 
-    var candidate = '${base.replaceAll(RegExp(r'/+$'), '')}$path';
+    final normalizedPath = path
+        .replaceFirst('/api/emojis/', '/files/emojis/')
+        .replaceFirst('/api/user-emojis/', '/files/user-emojis/');
+
+    var candidate = '${base.replaceAll(RegExp(r'/+$'), '')}$normalizedPath';
     if (uri.hasQuery) {
       candidate = '$candidate?${uri.query}';
     }

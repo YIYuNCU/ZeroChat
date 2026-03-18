@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 
 /// 意图类型枚举
 enum IntentType {
@@ -126,22 +127,15 @@ class IntentService {
 
   /// AI 意图分类
   static Future<IntentResult?> _detectByBackend(String message) async {
-    final backendUrl = SettingsService.instance.backendUrl;
-    if (backendUrl.isEmpty) return null;
+    if (SettingsService.instance.backendUrl.isEmpty) return null;
 
-    final response =
-        await SecureBackendClient.post('$backendUrl/api/ai/intent', {
-          'message': message,
-          'api_url': _intentApiUrl,
-          'api_key': _intentApiKey,
-          'model': _intentModel,
-        });
+    final data = await SecureWebSocketClient.instance.request('ai_intent', {
+      'message': message,
+      'api_url': _intentApiUrl,
+      'api_key': _intentApiKey,
+      'model': _intentModel,
+    });
 
-    if (response.statusCode != 200 || response.data is! Map<String, dynamic>) {
-      return null;
-    }
-
-    final data = response.data as Map<String, dynamic>;
     if (data['success'] != true) {
       return null;
     }

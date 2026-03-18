@@ -20,7 +20,7 @@ import 'moments_scheduler.dart';
 import '../services/intent_service.dart';
 import '../services/memory_service.dart';
 import '../services/sticker_service.dart';
-import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
 import '../services/task_service.dart';
 
 /// 聊天核心引擎
@@ -915,19 +915,17 @@ class ChatController extends ChangeNotifier {
         );
 
         try {
-          final backendUrl = SettingsService.instance.backendUrl;
-          final resp = await SecureBackendClient.get(
-            '$backendUrl/api/roles/$roleId/emojis/$emotion/random',
+          final data = await SecureWebSocketClient.instance.request(
+            'emoji_random',
+            {'role_id': roleId, 'emotion': emotion},
           ).timeout(const Duration(seconds: 5));
-          if (resp.statusCode == 200) {
-            final data = resp.data;
-            if (data['found'] == true && data['url'] != null) {
+          if (data['found'] == true && data['url'] != null) {
               // 延迟一小段时间再发表情包
               await Future.delayed(
                 Duration(milliseconds: 300 + _random.nextInt(500)),
               );
 
-              final stickerUrl = '$backendUrl${data['url']}';
+              final stickerUrl = data['url'].toString();
               final stickerContent = StickerService.createStickerMessageContent(
                 emotion,
                 stickerUrl,
@@ -942,7 +940,6 @@ class ChatController extends ChangeNotifier {
               debugPrint(
                 'ChatController: Replaced placeholder sticker for emotion: $emotion',
               );
-            }
           }
         } catch (e) {
           debugPrint('ChatController: Sticker fetch error: $e');

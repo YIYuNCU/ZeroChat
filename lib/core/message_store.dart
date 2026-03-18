@@ -5,8 +5,6 @@ import 'package:crypto/crypto.dart';
 import '../models/message.dart';
 import '../services/sticker_service.dart';
 import '../services/storage_service.dart';
-import '../services/settings_service.dart';
-import '../services/secure_backend_client.dart';
 import '../services/secure_websocket_client.dart';
 
 /// 消息存储层
@@ -203,11 +201,6 @@ class MessageStore extends ChangeNotifier {
       return;
     }
 
-    final backendUrl = SettingsService.instance.backendUrl;
-    if (backendUrl.isEmpty) {
-      return;
-    }
-
     for (final msg in List<Message>.from(visibleMessages)) {
       if (msg.type != MessageType.sticker) {
         continue;
@@ -246,19 +239,15 @@ class MessageStore extends ChangeNotifier {
           : msg.senderId;
 
       try {
-        final resp = await SecureBackendClient.get(
-          '$backendUrl/api/roles/$roleId/emojis/$safeEmotion/random',
+        final data = await SecureWebSocketClient.instance.request(
+          'emoji_random',
+          {'role_id': roleId, 'emotion': safeEmotion},
         ).timeout(const Duration(seconds: 5));
-
-        if (resp.statusCode != 200) {
-          continue;
-        }
-        final data = resp.data;
         if (data['found'] != true || data['url'] == null) {
           continue;
         }
 
-        final stickerUrl = '$backendUrl${data['url']}';
+        final stickerUrl = data['url'].toString();
         final fixedContent = StickerService.createStickerMessageContent(
           safeEmotion,
           stickerUrl,

@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'storage_service.dart';
 import 'intent_service.dart';
 import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 
 /// 全局设置服务
 /// 管理 API 配置、全局提示词等
@@ -11,6 +12,14 @@ class SettingsService extends ChangeNotifier {
   SettingsService._internal();
 
   static SettingsService get instance => _instance;
+
+  String _normalizeFilePath(String value) {
+    final trimmed = value.trim();
+    if (trimmed.startsWith('/api/avatars/')) {
+      return trimmed.replaceFirst('/api/avatars/', '/files/avatars/');
+    }
+    return trimmed;
+  }
 
   // ========== 用户信息 ==========
   String _userNickname = 'ZeroChat';
@@ -103,7 +112,9 @@ class SettingsService extends ChangeNotifier {
   Future<void> _loadSettings() async {
     // 用户信息
     _userNickname = StorageService.getString('user_nickname') ?? 'ZeroChat';
-    _userAvatarUrl = StorageService.getString('user_avatar_url') ?? '';
+    _userAvatarUrl = _normalizeFilePath(
+      StorageService.getString('user_avatar_url') ?? '',
+    );
     _userAvatarHash = StorageService.getString('user_avatar_hash') ?? '';
 
     // 主聊天 API
@@ -173,8 +184,9 @@ class SettingsService extends ChangeNotifier {
       await StorageService.setString('user_nickname', nickname);
     }
     if (avatarUrl != null) {
-      _userAvatarUrl = avatarUrl;
-      await StorageService.setString('user_avatar_url', avatarUrl);
+      final normalized = _normalizeFilePath(avatarUrl);
+      _userAvatarUrl = normalized;
+      await StorageService.setString('user_avatar_url', normalized);
     }
     if (avatarHash != null) {
       _userAvatarHash = avatarHash;
@@ -461,9 +473,10 @@ class SettingsService extends ChangeNotifier {
   /// 同步 API 设置到后端
   Future<bool> syncApiSettingsToBackend() async {
     try {
-      final response = await SecureBackendClient.put(
-        '$_backendUrl/api/settings',
+      final response = await SecureWebSocketClient.instance.request(
+        'settings_update',
         {
+          'updates': {
           'ai_api_url': _chatApiUrl,
           'ai_api_key': _chatApiKey,
           'ai_model': _chatModel,
@@ -471,9 +484,10 @@ class SettingsService extends ChangeNotifier {
           'intent_api_url': _intentApiUrl,
           'intent_api_key': _intentApiKey,
           'intent_model': _intentModel,
+          },
         },
       );
-      if (response.statusCode == 200) {
+      if (response['success'] == true) {
         debugPrint('SettingsService: API settings synced to backend');
         return true;
       }
@@ -486,15 +500,12 @@ class SettingsService extends ChangeNotifier {
   /// 从后端拉取并应用全量设置（用于新安装客户端冷启动同步）
   Future<bool> syncAllSettingsFromBackend() async {
     try {
-      final response = await SecureBackendClient.get(
-        '$_backendUrl/api/settings?include_secrets=true',
+      final response = await SecureWebSocketClient.instance.request(
+        'settings_get',
+        {'include_secrets': true},
       );
 
-      if (!response.isSuccess || response.data is! Map<String, dynamic>) {
-        return false;
-      }
-
-      final payload = response.data as Map<String, dynamic>;
+      final payload = response;
       final settings = payload['settings'];
       if (settings is! Map) {
         return false;
@@ -529,6 +540,49 @@ class SettingsService extends ChangeNotifier {
       return true;
     } catch (e) {
       debugPrint('SettingsService: Sync all settings from backend failed: $e');
+      return false;
+    }
+  }
+
+  /// 从后端拉取并应用公开设置（不请求密钥）
+  Future<bool> syncPublicSettingsFromBackend() async {
+    try {
+      final payload = await SecureWebSocketClient.instance.request(
+        'settings_get',
+        const <String, dynamic>{},
+      );
+      final settings = payload['settings'];
+      if (settings is! Map) {
+        return false;
+      }
+
+      final server = Map<String, dynamic>.from(settings);
+
+      final chatUrl = (server['ai_api_url']?.toString() ?? '').trim();
+      final chatModel =
+          (server['ai_model']?.toString() ?? _chatModel).trim().isEmpty
+          ? _chatModel
+          : (server['ai_model']?.toString() ?? _chatModel).trim();
+
+      final intentEnabled = server['intent_enabled'] == true;
+      final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
+      final intentModel =
+          (server['intent_model']?.toString() ?? _intentModel).trim().isEmpty
+          ? _intentModel
+          : (server['intent_model']?.toString() ?? _intentModel).trim();
+
+      await updateChatApi(url: chatUrl, key: _chatApiKey, model: chatModel);
+      await updateIntentApi(
+        enabled: intentEnabled,
+        url: intentUrl,
+        key: _intentApiKey,
+        model: intentModel,
+      );
+
+      debugPrint('SettingsService: Public settings synced from backend');
+      return true;
+    } catch (e) {
+      debugPrint('SettingsService: Sync public settings from backend failed: $e');
       return false;
     }
   }

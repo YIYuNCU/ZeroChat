@@ -1,9 +1,8 @@
 import 'package:flutter/foundation.dart';
 import '../models/message.dart';
 import 'storage_service.dart';
-import 'settings_service.dart';
 import 'role_service.dart';
-import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 
 /// 记忆服务
 /// 管理短期记忆和核心记忆
@@ -186,23 +185,16 @@ class MemoryService {
   /// 同步核心记忆到后端
   static Future<void> _syncCoreMemoryToBackend() async {
     try {
-      final backendUrl = SettingsService.instance.backendUrl;
       final roleId = RoleService.getCurrentRole().id;
       final coreMemoryStr = _coreMemory.join('；');
 
-      final response = await SecureBackendClient.put(
-        '$backendUrl/api/roles/$roleId/memory',
-        {'core_memory': coreMemoryStr},
+      await SecureWebSocketClient.instance.request('roles_memory_update', {
+        'role_id': roleId,
+        'core_memory': coreMemoryStr,
+      });
+      debugPrint(
+        'MemoryService: Core memory synced to backend for role $roleId',
       );
-      if (response.statusCode == 200) {
-        debugPrint(
-          'MemoryService: Core memory synced to backend for role $roleId',
-        );
-      } else {
-        debugPrint(
-          'MemoryService: Backend sync failed with status ${response.statusCode}',
-        );
-      }
     } catch (e) {
       debugPrint('MemoryService: Backend sync error: $e');
     }

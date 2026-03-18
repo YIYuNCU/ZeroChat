@@ -6,6 +6,7 @@ import '../services/role_service.dart';
 import '../services/settings_service.dart';
 import '../services/image_service.dart';
 import '../services/secure_backend_client.dart';
+import '../widgets/smart_avatar_image.dart';
 import 'publish_moment_page.dart';
 
 /// 朋友圈页面
@@ -245,11 +246,14 @@ class _MomentsPageState extends State<MomentsPage> {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(6),
-          child: Image.network(
-            avatarUrl,
-            headers: SecureBackendClient.authHeaders,
+          child: SmartAvatarImage(
+            remoteUrl: avatarUrl,
+            cacheKey: 'user_self_avatar_moments',
+            backendHash: SettingsService.instance.userAvatarHash,
+            width: 68,
+            height: 68,
             fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => _buildDefaultUserAvatar(nickname),
+            fallbackBuilder: () => _buildDefaultUserAvatar(nickname),
           ),
         ),
       );
@@ -510,23 +514,45 @@ class _MomentsPageState extends State<MomentsPage> {
   }
 
   Widget _buildAvatar(MomentPost post) {
-    // 从 RoleService 获取最新头像
-    String? avatarUrl = post.authorAvatarUrl;
-    final role = RoleService.getRoleById(post.authorId);
-    if (role != null && role.avatarUrl != null && role.avatarUrl!.isNotEmpty) {
-      avatarUrl = role.avatarUrl;
+    String? avatarUrl;
+    String? avatarHash;
+
+    if (post.isFromUser) {
+      final userAvatar = SettingsService.instance.userAvatarUrl;
+      if (userAvatar.isNotEmpty) {
+        avatarUrl = userAvatar.startsWith('/')
+            ? '${SettingsService.instance.backendUrl}$userAvatar'
+            : userAvatar;
+      }
+      avatarHash = SettingsService.instance.userAvatarHash;
+    } else {
+      avatarUrl = post.authorAvatarUrl;
+      final role = RoleService.getRoleById(post.authorId);
+      if (role != null) {
+        final roleAvatar = role.avatarUrl;
+        if (roleAvatar != null && roleAvatar.isNotEmpty) {
+          avatarUrl = roleAvatar;
+        }
+        avatarHash = role.avatarHash;
+      }
+      if (avatarUrl != null && avatarUrl.startsWith('/')) {
+        avatarUrl = '${SettingsService.instance.backendUrl}$avatarUrl';
+      }
     }
 
     if (avatarUrl != null && avatarUrl.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
-          avatarUrl,
-          headers: SecureBackendClient.authHeaders,
+        child: SmartAvatarImage(
+          remoteUrl: avatarUrl,
+          cacheKey: post.isFromUser
+              ? 'user_self_avatar_moments_post'
+              : 'role_${post.authorId}_avatar_moments_post',
+          backendHash: avatarHash,
           width: 42,
           height: 42,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _buildDefaultAvatar(post),
+          fallbackBuilder: () => _buildDefaultAvatar(post),
         ),
       );
     }

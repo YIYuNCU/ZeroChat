@@ -128,6 +128,18 @@ class StickerService {
     if (uri != null && uri.hasScheme) {
       final path = uri.path;
       if (path.startsWith('/api/emojis/')) {
+        var out = path
+            .replaceFirst('/api/emojis/', '/files/emojis/')
+            .replaceFirst('/api/user-emojis/', '/files/user-emojis/');
+        if (uri.hasQuery) {
+          out = '$out?${uri.query}';
+        }
+        if (uri.hasFragment) {
+          out = '$out#${uri.fragment}';
+        }
+        return out;
+      }
+      if (path.startsWith('/files/emojis/') || path.startsWith('/files/user-emojis/')) {
         var out = path;
         if (uri.hasQuery) {
           out = '$out?${uri.query}';

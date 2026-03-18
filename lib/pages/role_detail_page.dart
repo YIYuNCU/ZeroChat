@@ -1,13 +1,13 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http;
-import 'package:http_parser/http_parser.dart';
 import '../models/role.dart';
 import '../services/role_service.dart';
 import '../services/memory_service.dart';
 import '../services/chat_list_service.dart';
 import '../services/settings_service.dart';
-import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'role_settings_page.dart';
 import 'chat_detail_page.dart';
@@ -388,49 +388,35 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
         return;
       }
 
-      // 上传到后端
+      // 通过 WS 上传到后端
       final bytes = await pickedFile.readAsBytes();
       final ext = pickedFile.path.split('.').last.toLowerCase();
 
-      final response = await SecureBackendClient.multipartPost(
-        '$backendUrl/api/roles/${_role.id}/avatar/upload',
-        files: [
-          http.MultipartFile.fromBytes(
-            'file',
-            bytes,
-            filename: 'avatar.$ext',
-            contentType: MediaType('image', ext == 'jpg' ? 'jpeg' : ext),
-          ),
-        ],
+      final data = await SecureWebSocketClient.instance.request(
+        'roles_avatar_upload',
+        {
+          'role_id': _role.id,
+          'filename': 'avatar.$ext',
+          'content_base64': base64Encode(bytes),
+        },
       );
-      if (response.statusCode == 200) {
-        final respStr = await response.stream.bytesToString();
-        final data =
-            SecureBackendClient.decodeResponseBodyString(respStr)
-                as Map<String, dynamic>;
-        final avatarUrl = data['avatar_url'] as String?;
-        final avatarHash = data['avatar_hash'] as String?;
+      final avatarUrl = data['avatar_url'] as String?;
+      final avatarHash = data['avatar_hash'] as String?;
 
-        if (avatarUrl != null) {
-          final fullUrl = avatarUrl.startsWith('http')
-              ? avatarUrl
-              : '$backendUrl$avatarUrl';
-          final updatedRole = _role.copyWith(
-            avatarUrl: fullUrl,
-            avatarHash: avatarHash,
-          );
-          await RoleService.updateRole(updatedRole);
-          if (!mounted) return;
-          setState(() => _role = updatedRole);
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text('头像上传成功')));
-        }
-      } else {
+      if (avatarUrl != null) {
+        final fullUrl = avatarUrl.startsWith('http')
+            ? avatarUrl
+            : '$backendUrl$avatarUrl';
+        final updatedRole = _role.copyWith(
+          avatarUrl: fullUrl,
+          avatarHash: avatarHash,
+        );
+        await RoleService.updateRole(updatedRole);
         if (!mounted) return;
+        setState(() => _role = updatedRole);
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('上传失败: ${response.statusCode}')));
+        ).showSnackBar(const SnackBar(content: Text('头像上传成功')));
       }
     } catch (e) {
       debugPrint('Avatar upload error: $e');

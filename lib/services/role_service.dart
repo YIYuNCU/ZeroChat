@@ -2,8 +2,7 @@ import 'package:flutter/foundation.dart';
 import '../models/role.dart';
 import 'storage_service.dart';
 import 'memory_service.dart';
-import 'settings_service.dart';
-import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 
 /// 角色管理服务
 /// 管理 AI 角色的创建、切换和持久化
@@ -11,6 +10,14 @@ class RoleService {
   static final List<Role> _roles = [];
   static String _currentRoleId = 'default';
   static const String _toolRolePrefix = '1000000000';
+
+  static String _normalizeAvatarUrl(String value) {
+    final trimmed = value.trim();
+    if (trimmed.startsWith('/api/roles/') && trimmed.endsWith('/avatar/file')) {
+      return trimmed.replaceFirst('/api/roles/', '/files/roles/').replaceFirst('/avatar/file', '/avatar');
+    }
+    return trimmed;
+  }
 
   static bool isToolRoleId(String? roleId) {
     return (roleId ?? '').startsWith(_toolRolePrefix);
@@ -30,7 +37,12 @@ class RoleService {
       _roles.clear();
       for (final json in jsonList) {
         try {
-          _roles.add(Role.fromJson(json));
+          final role = Role.fromJson(json);
+          _roles.add(
+            role.copyWith(
+              avatarUrl: _normalizeAvatarUrl(role.avatarUrl ?? ''),
+            ),
+          );
         } catch (e) {
           debugPrint('Error loading role: $e');
         }
@@ -135,7 +147,9 @@ class RoleService {
     await _saveRoles();
     // 自动从后端删除（失败不影响本地已删除状态）
     try {
-      await SecureBackendClient.delete('$_backendUrl/api/roles/$roleId');
+      await SecureWebSocketClient.instance.request('roles_delete', {
+        'role_id': roleId,
+      });
       debugPrint('Deleted role: $roleId (synced to backend)');
     } catch (e) {
       debugPrint(
@@ -175,19 +189,14 @@ class RoleService {
 
   // ========== 后端同步 ==========
 
-  /// 获取后端 URL
-  static String get _backendUrl => SettingsService.instance.backendUrl;
-
   /// 从后端获取角色列表
   static Future<bool> fetchFromBackend() async {
     try {
-      final secureResponse = await SecureBackendClient.get(
-        '$_backendUrl/api/roles',
+      final response = await SecureWebSocketClient.instance.request(
+        'roles_list',
+        const <String, dynamic>{},
       );
-      final response = secureResponse.isSuccess
-          ? secureResponse.data as Map<String, dynamic>?
-          : null;
-      if (response != null && response['roles'] != null) {
+      if (response['roles'] != null) {
         final List<dynamic> rolesJson = response['roles'];
         for (final json in rolesJson) {
           try {
@@ -203,7 +212,7 @@ class RoleService {
               name: json['name'] ?? '',
               description: json['description'] ?? '',
               systemPrompt: json['system_prompt'] ?? '',
-              avatarUrl: json['avatar_url'] ?? '',
+              avatarUrl: _normalizeAvatarUrl(json['avatar_url']?.toString() ?? ''),
               avatarHash: json['avatar_hash'] ?? '',
               chatBackgroundUrl: json['chat_background_url'] ?? '',
               aiModel: json['ai_model'] ?? 'deepseek-chat',
@@ -278,8 +287,8 @@ class RoleService {
   /// 同步单个角色到后端
   static Future<bool> syncRoleToBackend(Role role) async {
     try {
-      final response =
-          await SecureBackendClient.post('$_backendUrl/api/roles', {
+      await SecureWebSocketClient.instance.request('roles_upsert', {
+        'role': {
             'id': role.id,
             'name': role.name,
             'description': role.description,
@@ -295,8 +304,9 @@ class RoleService {
             'gender': role.gender,
             'menstruation_cycle': role.menstruationCycle,
             'temperature': role.temperature,
-          });
-      return response.isSuccess;
+          },
+      });
+      return true;
     } catch (e) {
       debugPrint('RoleService: Sync to backend failed: $e');
       return false;

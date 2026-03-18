@@ -251,7 +251,7 @@ def _init_moment_jobs():
     # 定期检查是否有 AI 要评论/回复朋友圈
     scheduler.add_job(
         _check_moment_comments,
-        IntervalTrigger(minutes=45),
+        IntervalTrigger(minutes=180),
         id="moment_comment_check",
         replace_existing=True,
     )

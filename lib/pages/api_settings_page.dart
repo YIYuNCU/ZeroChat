@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
 
 /// API 设置页面
 /// 配置主聊天、意图识别、图像识别 API
@@ -380,11 +381,15 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     });
 
     try {
-      final response = await SecureBackendClient.get(
-        '$url/api/health',
-      ).timeout(const Duration(seconds: 5));
+      await _saveSettingsLocalOnly();
+      await SecureWebSocketClient.instance.close();
+      final response = await SecureWebSocketClient.instance.request(
+        'health',
+        const <String, dynamic>{},
+        timeout: const Duration(seconds: 5),
+      );
 
-      if (response.statusCode == 200) {
+      if (response['status']?.toString() == 'healthy') {
         await _saveSettingsLocalOnly();
         final synced = await SettingsService.instance.syncApiSettingsToBackend();
 
@@ -403,7 +408,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       } else {
         setState(() {
           _connectionSuccess = false;
-          _connectionError = 'HTTP ${response.statusCode}';
+          _connectionError = '后端健康检查失败';
         });
       }
     } catch (e) {
