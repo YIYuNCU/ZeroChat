@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel
 from fastapi import APIRouter
+from services import scheduler_service
 
 router = APIRouter()
 
@@ -65,6 +66,9 @@ async def create_task(task: TaskCreate):
     
     tasks.append(new_task)
     save_tasks(tasks)
+
+    # 立即注册到后端调度器
+    scheduler_service.schedule_task(new_task)
     return new_task
 
 @router.put("/tasks/{task_id}/toggle")
@@ -75,6 +79,11 @@ async def toggle_task(task_id: str):
         if t["id"] == task_id:
             t["enabled"] = not t.get("enabled", True)
             save_tasks(tasks)
+
+            if t["enabled"]:
+                scheduler_service.schedule_task(t)
+            else:
+                scheduler_service.unschedule_task(task_id)
             return t
     return {"error": "not found"}
 
@@ -84,6 +93,7 @@ async def delete_task(task_id: str):
     tasks = load_tasks()
     tasks = [t for t in tasks if t["id"] != task_id]
     save_tasks(tasks)
+    scheduler_service.unschedule_task(task_id)
     return {"success": True}
 
 @router.get("/scheduler/status")

@@ -20,6 +20,10 @@ def get_default_settings() -> Dict[str, Any]:
         "ai_api_url": "",
         "ai_api_key": "",
         "ai_model": "gpt-3.5-turbo",
+        "intent_enabled": False,
+        "intent_api_url": "",
+        "intent_api_key": "",
+        "intent_model": "gpt-3.5-turbo",
         "updated_at": None
     }
 
@@ -66,6 +70,17 @@ def get_ai_config() -> Dict[str, str]:
         "api_url": settings.get("ai_api_url", ""),
         "api_key": settings.get("ai_api_key", ""),
         "model": settings.get("ai_model", "gpt-3.5-turbo")
+    }
+
+
+def get_intent_config() -> Dict[str, Any]:
+    """获取意图识别配置"""
+    settings = load_settings()
+    return {
+        "enabled": bool(settings.get("intent_enabled", False)),
+        "api_url": settings.get("intent_api_url", ""),
+        "api_key": settings.get("intent_api_key", ""),
+        "model": settings.get("intent_model", "gpt-3.5-turbo"),
     }
 
 def update_ai_config(api_url: Optional[str] = None, 

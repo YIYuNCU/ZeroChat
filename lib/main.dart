@@ -100,6 +100,9 @@ Future<void> _syncWithBackend() async {
 
   debugPrint('✅ Backend available, syncing data...');
 
+  // 新安装客户端：health 成功后优先同步后端全量设置
+  await SettingsService.instance.syncAllSettingsFromBackend();
+
   // 同步角色数据
   await RoleService.fetchFromBackend();
 

@@ -16,6 +16,10 @@ class ApiSettingsPage extends StatefulWidget {
 class _ApiSettingsPageState extends State<ApiSettingsPage> {
   // 后端服务器
   late TextEditingController _backendUrlController;
+  late TextEditingController _backendTokenController;
+  late TextEditingController _backendEncryptionSecretController;
+  bool _backendTokenObscured = true;
+  bool _backendEncryptionSecretObscured = true;
   bool _isTestingConnection = false;
   bool? _connectionSuccess;
   String? _connectionError;
@@ -43,6 +47,15 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     final settings = SettingsService.instance;
 
     _backendUrlController = TextEditingController(text: settings.backendUrl);
+    _backendTokenController = TextEditingController(
+      text: settings.backendAuthToken,
+    );
+    _backendEncryptionSecretController = TextEditingController(
+      text: settings.backendEncryptionSecret,
+    );
+    _backendUrlController.addListener(_markConnectionDirty);
+    _backendTokenController.addListener(_markConnectionDirty);
+    _backendEncryptionSecretController.addListener(_markConnectionDirty);
 
     _chatUrlController = TextEditingController(text: settings.chatApiUrl);
     _chatKeyController = TextEditingController(text: settings.chatApiKey);
@@ -57,6 +70,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   @override
   void dispose() {
     _backendUrlController.dispose();
+    _backendTokenController.dispose();
+    _backendEncryptionSecretController.dispose();
     _chatUrlController.dispose();
     _chatKeyController.dispose();
     _chatModelController.dispose();
@@ -64,6 +79,18 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     _intentKeyController.dispose();
     _intentModelController.dispose();
     super.dispose();
+  }
+
+  void _markConnectionDirty() {
+    if (_isTestingConnection) {
+      return;
+    }
+    if (_connectionSuccess != null || _connectionError != null) {
+      setState(() {
+        _connectionSuccess = null;
+        _connectionError = null;
+      });
+    }
   }
 
   @override
@@ -96,6 +123,38 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               '服务器地址',
               _backendUrlController,
               'http://localhost:8000',
+            ),
+            _buildDivider(),
+            _buildTextField(
+              'Token',
+              _backendTokenController,
+              SecureBackendClient.defaultAuthToken,
+              obscure: _backendTokenObscured,
+              onToggleObscure: () {
+                setState(() {
+                  _backendTokenObscured = !_backendTokenObscured;
+                });
+              },
+            ),
+            _buildDivider(),
+            _buildTextField(
+              '加密密钥',
+              _backendEncryptionSecretController,
+              SecureBackendClient.defaultEncryptionSecret,
+              obscure: _backendEncryptionSecretObscured,
+              onToggleObscure: () {
+                setState(() {
+                  _backendEncryptionSecretObscured =
+                      !_backendEncryptionSecretObscured;
+                });
+              },
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                '说明：服务器 Token 与加密密钥不会通过前端同步，需在后端手动配置。',
+                style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+              ),
             ),
             _buildDivider(),
             _buildConnectionTestButton(),
@@ -183,6 +242,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     TextEditingController controller,
     String hint, {
     bool obscure = false,
+    VoidCallback? onToggleObscure,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -202,6 +262,16 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                 border: InputBorder.none,
                 isDense: true,
                 contentPadding: EdgeInsets.zero,
+                suffixIcon: onToggleObscure == null
+                    ? null
+                    : IconButton(
+                        onPressed: onToggleObscure,
+                        icon: Icon(
+                          obscure ? Icons.visibility_off : Icons.visibility,
+                          size: 18,
+                          color: const Color(0xFF888888),
+                        ),
+                      ),
               ),
               style: const TextStyle(fontSize: 15),
             ),
@@ -287,6 +357,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
   Future<void> _testConnection() async {
     final url = _backendUrlController.text.trim();
+    final token = _backendTokenController.text.trim();
+    final encryptionSecret = _backendEncryptionSecretController.text.trim();
     if (url.isEmpty) {
       setState(() {
         _connectionSuccess = false;
@@ -295,6 +367,12 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       return;
     }
 
+    // 测试连接时使用当前输入的安全配置
+    SecureBackendClient.configureSecurity(
+      authToken: token,
+      encryptionSecret: encryptionSecret,
+    );
+
     setState(() {
       _isTestingConnection = true;
       _connectionSuccess = null;
@@ -302,21 +380,23 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     });
 
     try {
-      debugPrint('Testing connection to: $url/api/health');
       final response = await SecureBackendClient.get(
         '$url/api/health',
       ).timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
+        await _saveSettingsLocalOnly();
+        final synced = await SettingsService.instance.syncApiSettingsToBackend();
+
         setState(() {
-          _connectionSuccess = true;
-          _connectionError = null;
+          _connectionSuccess = synced;
+          _connectionError = synced ? null : '连接成功，但设置同步失败';
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✅ 连接成功'),
-              backgroundColor: Color(0xFF07C160),
+            SnackBar(
+              content: Text(synced ? '✅ 连接成功，设置已加密同步' : '⚠️ 连接成功，但设置同步失败'),
+              backgroundColor: synced ? const Color(0xFF07C160) : Colors.orange,
             ),
           );
         }
@@ -343,25 +423,61 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
   /// 获取可用模型列表
   Future<void> _fetchModels() async {
+    final url = _chatUrlController.text.trim();
+    final key = _chatKeyController.text.trim();
+
+    if (url.isEmpty || key.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL 和 API Key')));
+      return;
+    }
+
     setState(() => _isLoadingModels = true);
 
     try {
-      final backendUrl = _backendUrlController.text.trim();
-      final response = await SecureBackendClient.get(
-        '$backendUrl/api/settings/models',
-      );
+      var modelsUrl = url;
+      if (!modelsUrl.endsWith('/')) modelsUrl += '/';
+      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
+      modelsUrl += 'models';
+
+      final response = await SecureBackendClient.getRaw(
+        modelsUrl,
+        headers: {
+          'Authorization': 'Bearer $key',
+          'Content-Type': 'application/json',
+        },
+        includeAuth: false,
+      ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
-        final data = response.data;
-        if (data['success'] == true) {
-          final models = List<String>.from(data['models'] ?? []);
-          setState(() {
-            _availableModels = models;
-          });
+        final data = jsonDecode(response.body);
+        final models =
+            (data['data'] as List).map((m) => m['id'].toString()).toList()
+              ..sort();
+
+        setState(() {
+          _availableModels = models;
+          if (models.isNotEmpty && !_availableModels.contains(_chatModelController.text)) {
+            _chatModelController.text = models.first;
+          }
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
         }
+      } else {
+        throw Exception('HTTP ${response.statusCode}');
       }
     } catch (e) {
-      debugPrint('Failed to fetch models: $e');
+      debugPrint('Failed to fetch chat models: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
+      }
     } finally {
       setState(() => _isLoadingModels = false);
     }
@@ -590,6 +706,30 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   }
 
   Future<void> _saveSettings() async {
+    await _saveSettingsLocalOnly();
+
+    final synced = await SettingsService.instance.syncApiSettingsToBackend();
+    if (synced) {
+      if (mounted) {
+        setState(() {
+          _connectionSuccess = true;
+          _connectionError = null;
+        });
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(synced ? '设置已保存并同步' : '设置已保存（后端同步失败）'),
+          duration: const Duration(seconds: 1),
+        ),
+      );
+      Navigator.pop(context);
+    }
+  }
+
+  Future<void> _saveSettingsLocalOnly() async {
     final settings = SettingsService.instance;
 
     // 保存后端服务器地址
@@ -602,6 +742,12 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       model: _chatModelController.text.trim(),
     );
 
+    // 保存后端鉴权与加密配置
+    await settings.updateBackendSecurity(
+      authToken: _backendTokenController.text.trim(),
+      encryptionSecret: _backendEncryptionSecretController.text.trim(),
+    );
+
     // 保存意图识别 API
     await settings.updateIntentApi(
       enabled: _intentEnabled,
@@ -609,19 +755,5 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       key: _intentKeyController.text.trim(),
       model: _intentModelController.text.trim(),
     );
-
-    // 自动同步到后端
-    final synced = await settings.syncApiSettingsToBackend();
-    debugPrint('API settings synced to backend: $synced');
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(synced ? '设置已保存并同步' : '设置已保存（后端同步失败）'),
-          duration: const Duration(seconds: 1),
-        ),
-      );
-      Navigator.pop(context);
-    }
   }
 }

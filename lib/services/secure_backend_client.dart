@@ -15,8 +15,24 @@ class SecureBackendResponse {
 }
 
 class SecureBackendClient {
-  static const String _authToken = 'ZEROCHAT_FIXED_TOKEN_2026';
-  static const String _encryptionSecret = 'ZEROCHAT_TRANSFER_SECRET_2026';
+  static const String defaultAuthToken = 'ZEROCHAT_FIXED_TOKEN_2026';
+  static const String defaultEncryptionSecret = 'ZEROCHAT_TRANSFER_SECRET_2026';
+
+  static String _authToken = defaultAuthToken;
+  static String _encryptionSecret = defaultEncryptionSecret;
+
+  static void configureSecurity({
+    required String authToken,
+    required String encryptionSecret,
+  }) {
+    final normalizedToken = authToken.trim();
+    final normalizedSecret = encryptionSecret.trim();
+
+    _authToken = normalizedToken.isEmpty ? defaultAuthToken : normalizedToken;
+    _encryptionSecret = normalizedSecret.isEmpty
+        ? defaultEncryptionSecret
+        : normalizedSecret;
+  }
 
   static Map<String, String> get authHeaders => {'X-Auth-Token': _authToken};
 

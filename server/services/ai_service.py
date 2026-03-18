@@ -219,7 +219,7 @@ async def generate_with_role(
 
 async def generate_moment_post(
     role_data: Dict,
-    mood: Optional[str] = None
+    history: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """
     生成朋友圈内容
@@ -234,11 +234,16 @@ async def generate_moment_post(
 - 符合你的性格和人设
 - 可以是生活感悟、心情分享、日常记录
 - 不要提及"AI""系统""人设"等词
-{f'- 当前心情偏向：{mood}' if mood else ''}
-
+- 结合历史消息（如果有的话）来丰富内容，但不要完全依赖历史消息。
 直接输出朋友圈内容，不要任何解释。"""
-
-    messages = [{"role": "user", "content": prompt}]
+    messages = []
+    if history:
+        for msg in history:
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            })
+    messages.append({"role": "user", "content": prompt})
     model_override, url_override, key_override, temp_override = _get_role_ai_config(role_data)
     return await call_ai(
         messages,

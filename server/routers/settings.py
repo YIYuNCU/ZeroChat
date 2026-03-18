@@ -4,8 +4,8 @@
 """
 from typing import Optional
 import hashlib
-from pydantic import BaseModel
-from fastapi import APIRouter
+from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Query
 
 router = APIRouter()
 
@@ -13,21 +13,33 @@ router = APIRouter()
 from services import settings_service
 
 class SettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     ai_api_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_model: Optional[str] = None
+    intent_enabled: Optional[bool] = None
+    intent_api_url: Optional[str] = None
+    intent_api_key: Optional[str] = None
+    intent_model: Optional[str] = None
     host: Optional[str] = None
     port: Optional[int] = None
 
 @router.get("/settings")
-async def get_settings():
+async def get_settings(include_secrets: bool = Query(False)):
     """获取全局设置"""
     settings = settings_service.load_settings()
-    # 隐藏敏感信息
-    if settings.get("ai_api_key"):
-        key = settings["ai_api_key"]
-        settings["ai_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-        del settings["ai_api_key"]
+
+    # 默认隐藏敏感信息，避免泄露；用于新安装客户端全量同步时可显式请求明文
+    if not include_secrets:
+        if settings.get("ai_api_key"):
+            key = settings["ai_api_key"]
+            settings["ai_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+            del settings["ai_api_key"]
+        if settings.get("intent_api_key"):
+            key = settings["intent_api_key"]
+            settings["intent_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+            del settings["intent_api_key"]
     return {"settings": settings}
 
 @router.put("/settings")
@@ -41,6 +53,14 @@ async def update_settings(update: SettingsUpdate):
         updates["ai_api_key"] = update.ai_api_key
     if update.ai_model is not None:
         updates["ai_model"] = update.ai_model
+    if update.intent_enabled is not None:
+        updates["intent_enabled"] = update.intent_enabled
+    if update.intent_api_url is not None:
+        updates["intent_api_url"] = update.intent_api_url
+    if update.intent_api_key is not None:
+        updates["intent_api_key"] = update.intent_api_key
+    if update.intent_model is not None:
+        updates["intent_model"] = update.intent_model
     if update.host is not None:
         updates["host"] = update.host
     if update.port is not None:

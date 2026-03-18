@@ -23,6 +23,9 @@ class SettingsService extends ChangeNotifier {
 
   // ========== 后端服务器 ==========
   String _backendUrl = 'http://localhost:8000';
+  String _backendAuthToken = SecureBackendClient.defaultAuthToken;
+  String _backendEncryptionSecret =
+      SecureBackendClient.defaultEncryptionSecret;
 
   // ========== API 配置 ==========
 
@@ -53,6 +56,7 @@ class SettingsService extends ChangeNotifier {
 
   // ========== 后台运行 ==========
   bool _backgroundRuntimeEnabled = true;
+  int _backgroundPollIntervalSeconds = 45;
 
   // ========== Getters ==========
 
@@ -82,9 +86,12 @@ class SettingsService extends ChangeNotifier {
   String get chatBackgroundUrl => _chatBackgroundUrl;
 
   String get backendUrl => _backendUrl;
+  String get backendAuthToken => _backendAuthToken;
+  String get backendEncryptionSecret => _backendEncryptionSecret;
 
   int get messageWaitSeconds => _messageWaitSeconds;
   bool get backgroundRuntimeEnabled => _backgroundRuntimeEnabled;
+  int get backgroundPollIntervalSeconds => _backgroundPollIntervalSeconds;
 
   /// 初始化
   static Future<void> init() async {
@@ -131,6 +138,17 @@ class SettingsService extends ChangeNotifier {
     // 后端服务器
     _backendUrl =
         StorageService.getString('backend_url') ?? 'http://localhost:8000';
+    _backendAuthToken =
+      StorageService.getString('backend_auth_token') ??
+      SecureBackendClient.defaultAuthToken;
+    _backendEncryptionSecret =
+      StorageService.getString('backend_encryption_secret') ??
+      SecureBackendClient.defaultEncryptionSecret;
+
+    SecureBackendClient.configureSecurity(
+      authToken: _backendAuthToken,
+      encryptionSecret: _backendEncryptionSecret,
+    );
 
     // 消息等待时间
     _messageWaitSeconds = StorageService.getInt('message_wait_seconds') ?? 0;
@@ -138,6 +156,8 @@ class SettingsService extends ChangeNotifier {
     // 后台运行
     _backgroundRuntimeEnabled =
         StorageService.getBool('background_runtime_enabled') ?? true;
+    _backgroundPollIntervalSeconds =
+      StorageService.getInt('background_poll_interval_seconds') ?? 45;
   }
 
   // ========== 更新方法 ==========
@@ -190,6 +210,14 @@ class SettingsService extends ChangeNotifier {
   Future<void> updateBackgroundRuntimeEnabled(bool enabled) async {
     _backgroundRuntimeEnabled = enabled;
     await StorageService.setBool('background_runtime_enabled', enabled);
+    notifyListeners();
+  }
+
+  /// 更新后台轮询间隔（秒）
+  Future<void> updateBackgroundPollIntervalSeconds(int seconds) async {
+    final normalized = seconds.clamp(15, 120);
+    _backgroundPollIntervalSeconds = normalized;
+    await StorageService.setInt('background_poll_interval_seconds', normalized);
     notifyListeners();
   }
 
@@ -406,6 +434,30 @@ class SettingsService extends ChangeNotifier {
     debugPrint('SettingsService: Backend URL updated to $url');
   }
 
+  /// 更新后端鉴权与传输加密配置
+  /// 仅更新本地客户端请求参数，不会同步覆盖服务器端配置
+  Future<void> updateBackendSecurity({
+    required String authToken,
+    required String encryptionSecret,
+  }) async {
+    _backendAuthToken = authToken;
+    _backendEncryptionSecret = encryptionSecret;
+
+    await StorageService.setString('backend_auth_token', authToken);
+    await StorageService.setString(
+      'backend_encryption_secret',
+      encryptionSecret,
+    );
+
+    SecureBackendClient.configureSecurity(
+      authToken: authToken,
+      encryptionSecret: encryptionSecret,
+    );
+
+    notifyListeners();
+    debugPrint('SettingsService: Local backend security config updated');
+  }
+
   /// 同步 API 设置到后端
   Future<bool> syncApiSettingsToBackend() async {
     try {
@@ -415,6 +467,10 @@ class SettingsService extends ChangeNotifier {
           'ai_api_url': _chatApiUrl,
           'ai_api_key': _chatApiKey,
           'ai_model': _chatModel,
+          'intent_enabled': _intentEnabled,
+          'intent_api_url': _intentApiUrl,
+          'intent_api_key': _intentApiKey,
+          'intent_model': _intentModel,
         },
       );
       if (response.statusCode == 200) {
@@ -425,5 +481,55 @@ class SettingsService extends ChangeNotifier {
       debugPrint('SettingsService: Backend sync failed: $e');
     }
     return false;
+  }
+
+  /// 从后端拉取并应用全量设置（用于新安装客户端冷启动同步）
+  Future<bool> syncAllSettingsFromBackend() async {
+    try {
+      final response = await SecureBackendClient.get(
+        '$_backendUrl/api/settings?include_secrets=true',
+      );
+
+      if (!response.isSuccess || response.data is! Map<String, dynamic>) {
+        return false;
+      }
+
+      final payload = response.data as Map<String, dynamic>;
+      final settings = payload['settings'];
+      if (settings is! Map) {
+        return false;
+      }
+
+      final server = Map<String, dynamic>.from(settings);
+
+      final chatUrl = (server['ai_api_url']?.toString() ?? '').trim();
+      final chatKey = (server['ai_api_key']?.toString() ?? '').trim();
+      final chatModel =
+          (server['ai_model']?.toString() ?? _chatModel).trim().isEmpty
+          ? _chatModel
+          : (server['ai_model']?.toString() ?? _chatModel).trim();
+
+      final intentEnabled = server['intent_enabled'] == true;
+      final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
+      final intentKey = (server['intent_api_key']?.toString() ?? '').trim();
+      final intentModel =
+          (server['intent_model']?.toString() ?? _intentModel).trim().isEmpty
+          ? _intentModel
+          : (server['intent_model']?.toString() ?? _intentModel).trim();
+
+      await updateChatApi(url: chatUrl, key: chatKey, model: chatModel);
+      await updateIntentApi(
+        enabled: intentEnabled,
+        url: intentUrl,
+        key: intentKey,
+        model: intentModel,
+      );
+
+      debugPrint('SettingsService: Full settings synced from backend');
+      return true;
+    } catch (e) {
+      debugPrint('SettingsService: Sync all settings from backend failed: $e');
+      return false;
+    }
   }
 }

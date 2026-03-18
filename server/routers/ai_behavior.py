@@ -638,10 +638,10 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
         return AIResponse(success=True, action="ignore", content=None)
 
     from services.ai_service import generate_moment_post
+    from services.memory_service import get_memory_context_string,get_context_messages,_get_memory_length
+    history = await get_context_messages(event.role_id, limit=_get_memory_length())
     
-    mood = event.context.get("mood") if event.context else None
-    
-    result = await generate_moment_post(role_data=role, mood=mood)
+    result = await generate_moment_post(role_data=role, history=history)
     
     if not result["success"]:
         return AIResponse(success=False, action="ignore", error=result["error"])

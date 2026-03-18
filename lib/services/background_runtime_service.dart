@@ -24,6 +24,11 @@ class BackgroundRuntimeService {
   static const String _eventRequestComplete = 'pendingRequestComplete';
   static const Duration _requestTimeout = Duration(seconds: 45);
 
+  static Duration _resolveBackgroundTaskPollInterval() {
+    final seconds = SettingsService.instance.backgroundPollIntervalSeconds;
+    return Duration(seconds: seconds.clamp(15, 120));
+  }
+
   static Future<void> init({required bool enabled}) async {
     if (defaultTargetPlatform != TargetPlatform.android) {
       _initialized = true;
@@ -123,6 +128,9 @@ class BackgroundRuntimeService {
     var bootstrapReady = false;
     final pendingRequests = <String, _PendingRequestState>{};
     Timer? requestWatchTimer;
+    Timer? backgroundTaskPollTimer;
+    final notifiedTaskMessageIds = <String>{};
+    var taskNotifyBaseline = DateTime.now();
 
     if (service is AndroidServiceInstance) {
       service.setAsForegroundService();
@@ -169,12 +177,40 @@ class BackgroundRuntimeService {
       });
     }
 
+    void stopBackgroundTaskPoll() {
+      backgroundTaskPollTimer?.cancel();
+      backgroundTaskPollTimer = null;
+    }
+
+    void startBackgroundTaskPollIfNeeded() {
+      if (backgroundTaskPollTimer != null) {
+        return;
+      }
+      final pollInterval = _resolveBackgroundTaskPollInterval();
+      backgroundTaskPollTimer = Timer.periodic(pollInterval, (
+        timer,
+      ) async {
+        if (appInForeground || !bootstrapReady) {
+          return;
+        }
+
+        taskNotifyBaseline = await _pollTaskMessagesAndNotify(
+          baseline: taskNotifyBaseline,
+          notifiedTaskMessageIds: notifiedTaskMessageIds,
+        );
+      });
+    }
+
     service.on(_eventAppForeground).listen((event) {
       appInForeground = true;
+      stopBackgroundTaskPoll();
     });
 
     service.on(_eventAppBackground).listen((event) {
       appInForeground = false;
+      // 切后台后开始持续检查后端任务消息，避免错过提醒
+      taskNotifyBaseline = DateTime.now();
+      startBackgroundTaskPollIfNeeded();
     });
 
     service.on(_eventRequestStart).listen((event) {
@@ -210,6 +246,7 @@ class BackgroundRuntimeService {
 
     service.on('stopService').listen((event) {
       requestWatchTimer?.cancel();
+      backgroundTaskPollTimer?.cancel();
       service.stopSelf();
     });
 
@@ -222,6 +259,86 @@ class BackgroundRuntimeService {
         );
       }
     });
+  }
+
+  static Future<DateTime> _pollTaskMessagesAndNotify({
+    required DateTime baseline,
+    required Set<String> notifiedTaskMessageIds,
+  }) async {
+    var latestSeen = baseline;
+
+    try {
+      final backendUrl = SettingsService.instance.backendUrl;
+      if (backendUrl.isEmpty) {
+        return latestSeen;
+      }
+
+      final response = await SecureBackendClient.get(
+        '$backendUrl/api/chats/messages/snapshot?client_md5=bg_task_poll',
+      ).timeout(const Duration(seconds: 8));
+      if (!response.isSuccess || response.data is! Map<String, dynamic>) {
+        return latestSeen;
+      }
+
+      final data = response.data as Map<String, dynamic>;
+      final chats = data['chats'];
+      if (chats is! Map) {
+        return latestSeen;
+      }
+
+      for (final entry in chats.entries) {
+        final chatId = entry.key.toString();
+        final rawList = entry.value;
+        if (rawList is! List) {
+          continue;
+        }
+
+        for (final item in rawList) {
+          if (item is! Map) {
+            continue;
+          }
+
+          final map = Map<String, dynamic>.from(item);
+          final messageId = map['id']?.toString() ?? '';
+          final senderId = map['sender_id']?.toString() ?? '';
+          final content = map['content']?.toString() ?? '';
+          final timestamp =
+              DateTime.tryParse(map['timestamp']?.toString() ?? '') ??
+              DateTime.fromMillisecondsSinceEpoch(0);
+
+          if (timestamp.isAfter(latestSeen)) {
+            latestSeen = timestamp;
+          }
+
+          // 只处理后端任务触发写入的消息，避免与正常聊天通知重复
+          final isTaskMessage = messageId.contains('_task_');
+          if (!isTaskMessage) {
+            continue;
+          }
+          if (senderId == 'me' || content.isEmpty) {
+            continue;
+          }
+          if (timestamp.isBefore(baseline.subtract(const Duration(seconds: 1)))) {
+            continue;
+          }
+          if (notifiedTaskMessageIds.contains(messageId)) {
+            continue;
+          }
+
+          final role = RoleService.getRoleById(chatId);
+          await NotificationService.instance.showMessageNotification(
+            chatId: chatId,
+            senderName: role?.name ?? 'AI',
+            message: content,
+          );
+          notifiedTaskMessageIds.add(messageId);
+        }
+      }
+    } catch (e) {
+      debugPrint('BackgroundRuntimeService: task polling failed: $e');
+    }
+
+    return latestSeen;
   }
 
   static Future<void> _waitPendingRequestsAndNotify({

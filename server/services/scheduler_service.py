@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 TASKS_DIR = DATA_DIR / "tasks"
+TASKS_FILE = TASKS_DIR / "scheduled.json"
 TOOL_ROLE_PREFIX = "1000000000"
 
 
@@ -140,11 +141,10 @@ async def _trigger_proactive(role_id: str):
 
 def _init_scheduled_tasks():
     """初始化所有定时任务"""
-    tasks_file = TASKS_DIR / "scheduled.json"
-    if not tasks_file.exists():
+    if not TASKS_FILE.exists():
         return
     
-    with open(tasks_file, "r", encoding="utf-8") as f:
+    with open(TASKS_FILE, "r", encoding="utf-8") as f:
         tasks = json.load(f)
     
     for task in tasks:
@@ -191,8 +191,48 @@ async def _trigger_task(task: Dict):
             "role_id": task.get("role_id"),
             "event_type": "task",
             "content": task.get("ai_prompt", task.get("message", "")),
-            "context": {"task_id": task.get("id")}
+            "context": {
+                "task_id": task.get("id"),
+                "chat_id": task.get("chat_id"),
+                "task_message": task.get("message", ""),
+            }
         })
+
+    mark_task_completed(str(task.get("id", "")).strip())
+
+
+def unschedule_task(task_id: str):
+    """移除任务调度"""
+    scheduler = get_scheduler()
+    job_id = f"task_{task_id}"
+    if scheduler.get_job(job_id):
+        scheduler.remove_job(job_id)
+
+
+def mark_task_completed(task_id: str):
+    """将任务标记为已完成（后端一锤子任务）"""
+    if not task_id or not TASKS_FILE.exists():
+        return
+
+    try:
+        with open(TASKS_FILE, "r", encoding="utf-8") as f:
+            tasks = json.load(f)
+        dirty = False
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("id", "")).strip() == task_id:
+                if item.get("enabled", True):
+                    item["enabled"] = False
+                    dirty = True
+                break
+
+        if dirty:
+            TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(TASKS_FILE, "w", encoding="utf-8") as f:
+                json.dump(tasks, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Failed to mark task completed ({task_id}): {e}")
 
 # ========== 朋友圈 AI 调度 ==========
 
@@ -200,12 +240,20 @@ def _init_moment_jobs():
     """初始化朋友圈 AI 调度"""
     scheduler = get_scheduler()
     
-    # 每 2-4 小时检查一次是否有 AI 要发朋友圈
+    # 定期检查是否有 AI 要发朋友圈
     scheduler.add_job(
         _check_moment_posts,
-        IntervalTrigger(hours=3),
+        IntervalTrigger(minutes=45),
         id="moment_check",
         replace_existing=True
+    )
+
+    # 定期检查是否有 AI 要评论/回复朋友圈
+    scheduler.add_job(
+        _check_moment_comments,
+        IntervalTrigger(minutes=45),
+        id="moment_comment_check",
+        replace_existing=True,
     )
     
     logger.info("Scheduled moment check job")
@@ -224,23 +272,207 @@ async def _check_moment_posts():
             if profile_file.exists():
                 with open(profile_file, "r", encoding="utf-8") as f:
                     profile = json.load(f)
-                    if profile.get("id", "").startswith("1000000000"):
+                    role_id = str(profile.get("id", "")).strip()
+                    if role_id.startswith("1000000000"):
                         continue  # 跳过系统角色
                     roles.append(profile)
     
     if not roles:
+        logger.warning("No valid roles found for moment posting")
         return
     
-    # 随机选择一个角色发朋友圈（30% 概率）
-    if random.random() < 0.3:
+    # 随机选择一个角色发朋友圈（65% 概率）
+    if random.random() < 0.65:
         role = random.choice(roles)
         await _event_callback({
-            "role_id": role.get("id"),
+            "role_id": str(role.get("id", "")).strip(),
             "event_type": "moment",
             "content": "",
             "context": {}
         })
         logger.info(f"AI {role.get('name')} posting moment")
+    else:
+        logger.info("No AI moment this time")
+
+
+def _load_moments_posts() -> List[Dict]:
+    moments_file = DATA_DIR / "moments" / "posts.json"
+    if not moments_file.exists():
+        return []
+    try:
+        with open(moments_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+    except Exception as e:
+        logger.warning(f"加载朋友圈数据失败: {e}")
+    return []
+
+
+def _load_non_tool_roles() -> List[Dict]:
+    if not ROLES_DIR.exists():
+        return []
+
+    roles: List[Dict] = []
+    for role_dir in ROLES_DIR.iterdir():
+        if not role_dir.is_dir():
+            continue
+        profile_file = role_dir / "profile.json"
+        if not profile_file.exists():
+            continue
+        try:
+            with open(profile_file, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+            role_id = str(profile.get("id", "")).strip()
+            if not role_id or _is_tool_role_id(role_id):
+                continue
+            roles.append(profile)
+        except Exception:
+            continue
+    return roles
+
+
+async def _check_moment_comments():
+    """检查是否有 AI 要评论朋友圈（含回复用户评论）"""
+    global _event_callback
+
+    if not _event_callback:
+        return
+
+    roles = _load_non_tool_roles()
+    posts = _load_moments_posts()
+    if not roles or not posts:
+        return
+
+    now = datetime.now()
+
+    # 优先处理：AI 回复用户对其帖子的评论
+    reply_candidates: List[Dict] = []
+    for post in posts:
+        post_id = str(post.get("id", "")).strip()
+        post_author_id = str(post.get("author_id", "")).strip()
+        if not post_id or not post_author_id or post_author_id == "me":
+            continue
+
+        created_at_raw = str(post.get("created_at", ""))
+        try:
+            created_at = datetime.fromisoformat(created_at_raw)
+        except Exception:
+            continue
+        if (now - created_at).total_seconds() > 48 * 3600:
+            continue
+
+        comments = post.get("comments") if isinstance(post.get("comments"), list) else []
+        user_comments = [
+            c for c in comments
+            if isinstance(c, dict) and str(c.get("author_id", "")).strip() == "me"
+        ]
+        if not user_comments:
+            continue
+
+        has_replied = any(
+            isinstance(c, dict)
+            and str(c.get("author_id", "")).strip() == post_author_id
+            and str(c.get("reply_to_id", "")).strip() == "me"
+            for c in comments
+        )
+        if has_replied:
+            continue
+
+        latest_user_comment = user_comments[-1]
+        reply_candidates.append(
+            {
+                "role_id": post_author_id,
+                "post_id": post_id,
+                "post_content": str(post.get("content", "")),
+                "post_author": str(post.get("author_name", "用户")),
+                "reply_to": str(latest_user_comment.get("content", "")).strip(),
+                "reply_to_id": "me",
+                "reply_to_name": str(latest_user_comment.get("author_name", "我")).strip() or "我",
+            }
+        )
+
+    if reply_candidates and random.random() < 0.7:
+        target = random.choice(reply_candidates)
+        await _event_callback(
+            {
+                "role_id": target["role_id"],
+                "event_type": "comment",
+                "content": "",
+                "context": {
+                    "post_id": target["post_id"],
+                    "post_content": target["post_content"],
+                    "post_author": target["post_author"],
+                    "reply_to": target["reply_to"],
+                    "reply_to_id": target["reply_to_id"],
+                    "reply_to_name": target["reply_to_name"],
+                },
+            }
+        )
+        logger.info(
+            "AI %s replied to user comment on post %s",
+            target["role_id"],
+            target["post_id"],
+        )
+        return
+
+    # 普通评论：AI 评论最近 24h 的非自己帖子
+    comment_candidates: List[Dict] = []
+    role_ids = {str(r.get("id", "")).strip() for r in roles}
+    for post in posts:
+        post_id = str(post.get("id", "")).strip()
+        post_author_id = str(post.get("author_id", "")).strip()
+        if not post_id or not post_author_id:
+            continue
+
+        created_at_raw = str(post.get("created_at", ""))
+        try:
+            created_at = datetime.fromisoformat(created_at_raw)
+        except Exception:
+            continue
+        if (now - created_at).total_seconds() > 24 * 3600:
+            continue
+
+        comments = post.get("comments") if isinstance(post.get("comments"), list) else []
+        commenters = {
+            str(c.get("author_id", "")).strip()
+            for c in comments
+            if isinstance(c, dict)
+        }
+
+        for role_id in role_ids:
+            if not role_id or role_id == post_author_id:
+                continue
+            if role_id in commenters:
+                continue
+            comment_candidates.append(
+                {
+                    "role_id": role_id,
+                    "post_id": post_id,
+                    "post_content": str(post.get("content", "")),
+                    "post_author": str(post.get("author_name", "用户")),
+                }
+            )
+
+    if comment_candidates and random.random() < 0.7:
+        target = random.choice(comment_candidates)
+        await _event_callback(
+            {
+                "role_id": target["role_id"],
+                "event_type": "comment",
+                "content": "",
+                "context": {
+                    "post_id": target["post_id"],
+                    "post_content": target["post_content"],
+                    "post_author": target["post_author"],
+                },
+            }
+        )
+        logger.info(
+            "AI %s commented on post %s",
+            target["role_id"],
+            target["post_id"],
+        )
 
 # ========== 状态查询 ==========
 

@@ -1,9 +1,8 @@
-import 'dart:async';
 import 'package:flutter/foundation.dart';
-import '../core/chat_controller.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
+import 'background_runtime_service.dart';
 
 /// 定时任务类型
 enum TaskType {
@@ -74,7 +73,6 @@ class ScheduledTask {
 /// 定时任务服务
 /// 管理定时提醒，支持 AI 风格消息发送
 class TaskService {
-  static final Map<String, Timer> _activeTimers = {};
   static final List<ScheduledTask> _tasks = [];
 
   // 安静时间设置（复用 ProactiveConfig 的逻辑，但保留全局设置作为备用）
@@ -82,35 +80,12 @@ class TaskService {
   static int _quietTimeStart = 23;
   static int _quietTimeEnd = 7;
 
-  // 安静时间内待发送的任务队列
-  static final List<ScheduledTask> _pendingTasks = [];
-
   /// 初始化任务服务
   static Future<void> init() async {
     await _loadTasks();
     await _loadQuietTime();
-    await _coldStartCompensation();
-    _scheduleAllTasks();
-    _startQuietTimeChecker();
+    await fetchFromBackend();
     debugPrint('TaskService initialized with ${_tasks.length} tasks');
-  }
-
-  /// 冷启动补偿：检查已过期任务并立即执行
-  static Future<void> _coldStartCompensation() async {
-    final now = DateTime.now();
-    final expiredTasks = _tasks
-        .where((t) => !t.isCompleted && t.triggerTime.isBefore(now))
-        .toList();
-
-    for (final task in expiredTasks) {
-      debugPrint('TaskService: Cold-start compensation for task ${task.id}');
-      await _deliverMessageAsAI(task);
-      task.isCompleted = true;
-    }
-
-    if (expiredTasks.isNotEmpty) {
-      await _saveTasks();
-    }
   }
 
   // ========== 安静时间管理 ==========
@@ -157,23 +132,6 @@ class TaskService {
     };
   }
 
-  static void _startQuietTimeChecker() {
-    Timer.periodic(const Duration(minutes: 1), (timer) {
-      if (!isQuietTime() && _pendingTasks.isNotEmpty) {
-        _processPendingTasks();
-      }
-    });
-  }
-
-  static Future<void> _processPendingTasks() async {
-    final tasksToProcess = List<ScheduledTask>.from(_pendingTasks);
-    _pendingTasks.clear();
-
-    for (final task in tasksToProcess) {
-      await _deliverMessageAsAI(task);
-    }
-  }
-
   // ========== 任务管理 ==========
 
   static Future<void> _loadTasks() async {
@@ -203,58 +161,6 @@ class TaskService {
     );
   }
 
-  static void _scheduleAllTasks() {
-    for (final task in _tasks) {
-      if (!task.isCompleted) {
-        _scheduleTask(task);
-      }
-    }
-  }
-
-  static void _scheduleTask(ScheduledTask task) {
-    final now = DateTime.now();
-    final delay = task.triggerTime.difference(now);
-
-    if (delay.isNegative) {
-      // 已过期，标记完成（冷启动已处理）
-      task.isCompleted = true;
-      _saveTasks();
-      return;
-    }
-
-    _activeTimers[task.id]?.cancel();
-    _activeTimers[task.id] = Timer(delay, () {
-      _triggerTask(task);
-    });
-
-    debugPrint('Task scheduled: ${task.id} in ${delay.inSeconds}s');
-  }
-
-  static Future<void> _triggerTask(ScheduledTask task) async {
-    if (isQuietTime()) {
-      _pendingTasks.add(task);
-      debugPrint('Task deferred due to quiet time: ${task.id}');
-    } else {
-      await _deliverMessageAsAI(task);
-    }
-
-    task.isCompleted = true;
-    _activeTimers.remove(task.id);
-    await _saveTasks();
-  }
-
-  /// 以 AI 角色身份发送提醒消息（通过 ChatController）
-  static Future<void> _deliverMessageAsAI(ScheduledTask task) async {
-    await ChatController.instance.sendScheduledTaskMessage(
-      chatId: task.chatId,
-      roleId: task.roleId,
-      taskContent: task.message,
-      customPrompt: task.aiPrompt,
-    );
-
-    debugPrint('TaskService: Message sent for task ${task.id}');
-  }
-
   // ========== 公开 API ==========
 
   /// 添加提醒任务（结构化创建）
@@ -265,25 +171,44 @@ class TaskService {
     required DateTime triggerTime,
     String? aiPrompt,
   }) async {
+    final response = await SecureBackendClient.post('$_backendUrl/api/tasks', {
+      'chat_id': chatId,
+      'role_id': roleId,
+      'message': message,
+      'ai_prompt': aiPrompt ?? '',
+      'trigger_time': triggerTime.toIso8601String(),
+      'repeat': null,
+    });
+
+    if (!response.isSuccess || response.data is! Map<String, dynamic>) {
+      throw Exception('创建后端定时任务失败: HTTP ${response.statusCode}');
+    }
+
+    final data = response.data as Map<String, dynamic>;
     final task = ScheduledTask(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      chatId: chatId,
-      roleId: roleId,
-      message: message,
-      aiPrompt: aiPrompt,
-      triggerTime: triggerTime,
+      id: data['id']?.toString() ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      chatId: data['chat_id']?.toString() ?? chatId,
+      roleId: data['role_id']?.toString() ?? roleId,
+      message: data['message']?.toString() ?? message,
+      aiPrompt: data['ai_prompt']?.toString(),
+      triggerTime:
+          DateTime.tryParse(data['trigger_time']?.toString() ?? '') ??
+          triggerTime,
       type: TaskType.reminder,
+      isCompleted: data['enabled'] == false,
     );
 
+    _tasks.removeWhere((t) => t.id == task.id);
     _tasks.add(task);
-    _scheduleTask(task);
     await _saveTasks();
 
-    // 自动同步到后端
-    await _syncTaskToBackend(task);
+    // 创建任务后确保后台保活服务可用，以便持续检查后端任务触发结果
+    await BackgroundRuntimeService.applyEnabled(
+      SettingsService.instance.backgroundRuntimeEnabled,
+    );
 
     debugPrint(
-      'TaskService: Reminder added for ${triggerTime.toIso8601String()} (synced to backend)',
+      'TaskService: Reminder created on backend for ${task.triggerTime.toIso8601String()}',
     );
     return task;
   }
@@ -322,18 +247,23 @@ class TaskService {
 
   /// 取消任务
   static Future<void> cancelTask(String taskId) async {
-    _activeTimers[taskId]?.cancel();
-    _activeTimers.remove(taskId);
+    try {
+      await SecureBackendClient.delete('$_backendUrl/api/tasks/$taskId');
+    } catch (e) {
+      debugPrint('TaskService: Delete backend task failed: $e');
+    }
     _tasks.removeWhere((t) => t.id == taskId);
     await _saveTasks();
   }
 
   /// 取消所有任务
   static Future<void> cancelAllTasks() async {
-    for (final timer in _activeTimers.values) {
-      timer.cancel();
+    final ids = _tasks.map((t) => t.id).toList();
+    for (final id in ids) {
+      try {
+        await SecureBackendClient.delete('$_backendUrl/api/tasks/$id');
+      } catch (_) {}
     }
-    _activeTimers.clear();
     _tasks.clear();
     await _saveTasks();
   }
@@ -348,29 +278,8 @@ class TaskService {
     return _tasks.where((t) => t.chatId == chatId && !t.isCompleted).toList();
   }
 
-  // ========== 后端同步 ==========
-
   /// 获取后端 URL
   static String get _backendUrl => SettingsService.instance.backendUrl;
-
-  /// 同步任务到后端
-  static Future<bool> _syncTaskToBackend(ScheduledTask task) async {
-    try {
-      final response =
-          await SecureBackendClient.post('$_backendUrl/api/tasks', {
-            'id': task.id,
-            'role_id': task.roleId,
-            'trigger_time': task.triggerTime.toIso8601String(),
-            'message': task.message,
-            'ai_prompt': task.aiPrompt,
-            'enabled': !task.isCompleted,
-          });
-      return response.statusCode == 200 || response.statusCode == 201;
-    } catch (e) {
-      debugPrint('TaskService: Backend sync failed: $e');
-      return false;
-    }
-  }
 
   /// 从后端拉取任务
   static Future<bool> fetchFromBackend() async {
@@ -378,9 +287,36 @@ class TaskService {
       final response = await SecureBackendClient.get('$_backendUrl/api/tasks');
       if (response.statusCode == 200) {
         final data = response.data;
-        if (data['tasks'] != null) {
+        if (data['tasks'] is List) {
+          final remoteTasks = <ScheduledTask>[];
+          for (final raw in data['tasks'] as List) {
+            if (raw is! Map) continue;
+            final map = Map<String, dynamic>.from(raw);
+            final triggerTime =
+                DateTime.tryParse(map['trigger_time']?.toString() ?? '');
+            if (triggerTime == null) continue;
+
+            remoteTasks.add(
+              ScheduledTask(
+                id: map['id']?.toString() ?? '',
+                chatId:
+                    map['chat_id']?.toString() ?? map['role_id']?.toString() ?? '',
+                roleId: map['role_id']?.toString() ?? '',
+                message: map['message']?.toString() ?? '',
+                aiPrompt: map['ai_prompt']?.toString(),
+                triggerTime: triggerTime,
+                type: TaskType.reminder,
+                isCompleted: map['enabled'] == false,
+              ),
+            );
+          }
+
+          _tasks
+            ..clear()
+            ..addAll(remoteTasks);
+          await _saveTasks();
           debugPrint(
-            'TaskService: Fetched ${(data['tasks'] as List).length} tasks from backend',
+            'TaskService: Synced ${remoteTasks.length} tasks from backend',
           );
           return true;
         }

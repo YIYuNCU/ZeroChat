@@ -79,8 +79,87 @@ from services.security_service import (
 async def handle_ai_event(event_data: dict):
     """处理调度器触发的 AI 事件"""
     from routers.ai_behavior import AIEvent, handle_ai_event as process_event
+    from routers.ai_behavior import load_role
+    from routers.moments import (
+        MomentCreate,
+        CommentCreate,
+        create_moment,
+        add_comment,
+    )
+    from routers.roles import ChatMessage, save_chat_message as save_role_chat_message
+
     event = AIEvent(**event_data)
-    return await process_event(event)
+    result = await process_event(event)
+
+    # 将调度器产生的朋友圈行为真正落库
+    try:
+        if not result.success:
+            return result
+
+        event_type = event.event_type.value
+        action = (result.action or "").strip().lower()
+        content = (result.content or "").strip()
+
+        if not content:
+            return result
+
+        role = load_role(event.role_id) or {}
+        role_name = (
+            (result.metadata or {}).get("role_name")
+            or role.get("name")
+            or "AI"
+        )
+
+        # 发朋友圈
+        if event_type == "moment":
+            if action == "post":
+                await create_moment(
+                    MomentCreate(
+                        author_id=event.role_id,
+                        author_name=str(role_name),
+                        content=content,
+                        image_urls=[],
+                    )
+                )
+
+        # 朋友圈评论
+        elif event_type == "comment":
+            if action == "comment":
+                ctx = event.context or {}
+                post_id = str(ctx.get("post_id") or "").strip()
+                if post_id:
+                    await add_comment(
+                        post_id,
+                        CommentCreate(
+                            author_id=event.role_id,
+                            author_name=str(role_name),
+                            content=content,
+                            reply_to_id=ctx.get("reply_to_id"),
+                            reply_to_name=ctx.get("reply_to_name"),
+                        ),
+                    )
+
+        # 定时任务：写入角色聊天记录，供前端消息同步获取
+        elif event_type == "task":
+            ctx = event.context or {}
+            chat_id = str(ctx.get("chat_id") or event.role_id).strip()
+            if chat_id:
+                task_message = str(ctx.get("task_message") or "").strip()
+                final_content = content if content else (task_message or "提醒你该处理一件事啦")
+                await save_role_chat_message(
+                    chat_id,
+                    ChatMessage(
+                        id=f"{datetime.now().timestamp()}_task_{ctx.get('task_id', 'unknown')}",
+                        content=final_content,
+                        sender_id=event.role_id,
+                        timestamp=datetime.now().isoformat(),
+                        type="text",
+                    ),
+                )
+    except Exception as e:
+        logger.warning(f"处理调度器 AI 事件落库失败: {e}")
+
+    return result
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

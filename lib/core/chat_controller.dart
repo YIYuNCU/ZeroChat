@@ -21,6 +21,7 @@ import '../services/intent_service.dart';
 import '../services/memory_service.dart';
 import '../services/sticker_service.dart';
 import '../services/secure_backend_client.dart';
+import '../services/task_service.dart';
 
 /// 聊天核心引擎
 /// 整个项目中唯一负责消息流转、AI 调度、分段发送、群聊控制、记忆更新的权威组件
@@ -613,7 +614,26 @@ class ChatController extends ChangeNotifier {
           debugPrint(
             'ChatController: Reminder intent detected for ${intent.duration}',
           );
-          // TODO: 集成 TaskService 创建定时任务
+          final now = DateTime.now();
+          final triggerTime = now.add(intent.duration!);
+          final reminderContent = (intent.extractedContent ?? userMessage)
+              .trim();
+
+          try {
+            await TaskService.addReminder(
+              chatId: chatId,
+              roleId: role.id,
+              message: reminderContent.isEmpty ? userMessage : reminderContent,
+              triggerTime: triggerTime,
+              aiPrompt:
+                  '你需要在约定时间自然地提醒用户：${reminderContent.isEmpty ? userMessage : reminderContent}。不要说“定时任务”或“系统提醒”。',
+            );
+            debugPrint(
+              'ChatController: Reminder created at ${triggerTime.toIso8601String()}',
+            );
+          } catch (e) {
+            debugPrint('ChatController: Failed to create reminder task: $e');
+          }
         }
         break;
 
