@@ -129,6 +129,16 @@ class SecureBackendClient {
     return decoded;
   }
 
+  static Map<String, String> encryptPayloadForTransfer(
+    Map<String, dynamic> data,
+  ) {
+    return _encryptPayload(data);
+  }
+
+  static dynamic decryptPayloadFromTransfer(dynamic encrypted) {
+    return _decryptPayload(encrypted);
+  }
+
   // Raw requests for non-encrypted endpoints or binary content.
   static Future<http.Response> getRaw(
     String url, {

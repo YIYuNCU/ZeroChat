@@ -23,6 +23,7 @@ import 'services/api_service.dart';
 import 'services/notification_service.dart';
 import 'services/background_runtime_service.dart';
 import 'services/intent_service.dart';
+import 'services/secure_websocket_client.dart';
 import 'core/chat_controller.dart';
 import 'core/proactive_message_scheduler.dart';
 import 'core/moments_scheduler.dart';
@@ -56,6 +57,7 @@ void main() async {
   await BackgroundRuntimeService.init(
     enabled: SettingsService.instance.backgroundRuntimeEnabled,
   );
+  unawaited(SecureWebSocketClient.instance.ensureConnected());
   await ChatController.init();
   await ProactiveMessageScheduler.instance.init();
   await MomentsScheduler.instance.init();

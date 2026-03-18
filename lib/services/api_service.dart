@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import '../models/role.dart';
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 
 /// API 服务
 /// 用于调用第三方 AI API（支持 OpenAI 兼容接口）
@@ -254,31 +255,31 @@ class ApiService {
     Map<String, dynamic>? context,
   }) async {
     try {
-      final response =
-          await SecureBackendClient.post('$_backendUrl/api/ai/event', {
-            'role_id': roleId,
-            'event_type': eventType,
-            'content': content,
-            'context': context ?? {},
-          });
+      final wsData = await SecureWebSocketClient.instance.request('ai_event', {
+        'event': {
+          'role_id': roleId,
+          'event_type': eventType,
+          'content': content,
+          'context': context ?? <String, dynamic>{},
+        },
+      });
 
-      debugPrint('ApiService: Backend AI call - $eventType for $roleId');
-
-      if (response.statusCode == 200) {
-        final data = response.data;
-        if (data['success'] == true && data['content'] != null) {
-          return ApiResponse.success(data['content']);
-        } else if (data['action'] == 'ignore') {
-          return ApiResponse.error('AI chose to ignore');
-        } else {
-          return ApiResponse.error(data['error'] ?? 'Unknown error');
-        }
-      } else {
-        return ApiResponse.error('Backend error: ${response.statusCode}');
+      debugPrint('ApiService: Backend AI call via websocket - $eventType for $roleId');
+      if (wsData['success'] == true && wsData['content'] != null) {
+        return ApiResponse.success(wsData['content'].toString());
       }
+      if (wsData['action']?.toString() == 'ignore') {
+        return ApiResponse.error('AI chose to ignore');
+      }
+      final wsError = wsData['error']?.toString();
+      if (wsError != null && wsError.isNotEmpty) {
+        return ApiResponse.error(wsError);
+      }
+
+      return ApiResponse.error('Unknown backend response');
     } catch (e) {
-      debugPrint('ApiService: Backend call failed: $e');
-      return ApiResponse.error('后端服务不可用: $e');
+      debugPrint('ApiService: websocket backend call failed: $e');
+      return ApiResponse.error('后端WebSocket不可用: $e');
     }
   }
 

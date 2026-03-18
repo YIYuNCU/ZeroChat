@@ -1,8 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'storage_service.dart';
 import 'settings_service.dart';
-import 'secure_backend_client.dart';
 import 'background_runtime_service.dart';
+import 'secure_websocket_client.dart';
 
 /// 定时任务类型
 enum TaskType {
@@ -171,7 +171,7 @@ class TaskService {
     required DateTime triggerTime,
     String? aiPrompt,
   }) async {
-    final response = await SecureBackendClient.post('$_backendUrl/api/tasks', {
+    final data = await SecureWebSocketClient.instance.request('tasks_create', {
       'chat_id': chatId,
       'role_id': roleId,
       'message': message,
@@ -179,12 +179,6 @@ class TaskService {
       'trigger_time': triggerTime.toIso8601String(),
       'repeat': null,
     });
-
-    if (!response.isSuccess || response.data is! Map<String, dynamic>) {
-      throw Exception('创建后端定时任务失败: HTTP ${response.statusCode}');
-    }
-
-    final data = response.data as Map<String, dynamic>;
     final task = ScheduledTask(
       id: data['id']?.toString() ?? DateTime.now().millisecondsSinceEpoch.toString(),
       chatId: data['chat_id']?.toString() ?? chatId,
@@ -248,7 +242,9 @@ class TaskService {
   /// 取消任务
   static Future<void> cancelTask(String taskId) async {
     try {
-      await SecureBackendClient.delete('$_backendUrl/api/tasks/$taskId');
+      await SecureWebSocketClient.instance.request('tasks_delete', {
+        'task_id': taskId,
+      });
     } catch (e) {
       debugPrint('TaskService: Delete backend task failed: $e');
     }
@@ -261,7 +257,9 @@ class TaskService {
     final ids = _tasks.map((t) => t.id).toList();
     for (final id in ids) {
       try {
-        await SecureBackendClient.delete('$_backendUrl/api/tasks/$id');
+        await SecureWebSocketClient.instance.request('tasks_delete', {
+          'task_id': id,
+        });
       } catch (_) {}
     }
     _tasks.clear();
@@ -278,48 +276,42 @@ class TaskService {
     return _tasks.where((t) => t.chatId == chatId && !t.isCompleted).toList();
   }
 
-  /// 获取后端 URL
-  static String get _backendUrl => SettingsService.instance.backendUrl;
-
   /// 从后端拉取任务
   static Future<bool> fetchFromBackend() async {
     try {
-      final response = await SecureBackendClient.get('$_backendUrl/api/tasks');
-      if (response.statusCode == 200) {
-        final data = response.data;
-        if (data['tasks'] is List) {
-          final remoteTasks = <ScheduledTask>[];
-          for (final raw in data['tasks'] as List) {
-            if (raw is! Map) continue;
-            final map = Map<String, dynamic>.from(raw);
-            final triggerTime =
-                DateTime.tryParse(map['trigger_time']?.toString() ?? '');
-            if (triggerTime == null) continue;
+      final data = await SecureWebSocketClient.instance.request('tasks_list', {});
+      if (data['tasks'] is List) {
+        final remoteTasks = <ScheduledTask>[];
+        for (final raw in data['tasks'] as List) {
+          if (raw is! Map) continue;
+          final map = Map<String, dynamic>.from(raw);
+          final triggerTime =
+              DateTime.tryParse(map['trigger_time']?.toString() ?? '');
+          if (triggerTime == null) continue;
 
-            remoteTasks.add(
-              ScheduledTask(
-                id: map['id']?.toString() ?? '',
-                chatId:
-                    map['chat_id']?.toString() ?? map['role_id']?.toString() ?? '',
-                roleId: map['role_id']?.toString() ?? '',
-                message: map['message']?.toString() ?? '',
-                aiPrompt: map['ai_prompt']?.toString(),
-                triggerTime: triggerTime,
-                type: TaskType.reminder,
-                isCompleted: map['enabled'] == false,
-              ),
-            );
-          }
-
-          _tasks
-            ..clear()
-            ..addAll(remoteTasks);
-          await _saveTasks();
-          debugPrint(
-            'TaskService: Synced ${remoteTasks.length} tasks from backend',
+          remoteTasks.add(
+            ScheduledTask(
+              id: map['id']?.toString() ?? '',
+              chatId:
+                  map['chat_id']?.toString() ?? map['role_id']?.toString() ?? '',
+              roleId: map['role_id']?.toString() ?? '',
+              message: map['message']?.toString() ?? '',
+              aiPrompt: map['ai_prompt']?.toString(),
+              triggerTime: triggerTime,
+              type: TaskType.reminder,
+              isCompleted: map['enabled'] == false,
+            ),
           );
-          return true;
         }
+
+        _tasks
+          ..clear()
+          ..addAll(remoteTasks);
+        await _saveTasks();
+        debugPrint(
+          'TaskService: Synced ${remoteTasks.length} tasks from backend',
+        );
+        return true;
       }
     } catch (e) {
       debugPrint('TaskService: Fetch from backend failed: $e');

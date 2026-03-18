@@ -11,7 +11,7 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -302,6 +302,271 @@ async def health():
 async def scheduler_status():
     """获取调度器状态"""
     return scheduler_service.get_scheduler_status()
+
+
+def _resolve_backend_base_url_from_websocket(websocket: WebSocket) -> str:
+    host = websocket.headers.get("host") or f"{CONFIG.get('host', '127.0.0.1')}:{CONFIG.get('port', 8000)}"
+    ws_scheme = websocket.url.scheme
+    http_scheme = "https" if ws_scheme == "wss" else "http"
+    return f"{http_scheme}://{host}".rstrip("/")
+
+
+async def _handle_ws_action(action: str, payload: dict, websocket: WebSocket):
+    backend_base_url = _resolve_backend_base_url_from_websocket(websocket)
+
+    if action == "chat_snapshot":
+        from routers import roles
+
+        client_md5 = str(payload.get("client_md5") or "").strip()
+        snapshot = roles._build_chats_snapshot(backend_base_url)
+        if client_md5 and client_md5 == snapshot["md5"]:
+            return {
+                "need_sync": False,
+                "md5": snapshot["md5"],
+                "total_chats": snapshot["total_chats"],
+                "total_messages": snapshot["total_messages"],
+            }
+
+        return {
+            "need_sync": True,
+            "md5": snapshot["md5"],
+            "total_chats": snapshot["total_chats"],
+            "total_messages": snapshot["total_messages"],
+            "chats": snapshot["chats"],
+        }
+
+    if action == "save_chat_message":
+        from routers import roles
+
+        role_id = str(payload.get("role_id") or "").strip()
+        message_payload = payload.get("message") or {}
+        message = roles.ChatMessage(**message_payload)
+        return await roles.save_chat_message(role_id, message)
+
+    if action == "update_chat_message":
+        from routers import roles
+
+        role_id = str(payload.get("role_id") or "").strip()
+        message_id = str(payload.get("message_id") or "").strip()
+        update = roles.ChatMessageUpdate(
+            content=payload.get("content"),
+            type=payload.get("type"),
+            quote_content=payload.get("quote_content"),
+        )
+        return await roles.update_chat_message(role_id, message_id, update)
+
+    if action == "delete_chat_message":
+        from routers import roles
+
+        role_id = str(payload.get("role_id") or "").strip()
+        message_id = str(payload.get("message_id") or "").strip()
+        return await roles.delete_chat_message(role_id, message_id)
+
+    if action == "sync_chat_messages":
+        from routers import roles
+
+        role_id = str(payload.get("role_id") or "").strip()
+        sync_payload = roles.ChatMessagesSync(**{"messages": payload.get("messages") or []})
+        return await roles.sync_chat_messages(role_id, sync_payload)
+
+    if action == "ai_event":
+        from routers.ai_behavior import AIEvent, handle_ai_event as handle_ai_behavior_event
+
+        event_payload = payload.get("event") or {}
+        event = AIEvent(**event_payload)
+        result = await handle_ai_behavior_event(event)
+        if hasattr(result, "model_dump"):
+            return result.model_dump()
+        return result
+
+    if action == "moments_list":
+        from routers import moments
+
+        limit = int(payload.get("limit") or 50)
+        return await moments.list_moments(limit=limit)
+
+    if action == "moments_hash":
+        from routers import moments
+
+        limit = int(payload.get("limit") or 50)
+        return await moments.get_moments_hash(limit=limit)
+
+    if action == "moments_create":
+        from routers import moments
+
+        moment = moments.MomentCreate(
+            author_id=str(payload.get("author_id") or ""),
+            author_name=str(payload.get("author_name") or ""),
+            content=str(payload.get("content") or ""),
+            image_urls=list(payload.get("image_urls") or []),
+        )
+        return await moments.create_moment(moment)
+
+    if action == "moments_delete":
+        from routers import moments
+
+        post_id = str(payload.get("post_id") or "").strip()
+        return await moments.delete_moment(post_id)
+
+    if action == "moments_like":
+        from routers import moments
+
+        post_id = str(payload.get("post_id") or "").strip()
+        user_id = str(payload.get("user_id") or "").strip()
+        user_name = str(payload.get("user_name") or "").strip()
+        return await moments.like_moment(post_id, user_id, user_name)
+
+    if action == "moments_unlike":
+        from routers import moments
+
+        post_id = str(payload.get("post_id") or "").strip()
+        user_id = str(payload.get("user_id") or "").strip()
+        return await moments.unlike_moment(post_id, user_id)
+
+    if action == "moments_comment":
+        from routers import moments
+
+        post_id = str(payload.get("post_id") or "").strip()
+        comment = moments.CommentCreate(
+            author_id=str(payload.get("author_id") or ""),
+            author_name=str(payload.get("author_name") or ""),
+            content=str(payload.get("content") or ""),
+            reply_to_id=(
+                str(payload.get("reply_to_id"))
+                if payload.get("reply_to_id") is not None
+                else None
+            ),
+            reply_to_name=(
+                str(payload.get("reply_to_name"))
+                if payload.get("reply_to_name") is not None
+                else None
+            ),
+        )
+        return await moments.add_comment(post_id, comment)
+
+    if action == "tasks_list":
+        from routers import tasks
+
+        return await tasks.list_tasks()
+
+    if action == "tasks_list_by_role":
+        from routers import tasks
+
+        role_id = str(payload.get("role_id") or "").strip()
+        return await tasks.get_role_tasks(role_id)
+
+    if action == "tasks_create":
+        from routers import tasks
+
+        task = tasks.TaskCreate(
+            chat_id=str(payload.get("chat_id") or ""),
+            role_id=str(payload.get("role_id") or ""),
+            message=str(payload.get("message") or ""),
+            ai_prompt=(
+                str(payload.get("ai_prompt"))
+                if payload.get("ai_prompt") is not None
+                else ""
+            ),
+            trigger_time=str(payload.get("trigger_time") or ""),
+            repeat=(
+                str(payload.get("repeat"))
+                if payload.get("repeat") is not None
+                else None
+            ),
+        )
+        return await tasks.create_task(task)
+
+    if action == "tasks_toggle":
+        from routers import tasks
+
+        task_id = str(payload.get("task_id") or "").strip()
+        return await tasks.toggle_task(task_id)
+
+    if action == "tasks_delete":
+        from routers import tasks
+
+        task_id = str(payload.get("task_id") or "").strip()
+        return await tasks.delete_task(task_id)
+
+    raise ValueError(f"unsupported websocket action: {action}")
+
+
+@app.websocket("/ws/secure")
+async def secure_websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+
+    auth_token = CONFIG.get("auth_token") or DEFAULT_AUTH_TOKEN
+    encryption_secret = CONFIG.get("encryption_secret") or DEFAULT_ENCRYPTION_SECRET
+
+    token_from_header = websocket.headers.get("X-Auth-Token", "")
+    incoming_token = token_from_header
+    if incoming_token != auth_token:
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            request_id = ""
+            try:
+                message_obj = json.loads(raw)
+                if not isinstance(message_obj, dict):
+                    raise ValueError("invalid websocket frame")
+
+                request_id = str(message_obj.get("request_id") or "")
+                event = str(message_obj.get("event") or "")
+
+                if event == "heartbeat":
+                    await websocket.send_json(
+                        {
+                            "event": "heartbeat_ack",
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                    )
+                    continue
+
+                action = str(message_obj.get("action") or "").strip()
+                encrypted_payload = message_obj.get("payload")
+                if not action or encrypted_payload is None:
+                    raise ValueError("action or payload missing")
+
+                payload = decrypt_payload(encrypted_payload, encryption_secret)
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid decrypted payload")
+
+                result = await _handle_ws_action(action, payload, websocket)
+                if result is None:
+                    result = {}
+                if not isinstance(result, dict):
+                    result = {"result": result}
+
+                encrypted_result = encrypt_payload(result, encryption_secret)
+                await websocket.send_json(
+                    {
+                        "request_id": request_id,
+                        "ok": True,
+                        "data": encrypted_result,
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"WebSocket request error: {e}")
+                encrypted_error = encrypt_payload(
+                    {
+                        "error": "request_failed",
+                    },
+                    encryption_secret,
+                )
+                await websocket.send_json(
+                    {
+                        "request_id": request_id,
+                        "ok": False,
+                        "data": encrypted_error,
+                    }
+                )
+    except WebSocketDisconnect:
+        logger.info("Secure WebSocket disconnected")
+    except Exception as e:
+        logger.warning(f"Secure WebSocket runtime error: {e}")
 
 if __name__ == "__main__":
     print("\n" + "=" * 50)

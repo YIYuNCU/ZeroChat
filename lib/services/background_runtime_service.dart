@@ -6,7 +6,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'notification_service.dart';
 import 'role_service.dart';
-import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 import 'settings_service.dart';
 import 'storage_service.dart';
 
@@ -268,19 +268,12 @@ class BackgroundRuntimeService {
     var latestSeen = baseline;
 
     try {
-      final backendUrl = SettingsService.instance.backendUrl;
-      if (backendUrl.isEmpty) {
+      final data = await SecureWebSocketClient.instance.request('chat_snapshot', {
+        'client_md5': 'bg_task_poll',
+      });
+      if (data['need_sync'] != true) {
         return latestSeen;
       }
-
-      final response = await SecureBackendClient.get(
-        '$backendUrl/api/chats/messages/snapshot?client_md5=bg_task_poll',
-      ).timeout(const Duration(seconds: 8));
-      if (!response.isSuccess || response.data is! Map<String, dynamic>) {
-        return latestSeen;
-      }
-
-      final data = response.data as Map<String, dynamic>;
       final chats = data['chats'];
       if (chats is! Map) {
         return latestSeen;
@@ -335,7 +328,7 @@ class BackgroundRuntimeService {
         }
       }
     } catch (e) {
-      debugPrint('BackgroundRuntimeService: task polling failed: $e');
+      debugPrint('BackgroundRuntimeService: task websocket sync failed: $e');
     }
 
     return latestSeen;
@@ -345,19 +338,12 @@ class BackgroundRuntimeService {
     required Map<String, _PendingRequestState> pendingRequests,
   }) async {
     try {
-      final backendUrl = SettingsService.instance.backendUrl;
-      if (backendUrl.isEmpty) {
+      final data = await SecureWebSocketClient.instance.request('chat_snapshot', {
+        'client_md5': 'bg_poll',
+      });
+      if (data['need_sync'] != true) {
         return;
       }
-
-      final response = await SecureBackendClient.get(
-        '$backendUrl/api/chats/messages/snapshot?client_md5=bg_poll',
-      ).timeout(const Duration(seconds: 8));
-      if (!response.isSuccess || response.data is! Map<String, dynamic>) {
-        return;
-      }
-
-      final data = response.data as Map<String, dynamic>;
       final chats = data['chats'];
       if (chats is! Map) {
         return;
@@ -425,7 +411,7 @@ class BackgroundRuntimeService {
         pendingRequests.remove(id);
       }
     } catch (e) {
-      debugPrint('BackgroundRuntimeService: waiting request failed: $e');
+      debugPrint('BackgroundRuntimeService: pending websocket sync failed: $e');
     }
   }
 }
