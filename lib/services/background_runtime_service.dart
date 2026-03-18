@@ -23,6 +23,7 @@ class BackgroundRuntimeService {
   static const String _eventRequestStart = 'pendingRequestStart';
   static const String _eventRequestComplete = 'pendingRequestComplete';
   static const Duration _requestTimeout = Duration(seconds: 45);
+  static const Duration _backgroundWsKeepAliveInterval = Duration(minutes: 4);
 
   static Duration _resolveBackgroundTaskPollInterval() {
     final seconds = SettingsService.instance.backgroundPollIntervalSeconds;
@@ -129,6 +130,7 @@ class BackgroundRuntimeService {
     final pendingRequests = <String, _PendingRequestState>{};
     Timer? requestWatchTimer;
     Timer? backgroundTaskPollTimer;
+    Timer? websocketKeepAliveTimer;
     final notifiedTaskMessageIds = <String>{};
     var taskNotifyBaseline = DateTime.now();
 
@@ -182,6 +184,37 @@ class BackgroundRuntimeService {
       backgroundTaskPollTimer = null;
     }
 
+    void stopBackgroundWebsocketKeepAlive() {
+      websocketKeepAliveTimer?.cancel();
+      websocketKeepAliveTimer = null;
+    }
+
+    void startBackgroundWebsocketKeepAliveIfNeeded() {
+      if (websocketKeepAliveTimer != null) {
+        return;
+      }
+
+      websocketKeepAliveTimer = Timer.periodic(
+        _backgroundWsKeepAliveInterval,
+        (timer) async {
+          if (appInForeground || !bootstrapReady) {
+            return;
+          }
+
+          try {
+            await SecureWebSocketClient.instance.ensureConnected();
+            await SecureWebSocketClient.instance.request(
+              'health',
+              const <String, dynamic>{},
+              timeout: const Duration(seconds: 6),
+            );
+          } catch (e) {
+            debugPrint('BackgroundRuntimeService: websocket keepalive failed: $e');
+          }
+        },
+      );
+    }
+
     void startBackgroundTaskPollIfNeeded() {
       if (backgroundTaskPollTimer != null) {
         return;
@@ -204,6 +237,7 @@ class BackgroundRuntimeService {
     service.on(_eventAppForeground).listen((event) {
       appInForeground = true;
       stopBackgroundTaskPoll();
+      stopBackgroundWebsocketKeepAlive();
     });
 
     service.on(_eventAppBackground).listen((event) {
@@ -211,6 +245,22 @@ class BackgroundRuntimeService {
       // 切后台后开始持续检查后端任务消息，避免错过提醒
       taskNotifyBaseline = DateTime.now();
       startBackgroundTaskPollIfNeeded();
+      startBackgroundWebsocketKeepAliveIfNeeded();
+      unawaited(() async {
+        if (!bootstrapReady) {
+          return;
+        }
+        try {
+          await SecureWebSocketClient.instance.ensureConnected();
+          await SecureWebSocketClient.instance.request(
+            'health',
+            const <String, dynamic>{},
+            timeout: const Duration(seconds: 6),
+          );
+        } catch (e) {
+          debugPrint('BackgroundRuntimeService: immediate keepalive failed: $e');
+        }
+      }());
     });
 
     service.on(_eventRequestStart).listen((event) {
@@ -247,6 +297,8 @@ class BackgroundRuntimeService {
     service.on('stopService').listen((event) {
       requestWatchTimer?.cancel();
       backgroundTaskPollTimer?.cancel();
+      websocketKeepAliveTimer?.cancel();
+      unawaited(SecureWebSocketClient.instance.close());
       service.stopSelf();
     });
 

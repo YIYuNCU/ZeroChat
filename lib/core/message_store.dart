@@ -500,6 +500,7 @@ class MessageStore extends ChangeNotifier {
         messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
         _messages[chatId] = messages;
         await _saveMessages(chatId);
+        _notifyMessageUpdate(chatId);
         syncedChats += 1;
       }
 
@@ -507,6 +508,10 @@ class MessageStore extends ChangeNotifier {
     } catch (e) {
       debugPrint('MessageStore: WebSocket full sync skipped due to error: $e');
     }
+  }
+
+  Future<void> syncFromBackendSnapshot() async {
+    await _syncAllChatsFromBackendIfNeeded();
   }
 
   String _calculateLocalChatsMd5() {

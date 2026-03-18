@@ -21,11 +21,14 @@ class SecureWebSocketClient {
 
   final Map<String, Completer<Map<String, dynamic>>> _pending =
       <String, Completer<Map<String, dynamic>>>{};
+    final StreamController<Map<String, dynamic>> _serverPushController =
+      StreamController<Map<String, dynamic>>.broadcast();
 
   Completer<void>? _connectingCompleter;
   int _requestSeq = 0;
 
   bool get isConnected => _socket != null;
+  Stream<Map<String, dynamic>> get serverPushStream => _serverPushController.stream;
 
   Future<void> ensureConnected() async {
     if (_socket != null) {
@@ -152,6 +155,27 @@ class SecureWebSocketClient {
       final data = Map<String, dynamic>.from(map);
       final event = data['event']?.toString() ?? '';
       if (event == 'heartbeat_ack') {
+        return;
+      }
+
+      if (event == 'server_push') {
+        try {
+          final encryptedPayload = data['data'];
+          final decrypted = SecureBackendClient.decryptPayloadFromTransfer(
+            encryptedPayload,
+          );
+          final payloadMap = decrypted is Map
+              ? Map<String, dynamic>.from(decrypted)
+              : <String, dynamic>{'value': decrypted};
+
+          _serverPushController.add({
+            'event': event,
+            'type': data['type']?.toString(),
+            ...payloadMap,
+          });
+        } catch (e) {
+          debugPrint('SecureWebSocketClient: decode server push failed: $e');
+        }
         return;
       }
 

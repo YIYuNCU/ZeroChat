@@ -69,6 +69,7 @@ from core.middleware import RequestLoggingMiddleware, SecurityMiddleware
 from routers import ai_behavior, chat, moments, roles, settings, tasks
 from services import scheduler_service
 from transport.file_routes import create_files_router
+from transport.push_hub import configure_push_hub
 from transport.ws_endpoint import create_secure_websocket_endpoint
 
 
@@ -82,6 +83,11 @@ app = FastAPI(
         runtime_dir=RUNTIME_DIR,
         logger=logger,
     ),
+)
+
+configure_push_hub(
+    encryption_secret=CONFIG.get("encryption_secret", ""),
+    logger=logger,
 )
 
 app.add_middleware(RequestLoggingMiddleware, logger=logger)
