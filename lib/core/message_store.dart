@@ -147,6 +147,7 @@ class MessageStore extends ChangeNotifier {
     String? content,
     MessageType? type,
     String? quotedPreviewText,
+    MessageSendStatus? sendStatus,
   }) async {
     final messages = _messages[chatId];
     if (messages == null || messages.isEmpty) {
@@ -163,12 +164,25 @@ class MessageStore extends ChangeNotifier {
       content: content,
       type: type,
       quotedPreviewText: quotedPreviewText,
+      sendStatus: sendStatus,
     );
 
     await _saveMessages(chatId);
     _notifyMessageUpdate(chatId);
-    _syncUpdateMessageToBackend(chatId, messages[index]);
+    final shouldSyncBackend =
+        content != null || type != null || quotedPreviewText != null;
+    if (shouldSyncBackend) {
+      _syncUpdateMessageToBackend(chatId, messages[index]);
+    }
     return true;
+  }
+
+  Future<bool> updateMessageSendStatus(
+    String chatId,
+    String messageId,
+    MessageSendStatus sendStatus,
+  ) {
+    return updateMessage(chatId, messageId, sendStatus: sendStatus);
   }
 
   Future<void> _syncUpdateMessageToBackend(
@@ -575,7 +589,12 @@ class MessageStore extends ChangeNotifier {
 
   /// 将消息列表转换为 API 历史格式
   static List<Map<String, String>> toApiHistory(List<Message> messages) {
-    return messages.map((m) {
+    return messages
+        .where(
+          (m) =>
+              !(m.senderId == 'me' && m.sendStatus == MessageSendStatus.failed),
+        )
+        .map((m) {
       final buffer = StringBuffer();
       // 添加引用内容
       if (m.hasQuote && m.quotedPreviewText != null) {

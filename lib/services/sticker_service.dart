@@ -161,7 +161,8 @@ class StickerService {
     required String emojiId,
     required String imagePath,
   }) {
-    return '[STICKER|user|$category|$tag|$emojiId|$imagePath]';
+    final storedPath = normalizeAiStickerStoragePath(imagePath);
+    return '[STICKER|user|$category|$tag|$emojiId|$storedPath]';
   }
 
   /// 解析表情包消息内容

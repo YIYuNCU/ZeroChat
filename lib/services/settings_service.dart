@@ -66,6 +66,7 @@ class SettingsService extends ChangeNotifier {
   // ========== 后台运行 ==========
   bool _backgroundRuntimeEnabled = true;
   int _backgroundPollIntervalSeconds = 45;
+  int _backgroundWatchdogIntervalSeconds = 30;
 
   // ========== Getters ==========
 
@@ -101,6 +102,7 @@ class SettingsService extends ChangeNotifier {
   int get messageWaitSeconds => _messageWaitSeconds;
   bool get backgroundRuntimeEnabled => _backgroundRuntimeEnabled;
   int get backgroundPollIntervalSeconds => _backgroundPollIntervalSeconds;
+  int get backgroundWatchdogIntervalSeconds => _backgroundWatchdogIntervalSeconds;
 
   /// 初始化
   static Future<void> init() async {
@@ -169,6 +171,8 @@ class SettingsService extends ChangeNotifier {
         StorageService.getBool('background_runtime_enabled') ?? true;
     _backgroundPollIntervalSeconds =
       StorageService.getInt('background_poll_interval_seconds') ?? 45;
+    _backgroundWatchdogIntervalSeconds =
+      StorageService.getInt('background_watchdog_interval_seconds') ?? 30;
   }
 
   // ========== 更新方法 ==========
@@ -230,6 +234,14 @@ class SettingsService extends ChangeNotifier {
     final normalized = seconds.clamp(15, 120);
     _backgroundPollIntervalSeconds = normalized;
     await StorageService.setInt('background_poll_interval_seconds', normalized);
+    notifyListeners();
+  }
+
+  /// 更新后台保活自检间隔（秒）
+  Future<void> updateBackgroundWatchdogIntervalSeconds(int seconds) async {
+    final normalized = seconds.clamp(10, 120);
+    _backgroundWatchdogIntervalSeconds = normalized;
+    await StorageService.setInt('background_watchdog_interval_seconds', normalized);
     notifyListeners();
   }
 

@@ -2,22 +2,29 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
+import 'wake_lock_service.dart';
 
 class SecureWebSocketClient {
-  SecureWebSocketClient._();
+  SecureWebSocketClient._() {
+    _startConnectivityMonitor();
+  }
 
   static final SecureWebSocketClient instance = SecureWebSocketClient._();
 
   static const Duration _defaultRequestTimeout = Duration(seconds: 8);
-  static const Duration _heartbeatInterval = Duration(minutes: 15);
+  static const Duration _heartbeatInterval = Duration(minutes: 2);
+  static const Duration _connectivityReconnectDebounce = Duration(seconds: 2);
 
   WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
   Timer? _heartbeatTimer;
+  StreamSubscription<dynamic>? _connectivitySubscription;
+  Timer? _connectivityReconnectTimer;
 
   final Map<String, Completer<Map<String, dynamic>>> _pending =
       <String, Completer<Map<String, dynamic>>>{};
@@ -98,6 +105,10 @@ class SecureWebSocketClient {
     };
 
     try {
+      await WakeLockService.acquireShort(
+        duration: _resolveRequestWakeLockDuration(timeout),
+        reason: 'request_$action',
+      );
       _socket?.add(jsonEncode(frame));
     } catch (e) {
       _pending.remove(requestId);
@@ -127,6 +138,11 @@ class SecureWebSocketClient {
     _socket = null;
 
     _failAllPending('socket closed');
+  }
+
+  Duration _resolveRequestWakeLockDuration(Duration timeout) {
+    final bounded = timeout.inSeconds.clamp(8, 90);
+    return Duration(seconds: bounded + 6);
   }
 
   Uri _buildWsUri({required String backendUrl}) {
@@ -232,21 +248,104 @@ class SecureWebSocketClient {
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (Timer timer) {
-      final socket = _socket;
-      if (socket == null) {
-        return;
-      }
-      try {
-        socket.add(
-          jsonEncode({
-            'event': 'heartbeat',
-            'timestamp': DateTime.now().toIso8601String(),
-          }),
-        );
-      } catch (e) {
-        _handleDisconnect('heartbeat failed: $e');
-      }
+      unawaited(_sendHeartbeatFrame());
     });
+  }
+
+  Future<void> _sendHeartbeatFrame() async {
+    final socket = _socket;
+    if (socket == null) {
+      return;
+    }
+    try {
+      await WakeLockService.acquireShort(
+        duration: const Duration(seconds: 10),
+        reason: 'heartbeat',
+      );
+      socket.add(
+        jsonEncode({
+          'event': 'heartbeat',
+          'timestamp': DateTime.now().toIso8601String(),
+        }),
+      );
+    } catch (e) {
+      _handleDisconnect('heartbeat failed: $e');
+    }
+  }
+
+  void _startConnectivityMonitor() {
+    if (!Platform.isAndroid) {
+      return;
+    }
+
+    _connectivitySubscription?.cancel();
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
+      (dynamic result) {
+        if (!_hasNetwork(result)) {
+          return;
+        }
+        _scheduleConnectivityConnectionCheck();
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('SecureWebSocketClient: connectivity stream error: $error');
+      },
+    );
+  }
+
+  bool _hasNetwork(dynamic result) {
+    if (result is ConnectivityResult) {
+      return result != ConnectivityResult.none;
+    }
+    if (result is List<ConnectivityResult>) {
+      return result.any((ConnectivityResult item) => item != ConnectivityResult.none);
+    }
+    if (result is Iterable) {
+      return result.any((dynamic item) => item != ConnectivityResult.none);
+    }
+    return true;
+  }
+
+  void _scheduleConnectivityConnectionCheck() {
+    _connectivityReconnectTimer?.cancel();
+    _connectivityReconnectTimer = Timer(
+      _connectivityReconnectDebounce,
+      () {
+        unawaited(_checkConnectionAfterNetworkChange());
+      },
+    );
+  }
+
+  Future<void> _checkConnectionAfterNetworkChange() async {
+    if (_socket == null) {
+      try {
+        await ensureConnected();
+      } catch (e) {
+        debugPrint(
+          'SecureWebSocketClient: reconnect failed after connectivity change: $e',
+        );
+      }
+      return;
+    }
+
+    try {
+      await request(
+        'health',
+        const <String, dynamic>{},
+        timeout: const Duration(seconds: 4),
+      );
+    } catch (e) {
+      debugPrint(
+        'SecureWebSocketClient: connection check failed after connectivity change, reconnecting: $e',
+      );
+      try {
+        await close();
+        await ensureConnected();
+      } catch (e2) {
+        debugPrint(
+          'SecureWebSocketClient: reconnect failed after connection check: $e2',
+        );
+      }
+    }
   }
 
   void _handleDisconnect(String reason) {

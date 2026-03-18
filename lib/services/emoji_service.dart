@@ -171,14 +171,34 @@ class EmojiService {
     return resp['tag']?.toString();
   }
 
-  String withBase(String relativeUrl, String baseUrl) {
-    if (relativeUrl.startsWith('http://') ||
-        relativeUrl.startsWith('https://') ||
-        relativeUrl.startsWith('data:') ||
-        relativeUrl.startsWith('file://')) {
-      return relativeUrl;
+  String _normalizeEmojiPath(String value) {
+    final trimmed = value.trim();
+    if (trimmed.startsWith('/api/emojis/')) {
+      return trimmed.replaceFirst('/api/emojis/', '/files/emojis/');
     }
-    return '$baseUrl$relativeUrl';
+    if (trimmed.startsWith('/api/user-emojis/')) {
+      return trimmed.replaceFirst('/api/user-emojis/', '/files/user-emojis/');
+    }
+    return trimmed;
+  }
+
+  String withBase(String relativeUrl, String baseUrl) {
+    final normalized = _normalizeEmojiPath(relativeUrl);
+    if (normalized.startsWith('http://') ||
+        normalized.startsWith('https://') ||
+        normalized.startsWith('data:') ||
+        normalized.startsWith('file://')) {
+      return normalized;
+    }
+
+    final safeBase = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    if (safeBase.isEmpty) {
+      return normalized;
+    }
+    if (normalized.startsWith('/')) {
+      return '$safeBase$normalized';
+    }
+    return '$safeBase/$normalized';
   }
 
   Future<String> getImageUrl(String relativeUrl) async {

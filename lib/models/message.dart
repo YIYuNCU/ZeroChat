@@ -10,6 +10,7 @@ class Message {
   final MessageType type;
   final DateTime timestamp;
   final bool isRead;
+  final MessageSendStatus sendStatus;
 
   /// 引用的消息 ID（可为空）
   final String? quotedMessageId;
@@ -25,6 +26,7 @@ class Message {
     this.type = MessageType.text,
     required this.timestamp,
     this.isRead = false,
+    this.sendStatus = MessageSendStatus.sent,
     this.quotedMessageId,
     this.quotedPreviewText,
   });
@@ -65,6 +67,10 @@ class Message {
       ),
       timestamp: DateTime.parse(json['timestamp'] as String),
       isRead: json['is_read'] as bool? ?? false,
+      sendStatus: MessageSendStatus.values.firstWhere(
+        (e) => e.name == (json['send_status'] as String?),
+        orElse: () => MessageSendStatus.sent,
+      ),
       quotedMessageId: json['quoted_message_id'] as String?,
       quotedPreviewText: json['quoted_preview_text'] as String?,
     );
@@ -79,6 +85,7 @@ class Message {
       'type': type.name,
       'timestamp': timestamp.toIso8601String(),
       'is_read': isRead,
+      'send_status': sendStatus.name,
       'quoted_message_id': quotedMessageId,
       'quoted_preview_text': quotedPreviewText,
     };
@@ -103,6 +110,7 @@ class Message {
     MessageType? type,
     DateTime? timestamp,
     bool? isRead,
+    MessageSendStatus? sendStatus,
     String? quotedMessageId,
     String? quotedPreviewText,
   }) {
@@ -114,6 +122,7 @@ class Message {
       type: type ?? this.type,
       timestamp: timestamp ?? this.timestamp,
       isRead: isRead ?? this.isRead,
+      sendStatus: sendStatus ?? this.sendStatus,
       quotedMessageId: quotedMessageId ?? this.quotedMessageId,
       quotedPreviewText: quotedPreviewText ?? this.quotedPreviewText,
     );
@@ -131,4 +140,9 @@ enum MessageType {
   video, // 视频消息
   file, // 文件消息
   sticker, // 表情包消息
+}
+
+enum MessageSendStatus {
+  sent,
+  failed,
 }

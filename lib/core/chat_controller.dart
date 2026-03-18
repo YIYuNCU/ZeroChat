@@ -23,6 +23,13 @@ import '../services/sticker_service.dart';
 import '../services/secure_websocket_client.dart';
 import '../services/task_service.dart';
 
+class _PendingTextMessage {
+  final String messageId;
+  final String content;
+
+  const _PendingTextMessage({required this.messageId, required this.content});
+}
+
 /// 聊天核心引擎
 /// 整个项目中唯一负责消息流转、AI 调度、分段发送、群聊控制、记忆更新的权威组件
 /// UI 层严禁直接调用 AI、处理记忆、拆分消息
@@ -48,7 +55,7 @@ class ChatController extends ChangeNotifier {
   final Map<String, void Function(bool)> _typingCallbacks = {};
 
   /// 待发送消息队列（用于消息合并等待）
-  final Map<String, List<String>> _pendingMessages = {};
+  final Map<String, List<_PendingTextMessage>> _pendingMessages = {};
 
   /// 等待定时器（用于消息合并）
   final Map<String, Timer> _waitTimers = {};
@@ -124,6 +131,39 @@ class ChatController extends ChangeNotifier {
     );
   }
 
+  Future<bool> _ensureConnectionBeforeSend(String chatId) async {
+    Future<void> ping() async {
+      await SecureWebSocketClient.instance.request(
+        'health',
+        const <String, dynamic>{},
+        timeout: const Duration(seconds: 4),
+      );
+    }
+
+    try {
+      if (!SecureWebSocketClient.instance.isConnected) {
+        await SecureWebSocketClient.instance.ensureConnected();
+      }
+      await ping();
+      return true;
+    } catch (e) {
+      debugPrint(
+        'ChatController: pre-send websocket check failed for $chatId, retrying: $e',
+      );
+      try {
+        await SecureWebSocketClient.instance.close();
+        await SecureWebSocketClient.instance.ensureConnected();
+        await ping();
+        return true;
+      } catch (e2) {
+        debugPrint(
+          'ChatController: websocket reconnect failed before send for $chatId: $e2',
+        );
+        return false;
+      }
+    }
+  }
+
   /// 发送用户消息（唯一入口）
   /// 支持消息等待合并功能
   Future<void> sendUserMessage(
@@ -155,7 +195,9 @@ class ChatController extends ChangeNotifier {
 
     // 添加到待发送队列
     _pendingMessages.putIfAbsent(chatId, () => []);
-    _pendingMessages[chatId]!.add(content);
+    _pendingMessages[chatId]!.add(
+      _PendingTextMessage(messageId: userMessage.id, content: content),
+    );
 
     // 如果等待时间为 0，立即发送
     if (waitSeconds == 0) {
@@ -173,23 +215,36 @@ class ChatController extends ChangeNotifier {
   /// 发送合并后的消息
   Future<void> _sendBatchedMessages(String chatId) async {
     // 取出待发送消息
-    final messages = _pendingMessages.remove(chatId) ?? [];
+    final pendingMessages = _pendingMessages.remove(chatId) ?? [];
     _waitTimers.remove(chatId);
 
-    if (messages.isEmpty) return;
+    if (pendingMessages.isEmpty) return;
     if (_processingChats.contains(chatId)) {
       debugPrint('ChatController: Already processing $chatId, queueing');
       // 重新加入队列
-      _pendingMessages[chatId] = messages;
+      _pendingMessages[chatId] = pendingMessages;
       return;
     }
 
     // 合并消息（用换行连接）
-    final combinedContent = messages.join('\n');
+    final combinedContent = pendingMessages.map((m) => m.content).join('\n');
 
     debugPrint(
-      'ChatController: Sending batched messages (${messages.length} msgs) to $chatId',
+      'ChatController: Sending batched messages (${pendingMessages.length} msgs) to $chatId',
     );
+
+    final ready = await _ensureConnectionBeforeSend(chatId);
+    if (!ready) {
+      for (final pending in pendingMessages) {
+        await MessageStore.instance.updateMessageSendStatus(
+          chatId,
+          pending.messageId,
+          MessageSendStatus.failed,
+        );
+      }
+      notifyListeners();
+      return;
+    }
 
     // 初始化上下文
     final context = await initChat(chatId);
@@ -220,9 +275,6 @@ class ChatController extends ChangeNotifier {
       'ChatController: sendUserImageMessage to $chatId, path=$imagePath',
     );
 
-    // 初始化上下文
-    final context = await initChat(chatId);
-
     // 1. 创建图片消息（使用 image 类型）
     final imageMessage = Message(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -235,6 +287,20 @@ class ChatController extends ChangeNotifier {
 
     // 2. 写入 MessageStore
     await MessageStore.instance.addMessage(chatId, imageMessage);
+
+    final ready = await _ensureConnectionBeforeSend(chatId);
+    if (!ready) {
+      await MessageStore.instance.updateMessageSendStatus(
+        chatId,
+        imageMessage.id,
+        MessageSendStatus.failed,
+      );
+      notifyListeners();
+      return;
+    }
+
+    // 初始化上下文
+    final context = await initChat(chatId);
 
     // 更新上下文消息数量
     _contexts[chatId] = context.copyWith(
@@ -274,8 +340,6 @@ class ChatController extends ChangeNotifier {
       return;
     }
 
-    final context = await initChat(chatId);
-
     final stickerContent = fromUserLibrary
         ? StickerService.createUserStickerMessageContent(
             category: category,
@@ -295,6 +359,19 @@ class ChatController extends ChangeNotifier {
     );
 
     await MessageStore.instance.addMessage(chatId, userStickerMessage);
+
+    final ready = await _ensureConnectionBeforeSend(chatId);
+    if (!ready) {
+      await MessageStore.instance.updateMessageSendStatus(
+        chatId,
+        userStickerMessage.id,
+        MessageSendStatus.failed,
+      );
+      notifyListeners();
+      return;
+    }
+
+    final context = await initChat(chatId);
 
     _contexts[chatId] = context.copyWith(
       messageCount: MessageStore.instance.getMessageCount(chatId),
@@ -401,6 +478,64 @@ class ChatController extends ChangeNotifier {
       );
       await sendUserMessage(chatId, content, quotedMessage: tempQuotedMessage);
     }
+  }
+
+  Future<void> retryFailedMessage(String chatId, String messageId) async {
+    if (_processingChats.contains(chatId)) {
+      return;
+    }
+
+    final message = MessageStore.instance.getMessage(chatId, messageId);
+    if (message == null || message.senderId != 'me') {
+      return;
+    }
+
+    await MessageStore.instance.updateMessageSendStatus(
+      chatId,
+      messageId,
+      MessageSendStatus.sent,
+    );
+
+    final ready = await _ensureConnectionBeforeSend(chatId);
+    if (!ready) {
+      await MessageStore.instance.updateMessageSendStatus(
+        chatId,
+        messageId,
+        MessageSendStatus.failed,
+      );
+      notifyListeners();
+      return;
+    }
+
+    final context = await initChat(chatId);
+
+    _contexts[chatId] = context.copyWith(
+      messageCount: MessageStore.instance.getMessageCount(chatId),
+      lastMessageTime: DateTime.now(),
+    );
+
+    _processingChats.add(chatId);
+    _beginBackgroundTrackedRequest(chatId);
+    notifyListeners();
+
+    if (message.type == MessageType.image) {
+      _processImageMessageInBackground(chatId, message.content, context.isGroup);
+      return;
+    }
+
+    if (message.type == MessageType.sticker) {
+      final (_, categoryOrEmotion, _) = StickerService.parseStickerMessage(
+        message.content,
+      );
+      final emotionText = (categoryOrEmotion ?? '').trim();
+      final aiPrompt = emotionText.isEmpty
+          ? '用户发送了一个表情。请结合上下文自然回复。'
+          : '用户发送了一个表情，标签是"$emotionText"。请根据这个标签和上下文自然回复。';
+      _processMessageInBackground(chatId, aiPrompt, context.isGroup);
+      return;
+    }
+
+    _processMessageInBackground(chatId, message.content, context.isGroup);
   }
 
   /// 后台处理消息

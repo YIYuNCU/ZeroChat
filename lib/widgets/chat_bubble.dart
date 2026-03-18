@@ -29,6 +29,9 @@ class ChatBubble extends StatelessWidget {
   /// 删除回调
   final VoidCallback? onDelete;
 
+  /// 重发回调（发送失败时）
+  final VoidCallback? onRetry;
+
   const ChatBubble({
     super.key,
     required this.message,
@@ -40,6 +43,7 @@ class ChatBubble extends StatelessWidget {
     this.onQuote,
     this.onFavorite,
     this.onDelete,
+    this.onRetry,
   });
 
   @override
@@ -64,6 +68,20 @@ class ChatBubble extends StatelessWidget {
               children: [
                 // 接收方气泡尖角（左侧）
                 if (!isSender && !_isSticker) _buildBubbleArrow(isLeft: true),
+
+                if (isSender && message.sendStatus == MessageSendStatus.failed)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8, top: 8),
+                    child: GestureDetector(
+                      onTap: onRetry,
+                      behavior: HitTestBehavior.opaque,
+                      child: const Icon(
+                        Icons.error,
+                        color: Colors.red,
+                        size: 18,
+                      ),
+                    ),
+                  ),
 
                 // 气泡主体（长按菜单）
                 Flexible(
