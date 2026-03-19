@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'storage_service.dart';
 import 'intent_service.dart';
 import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 
 /// 全局设置服务
 /// 管理 API 配置、全局提示词等
@@ -11,6 +12,14 @@ class SettingsService extends ChangeNotifier {
   SettingsService._internal();
 
   static SettingsService get instance => _instance;
+
+  String _normalizeFilePath(String value) {
+    final trimmed = value.trim();
+    if (trimmed.startsWith('/api/avatars/')) {
+      return trimmed.replaceFirst('/api/avatars/', '/files/avatars/');
+    }
+    return trimmed;
+  }
 
   // ========== 用户信息 ==========
   String _userNickname = 'ZeroChat';
@@ -23,6 +32,9 @@ class SettingsService extends ChangeNotifier {
 
   // ========== 后端服务器 ==========
   String _backendUrl = 'http://localhost:8000';
+  String _backendAuthToken = SecureBackendClient.defaultAuthToken;
+  String _backendEncryptionSecret =
+      SecureBackendClient.defaultEncryptionSecret;
 
   // ========== API 配置 ==========
 
@@ -42,6 +54,7 @@ class SettingsService extends ChangeNotifier {
   String _visionApiUrl = '';
   String _visionApiKey = '';
   String _visionModel = 'gpt-4-vision-preview';
+  String _visionMode = 'standalone';
 
   // ========== 全局提示词 ==========
   String _basePrompt = '';
@@ -53,6 +66,8 @@ class SettingsService extends ChangeNotifier {
 
   // ========== 后台运行 ==========
   bool _backgroundRuntimeEnabled = true;
+  int _backgroundPollIntervalSeconds = 45;
+  int _backgroundWatchdogIntervalSeconds = 30;
 
   // ========== Getters ==========
 
@@ -73,6 +88,7 @@ class SettingsService extends ChangeNotifier {
   String get visionApiUrl => _visionApiUrl;
   String get visionApiKey => _visionApiKey;
   String get visionModel => _visionModel;
+  String get visionMode => _visionMode;
 
   String get basePrompt => _basePrompt;
   String get groupPrompt => _groupPrompt;
@@ -82,9 +98,13 @@ class SettingsService extends ChangeNotifier {
   String get chatBackgroundUrl => _chatBackgroundUrl;
 
   String get backendUrl => _backendUrl;
+  String get backendAuthToken => _backendAuthToken;
+  String get backendEncryptionSecret => _backendEncryptionSecret;
 
   int get messageWaitSeconds => _messageWaitSeconds;
   bool get backgroundRuntimeEnabled => _backgroundRuntimeEnabled;
+  int get backgroundPollIntervalSeconds => _backgroundPollIntervalSeconds;
+  int get backgroundWatchdogIntervalSeconds => _backgroundWatchdogIntervalSeconds;
 
   /// 初始化
   static Future<void> init() async {
@@ -96,7 +116,9 @@ class SettingsService extends ChangeNotifier {
   Future<void> _loadSettings() async {
     // 用户信息
     _userNickname = StorageService.getString('user_nickname') ?? 'ZeroChat';
-    _userAvatarUrl = StorageService.getString('user_avatar_url') ?? '';
+    _userAvatarUrl = _normalizeFilePath(
+      StorageService.getString('user_avatar_url') ?? '',
+    );
     _userAvatarHash = StorageService.getString('user_avatar_hash') ?? '';
 
     // 主聊天 API
@@ -116,6 +138,7 @@ class SettingsService extends ChangeNotifier {
     _visionApiKey = StorageService.getString('vision_api_key') ?? '';
     _visionModel =
         StorageService.getString('vision_model') ?? 'gpt-4-vision-preview';
+    _visionMode = StorageService.getString('vision_mode') ?? 'standalone';
 
     // 全局提示词
     _basePrompt = StorageService.getString('base_prompt') ?? _defaultBasePrompt;
@@ -131,6 +154,17 @@ class SettingsService extends ChangeNotifier {
     // 后端服务器
     _backendUrl =
         StorageService.getString('backend_url') ?? 'http://localhost:8000';
+    _backendAuthToken =
+      StorageService.getString('backend_auth_token') ??
+      SecureBackendClient.defaultAuthToken;
+    _backendEncryptionSecret =
+      StorageService.getString('backend_encryption_secret') ??
+      SecureBackendClient.defaultEncryptionSecret;
+
+    SecureBackendClient.configureSecurity(
+      authToken: _backendAuthToken,
+      encryptionSecret: _backendEncryptionSecret,
+    );
 
     // 消息等待时间
     _messageWaitSeconds = StorageService.getInt('message_wait_seconds') ?? 0;
@@ -138,6 +172,10 @@ class SettingsService extends ChangeNotifier {
     // 后台运行
     _backgroundRuntimeEnabled =
         StorageService.getBool('background_runtime_enabled') ?? true;
+    _backgroundPollIntervalSeconds =
+      StorageService.getInt('background_poll_interval_seconds') ?? 45;
+    _backgroundWatchdogIntervalSeconds =
+      StorageService.getInt('background_watchdog_interval_seconds') ?? 30;
   }
 
   // ========== 更新方法 ==========
@@ -153,8 +191,9 @@ class SettingsService extends ChangeNotifier {
       await StorageService.setString('user_nickname', nickname);
     }
     if (avatarUrl != null) {
-      _userAvatarUrl = avatarUrl;
-      await StorageService.setString('user_avatar_url', avatarUrl);
+      final normalized = _normalizeFilePath(avatarUrl);
+      _userAvatarUrl = normalized;
+      await StorageService.setString('user_avatar_url', normalized);
     }
     if (avatarHash != null) {
       _userAvatarHash = avatarHash;
@@ -190,6 +229,22 @@ class SettingsService extends ChangeNotifier {
   Future<void> updateBackgroundRuntimeEnabled(bool enabled) async {
     _backgroundRuntimeEnabled = enabled;
     await StorageService.setBool('background_runtime_enabled', enabled);
+    notifyListeners();
+  }
+
+  /// 更新后台轮询间隔（秒）
+  Future<void> updateBackgroundPollIntervalSeconds(int seconds) async {
+    final normalized = seconds.clamp(15, 120);
+    _backgroundPollIntervalSeconds = normalized;
+    await StorageService.setInt('background_poll_interval_seconds', normalized);
+    notifyListeners();
+  }
+
+  /// 更新后台保活自检间隔（秒）
+  Future<void> updateBackgroundWatchdogIntervalSeconds(int seconds) async {
+    final normalized = seconds.clamp(10, 120);
+    _backgroundWatchdogIntervalSeconds = normalized;
+    await StorageService.setInt('background_watchdog_interval_seconds', normalized);
     notifyListeners();
   }
 
@@ -241,15 +296,20 @@ class SettingsService extends ChangeNotifier {
     required String url,
     required String key,
     required String model,
+    String? mode,
   }) async {
     _visionEnabled = enabled;
     _visionApiUrl = url;
     _visionApiKey = key;
     _visionModel = model;
+    if (mode != null && mode.isNotEmpty) {
+      _visionMode = mode;
+    }
     await StorageService.setBool('vision_enabled', enabled);
     await StorageService.setString('vision_api_url', url);
     await StorageService.setString('vision_api_key', key);
     await StorageService.setString('vision_model', model);
+    await StorageService.setString('vision_mode', _visionMode);
     notifyListeners();
   }
 
@@ -406,18 +466,53 @@ class SettingsService extends ChangeNotifier {
     debugPrint('SettingsService: Backend URL updated to $url');
   }
 
+  /// 更新后端鉴权与传输加密配置
+  /// 仅更新本地客户端请求参数，不会同步覆盖服务器端配置
+  Future<void> updateBackendSecurity({
+    required String authToken,
+    required String encryptionSecret,
+  }) async {
+    _backendAuthToken = authToken;
+    _backendEncryptionSecret = encryptionSecret;
+
+    await StorageService.setString('backend_auth_token', authToken);
+    await StorageService.setString(
+      'backend_encryption_secret',
+      encryptionSecret,
+    );
+
+    SecureBackendClient.configureSecurity(
+      authToken: authToken,
+      encryptionSecret: encryptionSecret,
+    );
+
+    notifyListeners();
+    debugPrint('SettingsService: Local backend security config updated');
+  }
+
   /// 同步 API 设置到后端
   Future<bool> syncApiSettingsToBackend() async {
     try {
-      final response = await SecureBackendClient.put(
-        '$_backendUrl/api/settings',
+      final response = await SecureWebSocketClient.instance.request(
+        'settings_update',
         {
+          'updates': {
           'ai_api_url': _chatApiUrl,
           'ai_api_key': _chatApiKey,
           'ai_model': _chatModel,
+          'intent_enabled': _intentEnabled,
+          'intent_api_url': _intentApiUrl,
+          'intent_api_key': _intentApiKey,
+          'intent_model': _intentModel,
+          'vision_enabled': _visionEnabled,
+          'vision_api_url': _visionApiUrl,
+          'vision_api_key': _visionApiKey,
+          'vision_model': _visionModel,
+          'vision_mode': _visionMode,
+          },
         },
       );
-      if (response.statusCode == 200) {
+      if (response['success'] == true) {
         debugPrint('SettingsService: API settings synced to backend');
         return true;
       }
@@ -425,5 +520,130 @@ class SettingsService extends ChangeNotifier {
       debugPrint('SettingsService: Backend sync failed: $e');
     }
     return false;
+  }
+
+  /// 从后端拉取并应用全量设置（用于新安装客户端冷启动同步）
+  Future<bool> syncAllSettingsFromBackend() async {
+    try {
+      final response = await SecureWebSocketClient.instance.request(
+        'settings_get',
+        {'include_secrets': true},
+      );
+
+      final payload = response;
+      final settings = payload['settings'];
+      if (settings is! Map) {
+        return false;
+      }
+
+      final server = Map<String, dynamic>.from(settings);
+
+      final chatUrl = (server['ai_api_url']?.toString() ?? '').trim();
+      final chatKey = (server['ai_api_key']?.toString() ?? '').trim();
+      final chatModel =
+          (server['ai_model']?.toString() ?? _chatModel).trim().isEmpty
+          ? _chatModel
+          : (server['ai_model']?.toString() ?? _chatModel).trim();
+
+      final intentEnabled = server['intent_enabled'] == true;
+      final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
+      final intentKey = (server['intent_api_key']?.toString() ?? '').trim();
+      final intentModel =
+          (server['intent_model']?.toString() ?? _intentModel).trim().isEmpty
+          ? _intentModel
+          : (server['intent_model']?.toString() ?? _intentModel).trim();
+
+        final visionEnabled = server['vision_enabled'] == true;
+        final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
+        final visionKey = (server['vision_api_key']?.toString() ?? '').trim();
+        final visionModel =
+          (server['vision_model']?.toString() ?? _visionModel).trim().isEmpty
+          ? _visionModel
+          : (server['vision_model']?.toString() ?? _visionModel).trim();
+        final visionModeRaw =
+          (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
+        final visionMode = visionModeRaw == 'pre_model' ? 'pre_model' : 'standalone';
+
+      await updateChatApi(url: chatUrl, key: chatKey, model: chatModel);
+      await updateIntentApi(
+        enabled: intentEnabled,
+        url: intentUrl,
+        key: intentKey,
+        model: intentModel,
+      );
+      await updateVisionApi(
+        enabled: visionEnabled,
+        url: visionUrl,
+        key: visionKey,
+        model: visionModel,
+        mode: visionMode,
+      );
+
+      debugPrint('SettingsService: Full settings synced from backend');
+      return true;
+    } catch (e) {
+      debugPrint('SettingsService: Sync all settings from backend failed: $e');
+      return false;
+    }
+  }
+
+  /// 从后端拉取并应用公开设置（不请求密钥）
+  Future<bool> syncPublicSettingsFromBackend() async {
+    try {
+      final payload = await SecureWebSocketClient.instance.request(
+        'settings_get',
+        const <String, dynamic>{},
+      );
+      final settings = payload['settings'];
+      if (settings is! Map) {
+        return false;
+      }
+
+      final server = Map<String, dynamic>.from(settings);
+
+      final chatUrl = (server['ai_api_url']?.toString() ?? '').trim();
+      final chatModel =
+          (server['ai_model']?.toString() ?? _chatModel).trim().isEmpty
+          ? _chatModel
+          : (server['ai_model']?.toString() ?? _chatModel).trim();
+
+      final intentEnabled = server['intent_enabled'] == true;
+      final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
+      final intentModel =
+          (server['intent_model']?.toString() ?? _intentModel).trim().isEmpty
+          ? _intentModel
+          : (server['intent_model']?.toString() ?? _intentModel).trim();
+
+        final visionEnabled = server['vision_enabled'] == true;
+        final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
+        final visionModel =
+          (server['vision_model']?.toString() ?? _visionModel).trim().isEmpty
+          ? _visionModel
+          : (server['vision_model']?.toString() ?? _visionModel).trim();
+        final visionModeRaw =
+          (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
+        final visionMode = visionModeRaw == 'pre_model' ? 'pre_model' : 'standalone';
+
+      await updateChatApi(url: chatUrl, key: _chatApiKey, model: chatModel);
+      await updateIntentApi(
+        enabled: intentEnabled,
+        url: intentUrl,
+        key: _intentApiKey,
+        model: intentModel,
+      );
+      await updateVisionApi(
+        enabled: visionEnabled,
+        url: visionUrl,
+        key: _visionApiKey,
+        model: visionModel,
+        mode: visionMode,
+      );
+
+      debugPrint('SettingsService: Public settings synced from backend');
+      return true;
+    } catch (e) {
+      debugPrint('SettingsService: Sync public settings from backend failed: $e');
+      return false;
+    }
   }
 }

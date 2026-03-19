@@ -20,7 +20,16 @@ import 'moments_scheduler.dart';
 import '../services/intent_service.dart';
 import '../services/memory_service.dart';
 import '../services/sticker_service.dart';
-import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
+import '../services/task_service.dart';
+import '../services/emoji_service.dart';
+
+class _PendingTextMessage {
+  final String messageId;
+  final String content;
+
+  const _PendingTextMessage({required this.messageId, required this.content});
+}
 
 /// 聊天核心引擎
 /// 整个项目中唯一负责消息流转、AI 调度、分段发送、群聊控制、记忆更新的权威组件
@@ -47,7 +56,7 @@ class ChatController extends ChangeNotifier {
   final Map<String, void Function(bool)> _typingCallbacks = {};
 
   /// 待发送消息队列（用于消息合并等待）
-  final Map<String, List<String>> _pendingMessages = {};
+  final Map<String, List<_PendingTextMessage>> _pendingMessages = {};
 
   /// 等待定时器（用于消息合并）
   final Map<String, Timer> _waitTimers = {};
@@ -123,6 +132,39 @@ class ChatController extends ChangeNotifier {
     );
   }
 
+  Future<bool> _ensureConnectionBeforeSend(String chatId) async {
+    Future<void> ping() async {
+      await SecureWebSocketClient.instance.request(
+        'health',
+        const <String, dynamic>{},
+        timeout: const Duration(seconds: 4),
+      );
+    }
+
+    try {
+      if (!SecureWebSocketClient.instance.isConnected) {
+        await SecureWebSocketClient.instance.ensureConnected();
+      }
+      await ping();
+      return true;
+    } catch (e) {
+      debugPrint(
+        'ChatController: pre-send websocket check failed for $chatId, retrying: $e',
+      );
+      try {
+        await SecureWebSocketClient.instance.close();
+        await SecureWebSocketClient.instance.ensureConnected();
+        await ping();
+        return true;
+      } catch (e2) {
+        debugPrint(
+          'ChatController: websocket reconnect failed before send for $chatId: $e2',
+        );
+        return false;
+      }
+    }
+  }
+
   /// 发送用户消息（唯一入口）
   /// 支持消息等待合并功能
   Future<void> sendUserMessage(
@@ -154,7 +196,9 @@ class ChatController extends ChangeNotifier {
 
     // 添加到待发送队列
     _pendingMessages.putIfAbsent(chatId, () => []);
-    _pendingMessages[chatId]!.add(content);
+    _pendingMessages[chatId]!.add(
+      _PendingTextMessage(messageId: userMessage.id, content: content),
+    );
 
     // 如果等待时间为 0，立即发送
     if (waitSeconds == 0) {
@@ -172,23 +216,36 @@ class ChatController extends ChangeNotifier {
   /// 发送合并后的消息
   Future<void> _sendBatchedMessages(String chatId) async {
     // 取出待发送消息
-    final messages = _pendingMessages.remove(chatId) ?? [];
+    final pendingMessages = _pendingMessages.remove(chatId) ?? [];
     _waitTimers.remove(chatId);
 
-    if (messages.isEmpty) return;
+    if (pendingMessages.isEmpty) return;
     if (_processingChats.contains(chatId)) {
       debugPrint('ChatController: Already processing $chatId, queueing');
       // 重新加入队列
-      _pendingMessages[chatId] = messages;
+      _pendingMessages[chatId] = pendingMessages;
       return;
     }
 
     // 合并消息（用换行连接）
-    final combinedContent = messages.join('\n');
+    final combinedContent = pendingMessages.map((m) => m.content).join('\n');
 
     debugPrint(
-      'ChatController: Sending batched messages (${messages.length} msgs) to $chatId',
+      'ChatController: Sending batched messages (${pendingMessages.length} msgs) to $chatId',
     );
+
+    final ready = await _ensureConnectionBeforeSend(chatId);
+    if (!ready) {
+      for (final pending in pendingMessages) {
+        await MessageStore.instance.updateMessageSendStatus(
+          chatId,
+          pending.messageId,
+          MessageSendStatus.failed,
+        );
+      }
+      notifyListeners();
+      return;
+    }
 
     // 初始化上下文
     final context = await initChat(chatId);
@@ -219,9 +276,6 @@ class ChatController extends ChangeNotifier {
       'ChatController: sendUserImageMessage to $chatId, path=$imagePath',
     );
 
-    // 初始化上下文
-    final context = await initChat(chatId);
-
     // 1. 创建图片消息（使用 image 类型）
     final imageMessage = Message(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -234,6 +288,23 @@ class ChatController extends ChangeNotifier {
 
     // 2. 写入 MessageStore
     await MessageStore.instance.addMessage(chatId, imageMessage);
+
+    final ready = await _ensureConnectionBeforeSend(chatId);
+    if (!ready) {
+      await MessageStore.instance.updateMessageSendStatus(
+        chatId,
+        imageMessage.id,
+        MessageSendStatus.failed,
+      );
+      notifyListeners();
+      return;
+    }
+
+    // 图片消息做一次立即入库同步兜底，避免异步同步失败导致后端缺失该条对话
+    await _syncMessageToBackendNow(chatId, imageMessage);
+
+    // 初始化上下文
+    final context = await initChat(chatId);
 
     // 更新上下文消息数量
     _contexts[chatId] = context.copyWith(
@@ -248,6 +319,25 @@ class ChatController extends ChangeNotifier {
 
     // 3. 后台处理图片消息（调用 vision API）
     _processImageMessageInBackground(chatId, imagePath, context.isGroup);
+  }
+
+  Future<void> _syncMessageToBackendNow(String chatId, Message message) async {
+    try {
+      await SecureWebSocketClient.instance.request('save_chat_message', {
+        'role_id': chatId,
+        'message': {
+          'id': message.id,
+          'content': message.content,
+          'sender_id': message.senderId,
+          'timestamp': message.timestamp.toIso8601String(),
+          'type': message.type.toString().split('.').last,
+          'quote_id': message.quotedMessageId,
+          'quote_content': message.quotedPreviewText,
+        },
+      });
+    } catch (e) {
+      debugPrint('ChatController: immediate backend sync failed: $e');
+    }
   }
 
   /// 发送用户表情（支持用户表情标签注入给 AI）
@@ -273,8 +363,6 @@ class ChatController extends ChangeNotifier {
       return;
     }
 
-    final context = await initChat(chatId);
-
     final stickerContent = fromUserLibrary
         ? StickerService.createUserStickerMessageContent(
             category: category,
@@ -294,6 +382,19 @@ class ChatController extends ChangeNotifier {
     );
 
     await MessageStore.instance.addMessage(chatId, userStickerMessage);
+
+    final ready = await _ensureConnectionBeforeSend(chatId);
+    if (!ready) {
+      await MessageStore.instance.updateMessageSendStatus(
+        chatId,
+        userStickerMessage.id,
+        MessageSendStatus.failed,
+      );
+      notifyListeners();
+      return;
+    }
+
+    final context = await initChat(chatId);
 
     _contexts[chatId] = context.copyWith(
       messageCount: MessageStore.instance.getMessageCount(chatId),
@@ -345,6 +446,7 @@ class ChatController extends ChangeNotifier {
         userPrompt:
             '用户发送了一张图片，请以你扮演的角色身份自然地回应这张图片。不要描述图片内容，而是像朋友收到图片一样自然地回复，表达你的感受或想法。',
         rolePersona: systemPrompt,
+        roleId: role.id,
       );
 
       // 发送 AI 回复
@@ -400,6 +502,64 @@ class ChatController extends ChangeNotifier {
       );
       await sendUserMessage(chatId, content, quotedMessage: tempQuotedMessage);
     }
+  }
+
+  Future<void> retryFailedMessage(String chatId, String messageId) async {
+    if (_processingChats.contains(chatId)) {
+      return;
+    }
+
+    final message = MessageStore.instance.getMessage(chatId, messageId);
+    if (message == null || message.senderId != 'me') {
+      return;
+    }
+
+    await MessageStore.instance.updateMessageSendStatus(
+      chatId,
+      messageId,
+      MessageSendStatus.sent,
+    );
+
+    final ready = await _ensureConnectionBeforeSend(chatId);
+    if (!ready) {
+      await MessageStore.instance.updateMessageSendStatus(
+        chatId,
+        messageId,
+        MessageSendStatus.failed,
+      );
+      notifyListeners();
+      return;
+    }
+
+    final context = await initChat(chatId);
+
+    _contexts[chatId] = context.copyWith(
+      messageCount: MessageStore.instance.getMessageCount(chatId),
+      lastMessageTime: DateTime.now(),
+    );
+
+    _processingChats.add(chatId);
+    _beginBackgroundTrackedRequest(chatId);
+    notifyListeners();
+
+    if (message.type == MessageType.image) {
+      _processImageMessageInBackground(chatId, message.content, context.isGroup);
+      return;
+    }
+
+    if (message.type == MessageType.sticker) {
+      final (_, categoryOrEmotion, _) = StickerService.parseStickerMessage(
+        message.content,
+      );
+      final emotionText = (categoryOrEmotion ?? '').trim();
+      final aiPrompt = emotionText.isEmpty
+          ? '用户发送了一个表情。请结合上下文自然回复。'
+          : '用户发送了一个表情，标签是"$emotionText"。请根据这个标签和上下文自然回复。';
+      _processMessageInBackground(chatId, aiPrompt, context.isGroup);
+      return;
+    }
+
+    _processMessageInBackground(chatId, message.content, context.isGroup);
   }
 
   /// 后台处理消息
@@ -613,7 +773,26 @@ class ChatController extends ChangeNotifier {
           debugPrint(
             'ChatController: Reminder intent detected for ${intent.duration}',
           );
-          // TODO: 集成 TaskService 创建定时任务
+          final now = DateTime.now();
+          final triggerTime = now.add(intent.duration!);
+          final reminderContent = (intent.extractedContent ?? userMessage)
+              .trim();
+
+          try {
+            await TaskService.addReminder(
+              chatId: chatId,
+              roleId: role.id,
+              message: reminderContent.isEmpty ? userMessage : reminderContent,
+              triggerTime: triggerTime,
+              aiPrompt:
+                  '你需要在约定时间自然地提醒用户：${reminderContent.isEmpty ? userMessage : reminderContent}。不要说“定时任务”或“系统提醒”。',
+            );
+            debugPrint(
+              'ChatController: Reminder created at ${triggerTime.toIso8601String()}',
+            );
+          } catch (e) {
+            debugPrint('ChatController: Failed to create reminder task: $e');
+          }
         }
         break;
 
@@ -807,6 +986,16 @@ class ChatController extends ChangeNotifier {
 
   // ========== 分段发送 ==========
 
+  Future<List<String>> _loadAvailableEmojiCategories(String roleId) async {
+    try {
+      final categories = await EmojiService.instance.getAiCategories(roleId);
+      return StickerService.normalizeCategorySet(categories).toList();
+    } catch (e) {
+      debugPrint('ChatController: load emoji categories failed for $roleId: $e');
+      return const <String>[];
+    }
+  }
+
   Future<void> _sendSegmentsQueued(
     String chatId,
     String roleId,
@@ -814,6 +1003,16 @@ class ChatController extends ChangeNotifier {
     required bool isGroup,
   }) async {
     final segments = SegmentSender.splitMessage(rawReply);
+    final availableEmojiCategories = await _loadAvailableEmojiCategories(roleId);
+    final preferredDefaultEmojiCategory = StickerService.resolveAvailableEmotion(
+      rawEmotion: 'neutral',
+      availableCategories: availableEmojiCategories,
+      defaultCategory: null,
+    );
+    final defaultEmojiCategory = preferredDefaultEmojiCategory ??
+        (availableEmojiCategories.isNotEmpty
+            ? availableEmojiCategories.first
+            : null);
     debugPrint('ChatController: Split into ${segments.length} segments');
 
     for (var i = 0; i < segments.length; i++) {
@@ -830,7 +1029,12 @@ class ChatController extends ChangeNotifier {
       }
 
       // 解析情绪标签
-      final (cleanedText, emotion) = StickerService.parseEmotionTag(segment);
+      final (cleanedText, emotion) =
+          StickerService.parseEmotionTagWithAvailableCategories(
+            segment,
+            availableCategories: availableEmojiCategories,
+            defaultCategory: defaultEmojiCategory,
+          );
       final displayText = cleanedText.isNotEmpty ? cleanedText : segment;
 
       final aiMessage = Message(
@@ -894,20 +1098,61 @@ class ChatController extends ChangeNotifier {
           placeholderStickerMessage,
         );
 
+        String? resolveStickerUrl(Map<String, dynamic> data) {
+          if (data['found'] == true && data['url'] != null) {
+            final value = data['url'].toString().trim();
+            if (value.isNotEmpty) {
+              return value;
+            }
+          }
+          return null;
+        }
+
+        Future<String?> fetchStickerUrlWithFallback() async {
+          final fallbackEmotions = <String>[emotion];
+          if (defaultEmojiCategory != null && defaultEmojiCategory.isNotEmpty) {
+            fallbackEmotions.add(defaultEmojiCategory);
+          }
+          fallbackEmotions.addAll(availableEmojiCategories);
+
+          final orderedCandidates = <String>[];
+          for (final candidate in fallbackEmotions) {
+            final normalized = candidate.trim().toLowerCase();
+            if (normalized.isEmpty || orderedCandidates.contains(normalized)) {
+              continue;
+            }
+            orderedCandidates.add(normalized);
+          }
+
+          for (final targetEmotion in orderedCandidates) {
+            try {
+              final data = await SecureWebSocketClient.instance.request(
+                'emoji_random',
+                {'role_id': roleId, 'emotion': targetEmotion},
+              ).timeout(const Duration(seconds: 5));
+
+              final stickerUrl = resolveStickerUrl(data);
+              if (stickerUrl != null) {
+                return stickerUrl;
+              }
+            } catch (e) {
+              debugPrint(
+                'ChatController: Sticker fetch error on emotion $targetEmotion: $e',
+              );
+            }
+          }
+
+          return null;
+        }
+
         try {
-          final backendUrl = SettingsService.instance.backendUrl;
-          final resp = await SecureBackendClient.get(
-            '$backendUrl/api/roles/$roleId/emojis/$emotion/random',
-          ).timeout(const Duration(seconds: 5));
-          if (resp.statusCode == 200) {
-            final data = resp.data;
-            if (data['found'] == true && data['url'] != null) {
+          final stickerUrl = await fetchStickerUrlWithFallback();
+          if (stickerUrl != null) {
               // 延迟一小段时间再发表情包
               await Future.delayed(
                 Duration(milliseconds: 300 + _random.nextInt(500)),
               );
 
-              final stickerUrl = '$backendUrl${data['url']}';
               final stickerContent = StickerService.createStickerMessageContent(
                 emotion,
                 stickerUrl,
@@ -922,19 +1167,25 @@ class ChatController extends ChangeNotifier {
               debugPrint(
                 'ChatController: Replaced placeholder sticker for emotion: $emotion',
               );
-            }
           }
         } catch (e) {
           debugPrint('ChatController: Sticker fetch error: $e');
         }
 
         if (!placeholderResolved) {
-          await MessageStore.instance.deleteMessage(
+          final fallbackPlaceholderEmotion =
+              defaultEmojiCategory ?? emotion;
+          await MessageStore.instance.updateMessage(
             chatId,
             placeholderStickerId,
+            content: StickerService.createStickerMessageContent(
+              fallbackPlaceholderEmotion,
+              'placeholder://$fallbackPlaceholderEmotion',
+            ),
+            type: MessageType.sticker,
           );
           debugPrint(
-            'ChatController: Removed unresolved placeholder sticker: $emotion',
+            'ChatController: Keep fallback placeholder sticker for emotion: $emotion',
           );
         }
       }

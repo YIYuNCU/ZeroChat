@@ -23,6 +23,8 @@ import 'services/api_service.dart';
 import 'services/notification_service.dart';
 import 'services/background_runtime_service.dart';
 import 'services/intent_service.dart';
+import 'services/realtime_sync_service.dart';
+import 'services/secure_websocket_client.dart';
 import 'core/chat_controller.dart';
 import 'core/proactive_message_scheduler.dart';
 import 'core/moments_scheduler.dart';
@@ -56,6 +58,8 @@ void main() async {
   await BackgroundRuntimeService.init(
     enabled: SettingsService.instance.backgroundRuntimeEnabled,
   );
+  unawaited(SecureWebSocketClient.instance.ensureConnected());
+  RealtimeSyncService.init();
   await ChatController.init();
   await ProactiveMessageScheduler.instance.init();
   await MomentsScheduler.instance.init();
@@ -99,6 +103,9 @@ Future<void> _syncWithBackend() async {
   }
 
   debugPrint('✅ Backend available, syncing data...');
+
+  // 启动阶段仅同步公开设置，不默认拉取密钥
+  await SettingsService.instance.syncPublicSettingsFromBackend();
 
   // 同步角色数据
   await RoleService.fetchFromBackend();
@@ -170,6 +177,7 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden) {
       BackgroundRuntimeService.notifyAppLifecycle(inForeground: false);
+      unawaited(SecureWebSocketClient.instance.ensureConnected());
     }
   }
 

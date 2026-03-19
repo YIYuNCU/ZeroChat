@@ -2,33 +2,32 @@
 ZeroChat Server - 后端服务入口
 双击运行即可启动 HTTP 服务
 """
-import os
-import sys
 import json
 import logging
-from pathlib import Path
+import sys
 from datetime import datetime
-from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 # 确定根目录
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     ROOT_DIR = Path(sys.executable).parent
 else:
     ROOT_DIR = Path(__file__).parent
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 # 创建必要目录
 CONFIG_DIR = ROOT_DIR / "config"
 DATA_DIR = ROOT_DIR / "data"
 RUNTIME_DIR = ROOT_DIR / "runtime"
 
-for d in [CONFIG_DIR, DATA_DIR, RUNTIME_DIR, 
-          DATA_DIR / "roles"]:
-    d.mkdir(parents=True, exist_ok=True)
+for directory in [CONFIG_DIR, DATA_DIR, RUNTIME_DIR, DATA_DIR / "roles"]:
+    directory.mkdir(parents=True, exist_ok=True)
 
 # 配置日志
 LOG_FILE = RUNTIME_DIR / f"server_{datetime.now().strftime('%Y%m%d')}.log"
@@ -37,12 +36,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(LOG_FILE, encoding="utf-8")
-    ]
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
 
-# 加载配置
+
 def load_config():
     config_file = CONFIG_DIR / "settings.json"
     default_config = {
@@ -51,159 +50,68 @@ def load_config():
         "ai_api_url": "",
         "ai_api_key": "",
         "ai_model": "gpt-3.5-turbo",
+        "vision_enabled": False,
+        "vision_api_url": "",
+        "vision_api_key": "",
+        "vision_model": "gpt-4o",
+        "vision_mode": "standalone",
         "auth_token": "ZEROCHAT_FIXED_TOKEN_2026",
-        "encryption_secret": "ZEROCHAT_TRANSFER_SECRET_2026"
+        "encryption_secret": "ZEROCHAT_TRANSFER_SECRET_2026",
     }
     if config_file.exists():
         with open(config_file, "r", encoding="utf-8") as f:
             return {**default_config, **json.load(f)}
-    else:
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(default_config, f, indent=2, ensure_ascii=False)
-        return default_config
+
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump(default_config, f, indent=2, ensure_ascii=False)
+    return default_config
+
 
 CONFIG = load_config()
 
-# 导入路由
-from routers import chat, roles, moments, tasks, settings
-from routers import ai_behavior
+from core.lifecycle import create_lifespan
+from core.middleware import RequestLoggingMiddleware, SecurityMiddleware
+from routers import ai_behavior, chat, moments, roles, settings, tasks
 from services import scheduler_service
-from services.security_service import (
-    DEFAULT_AUTH_TOKEN,
-    DEFAULT_ENCRYPTION_SECRET,
-    decrypt_payload,
-    encrypt_payload,
-)
+from transport.file_routes import create_files_router
+from transport.push_hub import configure_push_hub
+from transport.ws_endpoint import create_secure_websocket_endpoint
 
-# AI 事件回调
-async def handle_ai_event(event_data: dict):
-    """处理调度器触发的 AI 事件"""
-    from routers.ai_behavior import AIEvent, handle_ai_event as process_event
-    event = AIEvent(**event_data)
-    return await process_event(event)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("=" * 50)
-    logger.info("ZeroChat Server 启动中...")
-    logger.info(f"数据目录: {DATA_DIR}")
-    logger.info(f"配置目录: {CONFIG_DIR}")
-    logger.info(f"运行时目录: {RUNTIME_DIR}")
-    
-    # 角色目录（不创建默认角色，留空即可）
-    (DATA_DIR / "roles").mkdir(parents=True, exist_ok=True)
-    
-    # 启动调度器
-    scheduler_service.set_event_callback(handle_ai_event)
-    scheduler_service.start_scheduler()
-    logger.info("调度器已启动")
-    
-    logger.info("=" * 50)
-    yield
-    
-    # 停止调度器
-    scheduler_service.stop_scheduler()
-    logger.info("ZeroChat Server 已关闭")
-
-# 创建应用
 app = FastAPI(
     title="ZeroChat Server",
     description="ZeroChat 后端服务",
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.1.0",
+    lifespan=create_lifespan(
+        data_dir=DATA_DIR,
+        config_dir=CONFIG_DIR,
+        runtime_dir=RUNTIME_DIR,
+        logger=logger,
+    ),
 )
 
-# CORS
+configure_push_hub(
+    encryption_secret=CONFIG.get("encryption_secret", ""),
+    logger=logger,
+)
+
+app.add_middleware(RequestLoggingMiddleware, logger=logger)
+app.add_middleware(SecurityMiddleware, config=CONFIG, logger=logger)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000","http://127.0.0.1:8000","https://sakura.evian.asia"],
-    allow_origin_regex=r"^http://((10\.81)|(192\.168))\.\d{1,3}\.\d{1,3}(:\d+)?$",
+    allow_origins=[
+        "https://sakura.evian.asia",
+    ],
+    allow_origin_regex=(
+        r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+        r"|^https?://((10\.81)|(192\.168))\.\d{1,3}\.\d{1,3}(:\d+)?$"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 请求日志中间件
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-
-
-class SecurityMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        if not path.startswith("/api"):
-            return await call_next(request)
-
-        # Let CORS preflight pass before auth/decrypt checks.
-        if request.method.upper() == "OPTIONS":
-            return await call_next(request)
-
-        auth_token = CONFIG.get("auth_token") or DEFAULT_AUTH_TOKEN
-        encryption_secret = CONFIG.get("encryption_secret") or DEFAULT_ENCRYPTION_SECRET
-
-        incoming_token = request.headers.get("X-Auth-Token", "")
-        if incoming_token != auth_token:
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-
-        content_type = request.headers.get("content-type", "")
-        if "application/json" in content_type:
-            raw_body = await request.body()
-            if raw_body:
-                try:
-                    payload_obj = json.loads(raw_body.decode("utf-8"))
-                    encrypted = payload_obj.get("payload") if isinstance(payload_obj, dict) else None
-                    if encrypted is None:
-                        return JSONResponse(status_code=400, content={"detail": "Encrypted payload required"})
-                    decrypted = decrypt_payload(encrypted, encryption_secret)
-                    request._body = json.dumps(decrypted, ensure_ascii=False).encode("utf-8")
-                except Exception as e:
-                    logger.warning(f"请求解密失败: {e}")
-                    return JSONResponse(status_code=400, content={"detail": "Invalid encrypted payload"})
-
-        response = await call_next(request)
-
-        response_content_type = response.headers.get("content-type", "")
-        if "application/json" not in response_content_type or response.status_code == 204:
-            return response
-
-        response_body = b""
-        async for chunk in response.body_iterator:
-            response_body += chunk
-
-        if not response_body:
-            return response
-
-        try:
-            plain_obj = json.loads(response_body.decode("utf-8"))
-            encrypted_obj = encrypt_payload(plain_obj, encryption_secret)
-            headers = {
-                key: value
-                for key, value in response.headers.items()
-                if key.lower() not in {"content-length", "content-type"}
-            }
-            return JSONResponse(
-                status_code=response.status_code,
-                content={"payload": encrypted_obj},
-                headers=headers,
-            )
-        except Exception as e:
-            logger.warning(f"响应加密失败，返回原始响应: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={"detail": "Response encryption failed"},
-            )
-
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        logger.info(f"→ {request.method} {request.url.path}")
-        response = await call_next(request)
-        logger.info(f"← {request.method} {request.url.path} [{response.status_code}]")
-        return response
-
-app.add_middleware(RequestLoggingMiddleware)
-app.add_middleware(SecurityMiddleware)
-
-# 注册路由
+# 注册业务路由
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(roles.router, prefix="/api", tags=["Roles"])
 app.include_router(moments.router, prefix="/api", tags=["Moments"])
@@ -211,29 +119,38 @@ app.include_router(tasks.router, prefix="/api", tags=["Tasks"])
 app.include_router(ai_behavior.router, prefix="/api", tags=["AI Behavior"])
 app.include_router(settings.router, prefix="/api", tags=["Settings"])
 
+# 注册文件路由
+app.include_router(create_files_router(CONFIG))
+
+
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "ZeroChat Server Running"}
+
 
 @app.get("/api/health")
 async def health():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
+
 @app.get("/api/scheduler/status")
 async def scheduler_status():
-    """获取调度器状态"""
     return scheduler_service.get_scheduler_status()
+
+
+app.websocket("/ws/secure")(create_secure_websocket_endpoint(CONFIG, logger))
+
 
 if __name__ == "__main__":
     print("\n" + "=" * 50)
     print("  ZeroChat Server")
     print("  按 Ctrl+C 停止服务")
     print("=" * 50 + "\n")
-    
+
     uvicorn.run(
         "main:app",
         host=CONFIG["host"],
         port=CONFIG["port"],
         reload=False,
-        log_level="info"
+        log_level="info",
     )

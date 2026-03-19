@@ -1,11 +1,10 @@
 import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http;
-import 'package:http_parser/http_parser.dart';
 import '../services/settings_service.dart';
-import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'api_settings_page.dart';
 import 'global_prompts_page.dart';
@@ -280,26 +279,18 @@ class _ProfilePageState extends State<ProfilePage> {
       // 上传头像到后端
       if (selectedImagePath != null) {
         try {
-          final backendUrl = SettingsService.instance.backendUrl;
-          final response = await SecureBackendClient.multipartPost(
-            '$backendUrl/api/settings/avatar',
-            files: [
-              await http.MultipartFile.fromPath(
-                'file',
-                selectedImagePath!,
-                contentType: MediaType('image', 'jpeg'),
-              ),
-            ],
+          final bytes = await File(selectedImagePath!).readAsBytes();
+          final ext = selectedImagePath!.split('.').last.toLowerCase();
+          final data = await SecureWebSocketClient.instance.request(
+            'settings_avatar_upload',
+            {
+              'filename': 'avatar.$ext',
+              'content_base64': base64Encode(bytes),
+            },
           );
-          if (response.statusCode == 200) {
-            final respStr = await response.stream.bytesToString();
-            final data =
-                SecureBackendClient.decodeResponseBodyString(respStr)
-                    as Map<String, dynamic>;
-            newAvatarUrl = data['path'] as String?;
-            newAvatarHash = data['hash'] as String?;
-            debugPrint('Avatar uploaded: $newAvatarUrl');
-          }
+          newAvatarUrl = data['path'] as String?;
+          newAvatarHash = data['hash'] as String?;
+          debugPrint('Avatar uploaded via websocket: $newAvatarUrl');
         } catch (e) {
           debugPrint('Avatar upload failed: $e');
         }

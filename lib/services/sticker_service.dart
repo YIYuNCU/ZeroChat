@@ -88,28 +88,80 @@ class StickerService {
       'sleep': 'sleepy',
     };
     final mapped = aliases[value] ?? value;
-    if (EmotionTypes.all.contains(mapped)) {
+    if (mapped.isNotEmpty) {
       return mapped;
     }
     return null;
   }
 
-  /// 解析情绪标签并提取内容
-  /// 返回 (cleanedText, emotion?)
-  static (String, String?) parseEmotionTag(String text) {
+  static Set<String> normalizeCategorySet(Iterable<String> categories) {
+    return categories
+        .map((c) => _normalizeEmotionTag(c) ?? '')
+        .where((c) => c.isNotEmpty)
+        .toSet();
+  }
+
+  static String? resolveAvailableEmotion({
+    required String rawEmotion,
+    required Iterable<String> availableCategories,
+    String? defaultCategory,
+  }) {
+    final normalizedEmotion = _normalizeEmotionTag(rawEmotion);
+    if (normalizedEmotion == null) {
+      return _normalizeEmotionTag(defaultCategory ?? '');
+    }
+
+    final normalizedAvailable = normalizeCategorySet(availableCategories);
+    if (normalizedAvailable.isEmpty) {
+      return _normalizeEmotionTag(defaultCategory ?? '');
+    }
+
+    if (normalizedAvailable.contains(normalizedEmotion)) {
+      return normalizedEmotion;
+    }
+
+    final normalizedDefault = _normalizeEmotionTag(defaultCategory ?? '');
+    if (normalizedDefault != null && normalizedAvailable.contains(normalizedDefault)) {
+      return normalizedDefault;
+    }
+
+    return normalizedAvailable.first;
+  }
+
+  static (String, String?) parseEmotionTagWithAvailableCategories(
+    String text, {
+    required Iterable<String> availableCategories,
+    String? defaultCategory,
+  }) {
     final regex = RegExp(r'\[(\w+)\]\s*');
     final match = regex.firstMatch(text);
 
-    if (match != null) {
-      final normalizedEmotion = _normalizeEmotionTag(match.group(1) ?? '');
-      // 验证是否是有效的情绪类型
-      if (normalizedEmotion != null) {
-        final cleanedText = text.replaceFirst(regex, '').trim();
-        return (cleanedText, normalizedEmotion);
-      }
+    if (match == null) {
+      return (text, null);
     }
 
-    return (text, null);
+    final cleanedText = text.replaceFirst(regex, '').trim();
+    final rawEmotion = (match.group(1) ?? '').trim();
+    if (rawEmotion.isEmpty) {
+      return (cleanedText, null);
+    }
+
+    final resolved = resolveAvailableEmotion(
+      rawEmotion: rawEmotion,
+      availableCategories: availableCategories,
+      defaultCategory: defaultCategory,
+    );
+    return (cleanedText, resolved);
+  }
+
+  /// 解析情绪标签并提取内容
+  /// 返回 (cleanedText, emotion?)
+  static (String, String?) parseEmotionTag(String text) {
+    return parseEmotionTagWithAvailableCategories(
+      text,
+      availableCategories: EmotionTypes.all,
+      defaultCategory: EmotionTypes.neutral,
+    );
   }
 
   /// 为表情包消息生成内容标识
@@ -128,6 +180,18 @@ class StickerService {
     if (uri != null && uri.hasScheme) {
       final path = uri.path;
       if (path.startsWith('/api/emojis/')) {
+        var out = path
+            .replaceFirst('/api/emojis/', '/files/emojis/')
+            .replaceFirst('/api/user-emojis/', '/files/user-emojis/');
+        if (uri.hasQuery) {
+          out = '$out?${uri.query}';
+        }
+        if (uri.hasFragment) {
+          out = '$out#${uri.fragment}';
+        }
+        return out;
+      }
+      if (path.startsWith('/files/emojis/') || path.startsWith('/files/user-emojis/')) {
         var out = path;
         if (uri.hasQuery) {
           out = '$out?${uri.query}';
@@ -149,7 +213,8 @@ class StickerService {
     required String emojiId,
     required String imagePath,
   }) {
-    return '[STICKER|user|$category|$tag|$emojiId|$imagePath]';
+    final storedPath = normalizeAiStickerStoragePath(imagePath);
+    return '[STICKER|user|$category|$tag|$emojiId|$storedPath]';
   }
 
   /// 解析表情包消息内容

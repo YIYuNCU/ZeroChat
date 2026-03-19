@@ -65,7 +65,13 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 20),
 
           _buildSectionHeader('运行'),
-          _buildSection([_buildBackgroundRuntimeItem()]),
+          _buildSection([
+            _buildBackgroundRuntimeItem(),
+            const Divider(height: 1, indent: 16),
+            _buildBackgroundPollIntervalItem(),
+            const Divider(height: 1, indent: 16),
+            _buildBackgroundWatchdogIntervalItem(),
+          ]),
 
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -181,6 +187,131 @@ class _SettingsPageState extends State<SettingsPage> {
         );
       },
       contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+    );
+  }
+
+  Widget _buildBackgroundPollIntervalItem() {
+    final seconds = SettingsService.instance.backgroundPollIntervalSeconds;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('后台轮询间隔', style: TextStyle(fontSize: 16)),
+              Text(
+                '$seconds 秒',
+                style: const TextStyle(
+                  fontSize: 16,
+                  color: Color(0xFF07C160),
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              activeTrackColor: const Color(0xFF07C160),
+              inactiveTrackColor: const Color(0xFFE0E0E0),
+              thumbColor: const Color(0xFF07C160),
+              overlayColor: const Color(0x2007C160),
+              trackHeight: 4,
+            ),
+            child: Slider(
+              value: seconds.toDouble(),
+              min: 15,
+              max: 120,
+              divisions: 21,
+              label: '$seconds 秒',
+              onChanged: (value) async {
+                await SettingsService.instance
+                    .updateBackgroundPollIntervalSeconds(value.round());
+                if (mounted) setState(() {});
+              },
+            ),
+          ),
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '15秒',
+                style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+              ),
+              Text(
+                '120秒',
+                style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBackgroundWatchdogIntervalItem() {
+    final seconds = SettingsService.instance.backgroundWatchdogIntervalSeconds;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('保活自检间隔', style: TextStyle(fontSize: 16)),
+              Text(
+                '$seconds 秒',
+                style: const TextStyle(
+                  fontSize: 16,
+                  color: Color(0xFF07C160),
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              activeTrackColor: const Color(0xFF07C160),
+              inactiveTrackColor: const Color(0xFFE0E0E0),
+              thumbColor: const Color(0xFF07C160),
+              overlayColor: const Color(0x2007C160),
+              trackHeight: 4,
+            ),
+            child: Slider(
+              value: seconds.toDouble(),
+              min: 10,
+              max: 120,
+              divisions: 22,
+              label: '$seconds 秒',
+              onChanged: (value) async {
+                await SettingsService.instance
+                    .updateBackgroundWatchdogIntervalSeconds(value.round());
+                await BackgroundRuntimeService.applyEnabled(
+                  SettingsService.instance.backgroundRuntimeEnabled,
+                );
+                if (mounted) setState(() {});
+              },
+            ),
+          ),
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '10秒',
+                style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+              ),
+              Text(
+                '120秒',
+                style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 

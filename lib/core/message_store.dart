@@ -5,8 +5,7 @@ import 'package:crypto/crypto.dart';
 import '../models/message.dart';
 import '../services/sticker_service.dart';
 import '../services/storage_service.dart';
-import '../services/settings_service.dart';
-import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
 
 /// 消息存储层
 /// 聊天记录的唯一真实来源（Single Source of Truth）
@@ -148,6 +147,7 @@ class MessageStore extends ChangeNotifier {
     String? content,
     MessageType? type,
     String? quotedPreviewText,
+    MessageSendStatus? sendStatus,
   }) async {
     final messages = _messages[chatId];
     if (messages == null || messages.isEmpty) {
@@ -164,12 +164,25 @@ class MessageStore extends ChangeNotifier {
       content: content,
       type: type,
       quotedPreviewText: quotedPreviewText,
+      sendStatus: sendStatus,
     );
 
     await _saveMessages(chatId);
     _notifyMessageUpdate(chatId);
-    _syncUpdateMessageToBackend(chatId, messages[index]);
+    final shouldSyncBackend =
+        content != null || type != null || quotedPreviewText != null;
+    if (shouldSyncBackend) {
+      _syncUpdateMessageToBackend(chatId, messages[index]);
+    }
     return true;
+  }
+
+  Future<bool> updateMessageSendStatus(
+    String chatId,
+    String messageId,
+    MessageSendStatus sendStatus,
+  ) {
+    return updateMessage(chatId, messageId, sendStatus: sendStatus);
   }
 
   Future<void> _syncUpdateMessageToBackend(
@@ -177,21 +190,15 @@ class MessageStore extends ChangeNotifier {
     Message message,
   ) async {
     try {
-      final backendUrl = SettingsService.instance.backendUrl;
-      if (backendUrl.isEmpty) {
-        return;
-      }
-
-      await SecureBackendClient.put(
-        '$backendUrl/api/roles/$chatId/chats/messages/${message.id}',
-        {
-          'content': message.content,
-          'type': message.type.name,
-          'quote_content': message.quotedPreviewText,
-        },
-      );
+      await SecureWebSocketClient.instance.request('update_chat_message', {
+        'role_id': chatId,
+        'message_id': message.id,
+        'content': message.content,
+        'type': message.type.name,
+        'quote_content': message.quotedPreviewText,
+      });
     } catch (e) {
-      debugPrint('MessageStore: Backend update sync error: $e');
+      debugPrint('MessageStore: WebSocket update sync failed: $e');
     }
   }
 
@@ -205,11 +212,6 @@ class MessageStore extends ChangeNotifier {
     List<Message> visibleMessages,
   ) async {
     if (visibleMessages.isEmpty) {
-      return;
-    }
-
-    final backendUrl = SettingsService.instance.backendUrl;
-    if (backendUrl.isEmpty) {
       return;
     }
 
@@ -251,19 +253,15 @@ class MessageStore extends ChangeNotifier {
           : msg.senderId;
 
       try {
-        final resp = await SecureBackendClient.get(
-          '$backendUrl/api/roles/$roleId/emojis/$safeEmotion/random',
+        final data = await SecureWebSocketClient.instance.request(
+          'emoji_random',
+          {'role_id': roleId, 'emotion': safeEmotion},
         ).timeout(const Duration(seconds: 5));
-
-        if (resp.statusCode != 200) {
-          continue;
-        }
-        final data = resp.data;
         if (data['found'] != true || data['url'] == null) {
           continue;
         }
 
-        final stickerUrl = '$backendUrl${data['url']}';
+        final stickerUrl = data['url'].toString();
         final fixedContent = StickerService.createStickerMessageContent(
           safeEmotion,
           stickerUrl,
@@ -288,20 +286,13 @@ class MessageStore extends ChangeNotifier {
     String messageId,
   ) async {
     try {
-      final backendUrl = SettingsService.instance.backendUrl;
-      final response = await SecureBackendClient.delete(
-        '$backendUrl/api/roles/$chatId/chats/messages/$messageId',
-      );
-
-      if (response.statusCode == 200) {
-        debugPrint('MessageStore: Message $messageId deleted from backend');
-      } else {
-        debugPrint(
-          'MessageStore: Backend delete failed: ${response.statusCode}',
-        );
-      }
+      await SecureWebSocketClient.instance.request('delete_chat_message', {
+        'role_id': chatId,
+        'message_id': messageId,
+      });
+      debugPrint('MessageStore: Message $messageId deleted via websocket');
     } catch (e) {
-      debugPrint('MessageStore: Backend delete sync error: $e');
+      debugPrint('MessageStore: WebSocket delete sync error: $e');
     }
   }
 
@@ -462,22 +453,10 @@ class MessageStore extends ChangeNotifier {
 
   Future<void> _syncAllChatsFromBackendIfNeeded() async {
     try {
-      final backendUrl = SettingsService.instance.backendUrl;
-      if (backendUrl.isEmpty) {
-        return;
-      }
-
       final localMd5 = _calculateLocalChatsMd5();
-      final response = await SecureBackendClient.get(
-        '$backendUrl/api/chats/messages/snapshot?client_md5=$localMd5',
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode != 200 ||
-          response.data is! Map<String, dynamic>) {
-        return;
-      }
-
-      final data = response.data as Map<String, dynamic>;
+      final data = await SecureWebSocketClient.instance.request('chat_snapshot', {
+        'client_md5': localMd5,
+      });
       final needSync = data['need_sync'] == true;
       if (!needSync) {
         debugPrint('MessageStore: Chat snapshot MD5 matched, skip full sync');
@@ -535,13 +514,18 @@ class MessageStore extends ChangeNotifier {
         messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
         _messages[chatId] = messages;
         await _saveMessages(chatId);
+        _notifyMessageUpdate(chatId);
         syncedChats += 1;
       }
 
       debugPrint('MessageStore: Full chat sync completed, chats=$syncedChats');
     } catch (e) {
-      debugPrint('MessageStore: Full chat sync skipped due to error: $e');
+      debugPrint('MessageStore: WebSocket full sync skipped due to error: $e');
     }
+  }
+
+  Future<void> syncFromBackendSnapshot() async {
+    await _syncAllChatsFromBackendIfNeeded();
   }
 
   String _calculateLocalChatsMd5() {
@@ -581,38 +565,22 @@ class MessageStore extends ChangeNotifier {
   void _syncMessageToBackend(String chatId, Message message) {
     Future(() async {
       try {
-        final backendUrl = SettingsService.instance.backendUrl;
-        if (backendUrl.isEmpty) {
-          debugPrint('MessageStore: Backend URL empty, skip sync');
-          return;
-        }
-
-        debugPrint(
-          'MessageStore: Syncing to $backendUrl/api/roles/$chatId/chats/messages',
-        );
-
-        final response = await SecureBackendClient.post(
-          '$backendUrl/api/roles/$chatId/chats/messages',
-          {
+        await SecureWebSocketClient.instance.request('save_chat_message', {
+          'role_id': chatId,
+          'message': {
             'id': message.id,
             'content': message.content,
             'sender_id': message.senderId,
             'timestamp': message.timestamp.toIso8601String(),
-            'type': message.type.toString().split('.').last, // enum to string
+            'type': message.type.toString().split('.').last,
             'quote_id': message.quotedMessageId,
             'quote_content': message.quotedPreviewText,
           },
-        );
+        });
 
-        if (response.statusCode == 200) {
-          debugPrint('MessageStore: Synced message ${message.id} to backend ✓');
-        } else {
-          debugPrint(
-            'MessageStore: Failed to sync message: ${response.statusCode} ${response.data}',
-          );
-        }
+        debugPrint('MessageStore: Synced message ${message.id} via websocket ✓');
       } catch (e) {
-        debugPrint('MessageStore: Sync error: $e');
+        debugPrint('MessageStore: WebSocket sync error: $e');
       }
     });
   }
@@ -621,7 +589,12 @@ class MessageStore extends ChangeNotifier {
 
   /// 将消息列表转换为 API 历史格式
   static List<Map<String, String>> toApiHistory(List<Message> messages) {
-    return messages.map((m) {
+    return messages
+        .where(
+          (m) =>
+              !(m.senderId == 'me' && m.sendStatus == MessageSendStatus.failed),
+        )
+        .map((m) {
       final buffer = StringBuffer();
       // 添加引用内容
       if (m.hasQuote && m.quotedPreviewText != null) {

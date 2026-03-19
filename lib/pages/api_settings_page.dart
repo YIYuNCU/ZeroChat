@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
 
 /// API 设置页面
 /// 配置主聊天、意图识别、图像识别 API
@@ -16,6 +17,10 @@ class ApiSettingsPage extends StatefulWidget {
 class _ApiSettingsPageState extends State<ApiSettingsPage> {
   // 后端服务器
   late TextEditingController _backendUrlController;
+  late TextEditingController _backendTokenController;
+  late TextEditingController _backendEncryptionSecretController;
+  bool _backendTokenObscured = true;
+  bool _backendEncryptionSecretObscured = true;
   bool _isTestingConnection = false;
   bool? _connectionSuccess;
   String? _connectionError;
@@ -37,12 +42,30 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   List<String> _intentModels = [];
   bool _isLoadingIntentModels = false;
 
+  // 图像识别 API（全角色）
+  bool _visionEnabled = false;
+  late TextEditingController _visionUrlController;
+  late TextEditingController _visionKeyController;
+  late TextEditingController _visionModelController;
+  String _visionMode = 'standalone';
+  List<String> _visionModels = [];
+  bool _isLoadingVisionModels = false;
+
   @override
   void initState() {
     super.initState();
     final settings = SettingsService.instance;
 
     _backendUrlController = TextEditingController(text: settings.backendUrl);
+    _backendTokenController = TextEditingController(
+      text: settings.backendAuthToken,
+    );
+    _backendEncryptionSecretController = TextEditingController(
+      text: settings.backendEncryptionSecret,
+    );
+    _backendUrlController.addListener(_markConnectionDirty);
+    _backendTokenController.addListener(_markConnectionDirty);
+    _backendEncryptionSecretController.addListener(_markConnectionDirty);
 
     _chatUrlController = TextEditingController(text: settings.chatApiUrl);
     _chatKeyController = TextEditingController(text: settings.chatApiKey);
@@ -52,18 +75,41 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     _intentUrlController = TextEditingController(text: settings.intentApiUrl);
     _intentKeyController = TextEditingController(text: settings.intentApiKey);
     _intentModelController = TextEditingController(text: settings.intentModel);
+
+    _visionEnabled = settings.visionEnabled;
+    _visionUrlController = TextEditingController(text: settings.visionApiUrl);
+    _visionKeyController = TextEditingController(text: settings.visionApiKey);
+    _visionModelController = TextEditingController(text: settings.visionModel);
+    _visionMode = settings.visionMode;
   }
 
   @override
   void dispose() {
     _backendUrlController.dispose();
+    _backendTokenController.dispose();
+    _backendEncryptionSecretController.dispose();
     _chatUrlController.dispose();
     _chatKeyController.dispose();
     _chatModelController.dispose();
     _intentUrlController.dispose();
     _intentKeyController.dispose();
     _intentModelController.dispose();
+    _visionUrlController.dispose();
+    _visionKeyController.dispose();
+    _visionModelController.dispose();
     super.dispose();
+  }
+
+  void _markConnectionDirty() {
+    if (_isTestingConnection) {
+      return;
+    }
+    if (_connectionSuccess != null || _connectionError != null) {
+      setState(() {
+        _connectionSuccess = null;
+        _connectionError = null;
+      });
+    }
   }
 
   @override
@@ -96,6 +142,38 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               '服务器地址',
               _backendUrlController,
               'http://localhost:8000',
+            ),
+            _buildDivider(),
+            _buildTextField(
+              'Token',
+              _backendTokenController,
+              SecureBackendClient.defaultAuthToken,
+              obscure: _backendTokenObscured,
+              onToggleObscure: () {
+                setState(() {
+                  _backendTokenObscured = !_backendTokenObscured;
+                });
+              },
+            ),
+            _buildDivider(),
+            _buildTextField(
+              '加密密钥',
+              _backendEncryptionSecretController,
+              SecureBackendClient.defaultEncryptionSecret,
+              obscure: _backendEncryptionSecretObscured,
+              onToggleObscure: () {
+                setState(() {
+                  _backendEncryptionSecretObscured =
+                      !_backendEncryptionSecretObscured;
+                });
+              },
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                '说明：服务器 Token 与加密密钥不会通过前端同步，需在后端手动配置。',
+                style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+              ),
             ),
             _buildDivider(),
             _buildConnectionTestButton(),
@@ -155,6 +233,37 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
           const SizedBox(height: 20),
 
+          // 图像识别 API
+          _buildSectionTitle('图像识别 API'),
+          _buildSection([
+            _buildSwitchItem('启用图像识别模型', _visionEnabled, (v) {
+              setState(() => _visionEnabled = v);
+            }),
+            if (_visionEnabled) ...[
+              _buildDivider(),
+              _buildTextField(
+                'API URL',
+                _visionUrlController,
+                'https://api.openai.com/v1',
+              ),
+              _buildDivider(),
+              _buildTextField(
+                'API Key',
+                _visionKeyController,
+                'sk-xxx',
+                obscure: true,
+              ),
+              _buildDivider(),
+              _buildVisionModelFetchButton(),
+              _buildDivider(),
+              _buildVisionModelSelector(),
+              _buildDivider(),
+              _buildVisionModeSelector(),
+            ],
+          ]),
+
+          const SizedBox(height: 20),
+
           const SizedBox(height: 30),
         ],
       ),
@@ -183,6 +292,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     TextEditingController controller,
     String hint, {
     bool obscure = false,
+    VoidCallback? onToggleObscure,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -202,6 +312,16 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                 border: InputBorder.none,
                 isDense: true,
                 contentPadding: EdgeInsets.zero,
+                suffixIcon: onToggleObscure == null
+                    ? null
+                    : IconButton(
+                        onPressed: onToggleObscure,
+                        icon: Icon(
+                          obscure ? Icons.visibility_off : Icons.visibility,
+                          size: 18,
+                          color: const Color(0xFF888888),
+                        ),
+                      ),
               ),
               style: const TextStyle(fontSize: 15),
             ),
@@ -234,6 +354,44 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
   Widget _buildDivider() {
     return const Divider(height: 1, indent: 16);
+  }
+
+  Widget _buildVisionModeSelector() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('运行模式', style: TextStyle(fontSize: 15)),
+          ),
+          Expanded(
+            child: DropdownButtonFormField<String>(
+              value: _visionMode == 'pre_model' ? 'pre_model' : 'standalone',
+              decoration: const InputDecoration(
+                border: InputBorder.none,
+                isDense: true,
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: 'standalone',
+                  child: Text('单独模型（直接输出）', style: TextStyle(fontSize: 14)),
+                ),
+                DropdownMenuItem(
+                  value: 'pre_model',
+                  child: Text('前置模型（识图后交给聊天模型）', style: TextStyle(fontSize: 14)),
+                ),
+              ],
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() => _visionMode = value);
+                }
+              },
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildConnectionTestButton() {
@@ -287,6 +445,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
   Future<void> _testConnection() async {
     final url = _backendUrlController.text.trim();
+    final token = _backendTokenController.text.trim();
+    final encryptionSecret = _backendEncryptionSecretController.text.trim();
     if (url.isEmpty) {
       setState(() {
         _connectionSuccess = false;
@@ -295,6 +455,12 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       return;
     }
 
+    // 测试连接时使用当前输入的安全配置
+    SecureBackendClient.configureSecurity(
+      authToken: token,
+      encryptionSecret: encryptionSecret,
+    );
+
     setState(() {
       _isTestingConnection = true;
       _connectionSuccess = null;
@@ -302,28 +468,34 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     });
 
     try {
-      debugPrint('Testing connection to: $url/api/health');
-      final response = await SecureBackendClient.get(
-        '$url/api/health',
-      ).timeout(const Duration(seconds: 5));
+      await _saveSettingsLocalOnly();
+      await SecureWebSocketClient.instance.close();
+      final response = await SecureWebSocketClient.instance.request(
+        'health',
+        const <String, dynamic>{},
+        timeout: const Duration(seconds: 5),
+      );
 
-      if (response.statusCode == 200) {
+      if (response['status']?.toString() == 'healthy') {
+        await _saveSettingsLocalOnly();
+        final synced = await SettingsService.instance.syncApiSettingsToBackend();
+
         setState(() {
-          _connectionSuccess = true;
-          _connectionError = null;
+          _connectionSuccess = synced;
+          _connectionError = synced ? null : '连接成功，但设置同步失败';
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✅ 连接成功'),
-              backgroundColor: Color(0xFF07C160),
+            SnackBar(
+              content: Text(synced ? '✅ 连接成功，设置已加密同步' : '⚠️ 连接成功，但设置同步失败'),
+              backgroundColor: synced ? const Color(0xFF07C160) : Colors.orange,
             ),
           );
         }
       } else {
         setState(() {
           _connectionSuccess = false;
-          _connectionError = 'HTTP ${response.statusCode}';
+          _connectionError = '后端健康检查失败';
         });
       }
     } catch (e) {
@@ -343,25 +515,61 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
   /// 获取可用模型列表
   Future<void> _fetchModels() async {
+    final url = _chatUrlController.text.trim();
+    final key = _chatKeyController.text.trim();
+
+    if (url.isEmpty || key.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL 和 API Key')));
+      return;
+    }
+
     setState(() => _isLoadingModels = true);
 
     try {
-      final backendUrl = _backendUrlController.text.trim();
-      final response = await SecureBackendClient.get(
-        '$backendUrl/api/settings/models',
-      );
+      var modelsUrl = url;
+      if (!modelsUrl.endsWith('/')) modelsUrl += '/';
+      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
+      modelsUrl += 'models';
+
+      final response = await SecureBackendClient.getRaw(
+        modelsUrl,
+        headers: {
+          'Authorization': 'Bearer $key',
+          'Content-Type': 'application/json',
+        },
+        includeAuth: false,
+      ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
-        final data = response.data;
-        if (data['success'] == true) {
-          final models = List<String>.from(data['models'] ?? []);
-          setState(() {
-            _availableModels = models;
-          });
+        final data = jsonDecode(response.body);
+        final models =
+            (data['data'] as List).map((m) => m['id'].toString()).toList()
+              ..sort();
+
+        setState(() {
+          _availableModels = models;
+          if (models.isNotEmpty && !_availableModels.contains(_chatModelController.text)) {
+            _chatModelController.text = models.first;
+          }
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
         }
+      } else {
+        throw Exception('HTTP ${response.statusCode}');
       }
     } catch (e) {
-      debugPrint('Failed to fetch models: $e');
+      debugPrint('Failed to fetch chat models: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
+      }
     } finally {
       setState(() => _isLoadingModels = false);
     }
@@ -471,6 +679,90 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                 side: const BorderSide(color: Color(0xFF07C160)),
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 图像识别模型获取按钮
+  Widget _buildVisionModelFetchButton() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('模型列表', style: TextStyle(fontSize: 16)),
+          ),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _isLoadingVisionModels ? null : _fetchVisionModels,
+              icon: _isLoadingVisionModels
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.download, size: 18),
+              label: Text(_isLoadingVisionModels ? '获取中...' : '获取模型列表'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF07C160),
+                side: const BorderSide(color: Color(0xFF07C160)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 图像识别模型选择器
+  Widget _buildVisionModelSelector() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('模型', style: TextStyle(fontSize: 16)),
+          ),
+          Expanded(
+            child: _visionModels.isEmpty
+                ? TextField(
+                    controller: _visionModelController,
+                    decoration: const InputDecoration(
+                      hintText: 'gpt-4o',
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                    style: const TextStyle(fontSize: 16),
+                  )
+                : DropdownButtonFormField<String>(
+                    value: _visionModels.contains(_visionModelController.text)
+                        ? _visionModelController.text
+                        : null,
+                    decoration: const InputDecoration(
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                    hint: const Text('选择模型'),
+                    items: _visionModels.map((model) {
+                      return DropdownMenuItem(
+                        value: model,
+                        child: Text(
+                          model,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                      );
+                    }).toList(),
+                    onChanged: (value) {
+                      if (value != null) {
+                        _visionModelController.text = value;
+                      }
+                    },
+                  ),
           ),
         ],
       ),
@@ -589,7 +881,93 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     }
   }
 
+  /// 获取图像识别模型列表
+  Future<void> _fetchVisionModels() async {
+    final url = _visionUrlController.text.trim();
+    final key = _visionKeyController.text.trim();
+
+    if (url.isEmpty || key.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL 和 API Key')));
+      return;
+    }
+
+    setState(() => _isLoadingVisionModels = true);
+
+    try {
+      var modelsUrl = url;
+      if (!modelsUrl.endsWith('/')) modelsUrl += '/';
+      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
+      modelsUrl += 'models';
+
+      final response = await SecureBackendClient.getRaw(
+        modelsUrl,
+        headers: {
+          'Authorization': 'Bearer $key',
+          'Content-Type': 'application/json',
+        },
+        includeAuth: false,
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final models =
+            (data['data'] as List).map((m) => m['id'].toString()).toList()
+              ..sort();
+
+        setState(() {
+          _visionModels = models;
+          if (models.isNotEmpty && !_visionModels.contains(_visionModelController.text)) {
+            _visionModelController.text = models.first;
+          }
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
+        }
+      } else {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Fetch vision models error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
+      }
+    } finally {
+      setState(() => _isLoadingVisionModels = false);
+    }
+  }
+
   Future<void> _saveSettings() async {
+    await _saveSettingsLocalOnly();
+
+    final synced = await SettingsService.instance.syncApiSettingsToBackend();
+    if (synced) {
+      if (mounted) {
+        setState(() {
+          _connectionSuccess = true;
+          _connectionError = null;
+        });
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(synced ? '设置已保存并同步' : '设置已保存（后端同步失败）'),
+          duration: const Duration(seconds: 1),
+        ),
+      );
+      Navigator.pop(context);
+    }
+  }
+
+  Future<void> _saveSettingsLocalOnly() async {
     final settings = SettingsService.instance;
 
     // 保存后端服务器地址
@@ -602,6 +980,12 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       model: _chatModelController.text.trim(),
     );
 
+    // 保存后端鉴权与加密配置
+    await settings.updateBackendSecurity(
+      authToken: _backendTokenController.text.trim(),
+      encryptionSecret: _backendEncryptionSecretController.text.trim(),
+    );
+
     // 保存意图识别 API
     await settings.updateIntentApi(
       enabled: _intentEnabled,
@@ -610,18 +994,13 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       model: _intentModelController.text.trim(),
     );
 
-    // 自动同步到后端
-    final synced = await settings.syncApiSettingsToBackend();
-    debugPrint('API settings synced to backend: $synced');
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(synced ? '设置已保存并同步' : '设置已保存（后端同步失败）'),
-          duration: const Duration(seconds: 1),
-        ),
-      );
-      Navigator.pop(context);
-    }
+    // 保存图像识别 API
+    await settings.updateVisionApi(
+      enabled: _visionEnabled,
+      url: _visionUrlController.text.trim(),
+      key: _visionKeyController.text.trim(),
+      model: _visionModelController.text.trim(),
+      mode: _visionMode,
+    );
   }
 }

@@ -1,12 +1,14 @@
 import 'dart:async';
+import 'dart:ui';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'notification_service.dart';
 import 'role_service.dart';
-import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 import 'settings_service.dart';
 import 'storage_service.dart';
 
@@ -17,12 +19,27 @@ class BackgroundRuntimeService {
 
   static final FlutterBackgroundService _service = FlutterBackgroundService();
   static bool _initialized = false;
+  static bool _desiredEnabled = false;
+  static bool _watchdogRecovering = false;
+  static Timer? _serviceWatchdogTimer;
 
   static const String _eventAppForeground = 'appForeground';
   static const String _eventAppBackground = 'appBackground';
   static const String _eventRequestStart = 'pendingRequestStart';
   static const String _eventRequestComplete = 'pendingRequestComplete';
   static const Duration _requestTimeout = Duration(seconds: 45);
+  static const Duration _backgroundWsKeepAliveInterval = Duration(minutes: 2);
+  static const Duration _networkSwitchReconnectDebounce = Duration(seconds: 2);
+
+  static Duration _resolveServiceWatchdogInterval() {
+    final seconds = SettingsService.instance.backgroundWatchdogIntervalSeconds;
+    return Duration(seconds: seconds.clamp(10, 120));
+  }
+
+  static Duration _resolveBackgroundTaskPollInterval() {
+    final seconds = SettingsService.instance.backgroundPollIntervalSeconds;
+    return Duration(seconds: seconds.clamp(15, 120));
+  }
 
   static Future<void> init({required bool enabled}) async {
     if (defaultTargetPlatform != TargetPlatform.android) {
@@ -47,12 +64,21 @@ class BackgroundRuntimeService {
       _initialized = true;
     }
 
+    _desiredEnabled = enabled;
     await applyEnabled(enabled);
+
+    if (_desiredEnabled) {
+      _startServiceWatchdogIfNeeded();
+    } else {
+      _stopServiceWatchdog();
+    }
+
     debugPrint('BackgroundRuntimeService: Initialized, enabled=$enabled');
   }
 
   static Future<void> applyEnabled(bool enabled) async {
     if (defaultTargetPlatform != TargetPlatform.android) return;
+    _desiredEnabled = enabled;
 
     try {
       final isRunning = await _service.isRunning();
@@ -73,22 +99,70 @@ class BackgroundRuntimeService {
         if (!isRunning) {
           await _service.startService();
         }
+        _startServiceWatchdogIfNeeded();
         return;
       }
 
       if (isRunning) {
         _service.invoke('stopService');
       }
+      _stopServiceWatchdog();
     } catch (e, st) {
       debugPrint('BackgroundRuntimeService: applyEnabled failed: $e');
       debugPrint('$st');
     }
   }
 
+  static void _startServiceWatchdogIfNeeded() {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    if (_serviceWatchdogTimer != null) {
+      return;
+    }
+
+    final watchdogInterval = _resolveServiceWatchdogInterval();
+    _serviceWatchdogTimer = Timer.periodic(watchdogInterval, (
+      timer,
+    ) async {
+      if (!_desiredEnabled || !_initialized) {
+        return;
+      }
+      if (_watchdogRecovering) {
+        return;
+      }
+
+      try {
+        final running = await _service.isRunning();
+        if (running) {
+          return;
+        }
+
+        _watchdogRecovering = true;
+        debugPrint('BackgroundRuntimeService: watchdog detected stopped service, recovering...');
+        await applyEnabled(true);
+      } catch (e) {
+        debugPrint('BackgroundRuntimeService: watchdog recovery failed: $e');
+      } finally {
+        _watchdogRecovering = false;
+      }
+    });
+  }
+
+  static void _stopServiceWatchdog() {
+    _serviceWatchdogTimer?.cancel();
+    _serviceWatchdogTimer = null;
+  }
+
   static void notifyAppLifecycle({required bool inForeground}) {
     if (!_initialized || defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
+
+    if (!inForeground && _desiredEnabled) {
+      unawaited(applyEnabled(true));
+    }
+
     _service.invoke(inForeground ? _eventAppForeground : _eventAppBackground);
   }
 
@@ -118,11 +192,18 @@ class BackgroundRuntimeService {
   @pragma('vm:entry-point')
   static void _onStart(ServiceInstance service) {
     WidgetsFlutterBinding.ensureInitialized();
+    DartPluginRegistrant.ensureInitialized();
 
     var appInForeground = false;
     var bootstrapReady = false;
     final pendingRequests = <String, _PendingRequestState>{};
     Timer? requestWatchTimer;
+    Timer? backgroundTaskPollTimer;
+    Timer? websocketKeepAliveTimer;
+    StreamSubscription<dynamic>? connectivitySubscription;
+    Timer? connectivityReconnectTimer;
+    final notifiedTaskMessageIds = <String>{};
+    var taskNotifyBaseline = DateTime.now();
 
     if (service is AndroidServiceInstance) {
       service.setAsForegroundService();
@@ -169,13 +250,164 @@ class BackgroundRuntimeService {
       });
     }
 
+    void stopBackgroundTaskPoll() {
+      backgroundTaskPollTimer?.cancel();
+      backgroundTaskPollTimer = null;
+    }
+
+    void stopBackgroundWebsocketKeepAlive() {
+      websocketKeepAliveTimer?.cancel();
+      websocketKeepAliveTimer = null;
+    }
+
+    bool hasNetwork(dynamic result) {
+      if (result is ConnectivityResult) {
+        return result != ConnectivityResult.none;
+      }
+      if (result is List<ConnectivityResult>) {
+        return result.any((item) => item != ConnectivityResult.none);
+      }
+      if (result is Iterable) {
+        return result.any((item) => item != ConnectivityResult.none);
+      }
+      return true;
+    }
+
+    Future<void> checkAndReconnectWebsocketOnNetworkSwitch() async {
+      if (!bootstrapReady) {
+        return;
+      }
+
+      if (!SecureWebSocketClient.instance.isConnected) {
+        try {
+          await SecureWebSocketClient.instance.ensureConnected();
+        } catch (e) {
+          debugPrint(
+            'BackgroundRuntimeService: reconnect failed after network switch: $e',
+          );
+        }
+        return;
+      }
+
+      try {
+        await SecureWebSocketClient.instance.request(
+          'health',
+          const <String, dynamic>{},
+          timeout: const Duration(seconds: 4),
+        );
+      } catch (e) {
+        debugPrint(
+          'BackgroundRuntimeService: connection check failed after network switch, reconnecting: $e',
+        );
+        try {
+          await SecureWebSocketClient.instance.close();
+          await SecureWebSocketClient.instance.ensureConnected();
+        } catch (e2) {
+          debugPrint(
+            'BackgroundRuntimeService: websocket reconnect failed after check: $e2',
+          );
+        }
+      }
+    }
+
+    void startConnectivityWatch() {
+      connectivitySubscription?.cancel();
+      connectivitySubscription = Connectivity().onConnectivityChanged.listen(
+        (result) {
+          if (!hasNetwork(result)) {
+            return;
+          }
+
+          connectivityReconnectTimer?.cancel();
+          connectivityReconnectTimer = Timer(
+            _networkSwitchReconnectDebounce,
+            () {
+              unawaited(checkAndReconnectWebsocketOnNetworkSwitch());
+            },
+          );
+        },
+        onError: (Object e, StackTrace st) {
+          debugPrint('BackgroundRuntimeService: connectivity watch error: $e');
+          debugPrint('$st');
+        },
+      );
+    }
+
+    void startBackgroundWebsocketKeepAliveIfNeeded() {
+      if (websocketKeepAliveTimer != null) {
+        return;
+      }
+
+      websocketKeepAliveTimer = Timer.periodic(
+        _backgroundWsKeepAliveInterval,
+        (timer) async {
+          if (appInForeground || !bootstrapReady) {
+            return;
+          }
+
+          try {
+            await SecureWebSocketClient.instance.ensureConnected();
+            await SecureWebSocketClient.instance.request(
+              'health',
+              const <String, dynamic>{},
+              timeout: const Duration(seconds: 6),
+            );
+          } catch (e) {
+            debugPrint('BackgroundRuntimeService: websocket keepalive failed: $e');
+          }
+        },
+      );
+    }
+
+    void startBackgroundTaskPollIfNeeded() {
+      if (backgroundTaskPollTimer != null) {
+        return;
+      }
+      final pollInterval = _resolveBackgroundTaskPollInterval();
+      backgroundTaskPollTimer = Timer.periodic(pollInterval, (
+        timer,
+      ) async {
+        if (appInForeground || !bootstrapReady) {
+          return;
+        }
+
+        taskNotifyBaseline = await _pollTaskMessagesAndNotify(
+          baseline: taskNotifyBaseline,
+          notifiedTaskMessageIds: notifiedTaskMessageIds,
+        );
+      });
+    }
+
     service.on(_eventAppForeground).listen((event) {
       appInForeground = true;
+      stopBackgroundTaskPoll();
+      stopBackgroundWebsocketKeepAlive();
     });
 
     service.on(_eventAppBackground).listen((event) {
       appInForeground = false;
+      // 切后台后开始持续检查后端任务消息，避免错过提醒
+      taskNotifyBaseline = DateTime.now();
+      startBackgroundTaskPollIfNeeded();
+      startBackgroundWebsocketKeepAliveIfNeeded();
+      unawaited(() async {
+        if (!bootstrapReady) {
+          return;
+        }
+        try {
+          await SecureWebSocketClient.instance.ensureConnected();
+          await SecureWebSocketClient.instance.request(
+            'health',
+            const <String, dynamic>{},
+            timeout: const Duration(seconds: 6),
+          );
+        } catch (e) {
+          debugPrint('BackgroundRuntimeService: immediate keepalive failed: $e');
+        }
+      }());
     });
+
+    startConnectivityWatch();
 
     service.on(_eventRequestStart).listen((event) {
       final args = event ?? const <String, dynamic>{};
@@ -210,6 +442,11 @@ class BackgroundRuntimeService {
 
     service.on('stopService').listen((event) {
       requestWatchTimer?.cancel();
+      backgroundTaskPollTimer?.cancel();
+      websocketKeepAliveTimer?.cancel();
+      connectivityReconnectTimer?.cancel();
+      connectivitySubscription?.cancel();
+      unawaited(SecureWebSocketClient.instance.close());
       service.stopSelf();
     });
 
@@ -224,23 +461,89 @@ class BackgroundRuntimeService {
     });
   }
 
+  static Future<DateTime> _pollTaskMessagesAndNotify({
+    required DateTime baseline,
+    required Set<String> notifiedTaskMessageIds,
+  }) async {
+    var latestSeen = baseline;
+
+    try {
+      final data = await SecureWebSocketClient.instance.request('chat_snapshot', {
+        'client_md5': 'bg_task_poll',
+      });
+      if (data['need_sync'] != true) {
+        return latestSeen;
+      }
+      final chats = data['chats'];
+      if (chats is! Map) {
+        return latestSeen;
+      }
+
+      for (final entry in chats.entries) {
+        final chatId = entry.key.toString();
+        final rawList = entry.value;
+        if (rawList is! List) {
+          continue;
+        }
+
+        for (final item in rawList) {
+          if (item is! Map) {
+            continue;
+          }
+
+          final map = Map<String, dynamic>.from(item);
+          final messageId = map['id']?.toString() ?? '';
+          final senderId = map['sender_id']?.toString() ?? '';
+          final content = map['content']?.toString() ?? '';
+          final timestamp =
+              DateTime.tryParse(map['timestamp']?.toString() ?? '') ??
+              DateTime.fromMillisecondsSinceEpoch(0);
+
+          if (timestamp.isAfter(latestSeen)) {
+            latestSeen = timestamp;
+          }
+
+          // 只处理后端任务触发写入的消息，避免与正常聊天通知重复
+          final isTaskMessage = messageId.contains('_task_');
+          if (!isTaskMessage) {
+            continue;
+          }
+          if (senderId == 'me' || content.isEmpty) {
+            continue;
+          }
+          if (timestamp.isBefore(baseline.subtract(const Duration(seconds: 1)))) {
+            continue;
+          }
+          if (notifiedTaskMessageIds.contains(messageId)) {
+            continue;
+          }
+
+          final role = RoleService.getRoleById(chatId);
+          await NotificationService.instance.showMessageNotification(
+            chatId: chatId,
+            senderName: role?.name ?? 'AI',
+            message: content,
+          );
+          notifiedTaskMessageIds.add(messageId);
+        }
+      }
+    } catch (e) {
+      debugPrint('BackgroundRuntimeService: task websocket sync failed: $e');
+    }
+
+    return latestSeen;
+  }
+
   static Future<void> _waitPendingRequestsAndNotify({
     required Map<String, _PendingRequestState> pendingRequests,
   }) async {
     try {
-      final backendUrl = SettingsService.instance.backendUrl;
-      if (backendUrl.isEmpty) {
+      final data = await SecureWebSocketClient.instance.request('chat_snapshot', {
+        'client_md5': 'bg_poll',
+      });
+      if (data['need_sync'] != true) {
         return;
       }
-
-      final response = await SecureBackendClient.get(
-        '$backendUrl/api/chats/messages/snapshot?client_md5=bg_poll',
-      ).timeout(const Duration(seconds: 8));
-      if (!response.isSuccess || response.data is! Map<String, dynamic>) {
-        return;
-      }
-
-      final data = response.data as Map<String, dynamic>;
       final chats = data['chats'];
       if (chats is! Map) {
         return;
@@ -308,7 +611,7 @@ class BackgroundRuntimeService {
         pendingRequests.remove(id);
       }
     } catch (e) {
-      debugPrint('BackgroundRuntimeService: waiting request failed: $e');
+      debugPrint('BackgroundRuntimeService: pending websocket sync failed: $e');
     }
   }
 }

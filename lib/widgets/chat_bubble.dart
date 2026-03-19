@@ -29,6 +29,9 @@ class ChatBubble extends StatelessWidget {
   /// 删除回调
   final VoidCallback? onDelete;
 
+  /// 重发回调（发送失败时）
+  final VoidCallback? onRetry;
+
   const ChatBubble({
     super.key,
     required this.message,
@@ -40,6 +43,7 @@ class ChatBubble extends StatelessWidget {
     this.onQuote,
     this.onFavorite,
     this.onDelete,
+    this.onRetry,
   });
 
   @override
@@ -64,6 +68,20 @@ class ChatBubble extends StatelessWidget {
               children: [
                 // 接收方气泡尖角（左侧）
                 if (!isSender && !_isSticker) _buildBubbleArrow(isLeft: true),
+
+                if (isSender && message.sendStatus == MessageSendStatus.failed)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8, top: 8),
+                    child: GestureDetector(
+                      onTap: onRetry,
+                      behavior: HitTestBehavior.opaque,
+                      child: const Icon(
+                        Icons.error,
+                        color: Colors.red,
+                        size: 18,
+                      ),
+                    ),
+                  ),
 
                 // 气泡主体（长按菜单）
                 Flexible(
@@ -239,11 +257,22 @@ class ChatBubble extends StatelessWidget {
   }
 
   String _resolveStickerImagePath(String rawPath) {
+    if (rawPath.startsWith('/files/emojis/') ||
+        rawPath.startsWith('/files/user-emojis/')) {
+      final base = SettingsService.instance.backendUrl.trim();
+      if (base.isNotEmpty) {
+        return '${base.replaceAll(RegExp(r'/+$'), '')}$rawPath';
+      }
+    }
+
     if (rawPath.startsWith('/api/emojis/') ||
         rawPath.startsWith('/api/user-emojis/')) {
       final base = SettingsService.instance.backendUrl.trim();
       if (base.isNotEmpty) {
-        return '${base.replaceAll(RegExp(r'/+$'), '')}$rawPath';
+        final normalized = rawPath
+            .replaceFirst('/api/emojis/', '/files/emojis/')
+            .replaceFirst('/api/user-emojis/', '/files/user-emojis/');
+        return '${base.replaceAll(RegExp(r'/+$'), '')}$normalized';
       }
     }
     return rawPath;
@@ -286,11 +315,18 @@ class ChatBubble extends StatelessWidget {
     }
 
     final path = uri.path;
-    if (!(path.startsWith('/api/emojis/') || path.startsWith('/api/user-emojis/'))) {
+    if (!(path.startsWith('/api/emojis/') ||
+        path.startsWith('/api/user-emojis/') ||
+        path.startsWith('/files/emojis/') ||
+        path.startsWith('/files/user-emojis/'))) {
       return null;
     }
 
-    var candidate = '${base.replaceAll(RegExp(r'/+$'), '')}$path';
+    final normalizedPath = path
+        .replaceFirst('/api/emojis/', '/files/emojis/')
+        .replaceFirst('/api/user-emojis/', '/files/user-emojis/');
+
+    var candidate = '${base.replaceAll(RegExp(r'/+$'), '')}$normalizedPath';
     if (uri.hasQuery) {
       candidate = '$candidate?${uri.query}';
     }

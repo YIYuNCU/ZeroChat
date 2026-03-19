@@ -251,6 +251,21 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     _scrollToBottom();
   }
 
+  void _retryFailedMessage(Message message) {
+    if (message.senderId != 'me' ||
+        message.sendStatus != MessageSendStatus.failed) {
+      return;
+    }
+    if (ChatController.instance.isProcessing(widget.chatId)) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('正在处理消息，请稍后')));
+      return;
+    }
+    ChatController.instance.retryFailedMessage(widget.chatId, message.id);
+    _scrollToBottom();
+  }
+
   /// 设置引用状态
   void _setQuote(Message message) {
     final senderName = message.senderId == 'me'
@@ -927,6 +942,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       onLongPress: () => _enterMultiSelectMode(message),
       onQuote: () => _setQuote(message),
       onDelete: () => _deleteMessage(message),
+      onRetry: () => _retryFailedMessage(message),
     );
   }
 }

@@ -1,9 +1,12 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'package:image/image.dart' as img;
 import '../models/role.dart';
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 
 /// API 服务
 /// 用于调用第三方 AI API（支持 OpenAI 兼容接口）
@@ -254,31 +257,31 @@ class ApiService {
     Map<String, dynamic>? context,
   }) async {
     try {
-      final response =
-          await SecureBackendClient.post('$_backendUrl/api/ai/event', {
-            'role_id': roleId,
-            'event_type': eventType,
-            'content': content,
-            'context': context ?? {},
-          });
+      final wsData = await SecureWebSocketClient.instance.request('ai_event', {
+        'event': {
+          'role_id': roleId,
+          'event_type': eventType,
+          'content': content,
+          'context': context ?? <String, dynamic>{},
+        },
+      });
 
-      debugPrint('ApiService: Backend AI call - $eventType for $roleId');
-
-      if (response.statusCode == 200) {
-        final data = response.data;
-        if (data['success'] == true && data['content'] != null) {
-          return ApiResponse.success(data['content']);
-        } else if (data['action'] == 'ignore') {
-          return ApiResponse.error('AI chose to ignore');
-        } else {
-          return ApiResponse.error(data['error'] ?? 'Unknown error');
-        }
-      } else {
-        return ApiResponse.error('Backend error: ${response.statusCode}');
+      debugPrint('ApiService: Backend AI call via websocket - $eventType for $roleId');
+      if (wsData['success'] == true && wsData['content'] != null) {
+        return ApiResponse.success(wsData['content'].toString());
       }
+      if (wsData['action']?.toString() == 'ignore') {
+        return ApiResponse.error('AI chose to ignore');
+      }
+      final wsError = wsData['error']?.toString();
+      if (wsError != null && wsError.isNotEmpty) {
+        return ApiResponse.error(wsError);
+      }
+
+      return ApiResponse.error('Unknown backend response');
     } catch (e) {
-      debugPrint('ApiService: Backend call failed: $e');
-      return ApiResponse.error('后端服务不可用: $e');
+      debugPrint('ApiService: websocket backend call failed: $e');
+      return ApiResponse.error('后端WebSocket不可用: $e');
     }
   }
 
@@ -300,10 +303,12 @@ class ApiService {
   /// 检查后端是否可用
   static Future<bool> isBackendAvailable() async {
     try {
-      final response = await SecureBackendClient.get(
-        '$_backendUrl/api/health',
-      ).timeout(const Duration(seconds: 3));
-      return response.statusCode == 200;
+      final response = await SecureWebSocketClient.instance.request(
+        'health',
+        const <String, dynamic>{},
+        timeout: const Duration(seconds: 3),
+      );
+      return response['status']?.toString() == 'healthy';
     } catch (e) {
       return false;
     }
@@ -314,32 +319,28 @@ class ApiService {
     required String imagePath,
     required String userPrompt,
     required String rolePersona,
+    String? roleId,
   }) async {
     try {
       // 读取图片并转为 base64
       final file = await _readImageFile(imagePath);
-      final base64Image = base64Encode(file);
+      final compressed = _compressImageBytes(file, imagePath);
+      final base64Image = base64Encode(compressed.$1);
+      final mimeType = compressed.$2;
 
-      // 判断图片类型
-      final ext = imagePath.split('.').last.toLowerCase();
-      final mimeType = ext == 'png' ? 'image/png' : 'image/jpeg';
-
-      // 调用后端 vision API
-      final response =
-          await SecureBackendClient.post('$_backendUrl/api/chat/vision', {
-            'image_base64': base64Image,
-            'mime_type': mimeType,
-            'user_prompt': userPrompt,
-            'system_prompt': rolePersona,
-          }).timeout(const Duration(seconds: 60));
-
-      if (response.statusCode == 200) {
-        final data = response.data;
-        return data['reply'] ?? '图片识别失败';
-      } else {
-        debugPrint('Vision API error: ${response.statusCode} ${response.data}');
-        return '图片识别失败：服务器错误 ${response.statusCode}';
-      }
+      final response = await SecureWebSocketClient.instance.request(
+        'chat_vision',
+        {
+          'image_base64': base64Image,
+          'mime_type': mimeType,
+          'user_prompt': userPrompt,
+          'system_prompt': rolePersona,
+          'role_id': roleId,
+          'run_mode': SettingsService.instance.visionMode,
+        },
+        timeout: const Duration(seconds: 60),
+      );
+      return response['reply']?.toString() ?? '图片识别失败';
     } catch (e) {
       debugPrint('chatWithImage error: $e');
       return '图片识别失败：$e';
@@ -350,6 +351,36 @@ class ApiService {
   static Future<List<int>> _readImageFile(String path) async {
     final file = File(path);
     return await file.readAsBytes();
+  }
+
+  static (List<int>, String) _compressImageBytes(List<int> rawBytes, String imagePath) {
+    // 小图直接透传，避免不必要的处理
+    const smallImageThreshold = 350 * 1024;
+    final ext = imagePath.split('.').last.toLowerCase();
+    final fallbackMimeType = ext == 'png' ? 'image/png' : 'image/jpeg';
+    if (rawBytes.length <= smallImageThreshold) {
+      return (rawBytes, fallbackMimeType);
+    }
+
+    try {
+      final decoded = img.decodeImage(Uint8List.fromList(rawBytes));
+      if (decoded == null) {
+        return (rawBytes, fallbackMimeType);
+      }
+
+      // 约束最大边，降低上传体积与后端处理时延
+      const maxSide = 1280;
+      final resized = (decoded.width > maxSide || decoded.height > maxSide)
+          ? img.copyResize(decoded, width: decoded.width >= decoded.height ? maxSide : null, height: decoded.height > decoded.width ? maxSide : null)
+          : decoded;
+
+      // 统一转 jpeg，质量折中到 78，显著减少体积
+      final jpgBytes = img.encodeJpg(resized, quality: 78);
+      return (jpgBytes, 'image/jpeg');
+    } catch (e) {
+      debugPrint('ApiService: image compress failed, fallback to raw bytes: $e');
+      return (rawBytes, fallbackMimeType);
+    }
   }
 }
 

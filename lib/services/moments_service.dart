@@ -3,8 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:crypto/crypto.dart';
 import '../models/moment_post.dart';
 import 'storage_service.dart';
-import 'settings_service.dart';
-import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
 
 /// 朋友圈服务
 /// 管理朋友圈动态的增删查改
@@ -152,13 +151,11 @@ class MomentsService extends ChangeNotifier {
 
   Future<String?> _fetchBackendHash({int limit = 50}) async {
     try {
-      final secureResponse = await SecureBackendClient.get(
-        '$_backendUrl/api/moments/hash?limit=$limit',
+      final response = await SecureWebSocketClient.instance.request(
+        'moments_hash',
+        {'limit': limit},
       );
-      final response = secureResponse.isSuccess
-          ? secureResponse.data as Map<String, dynamic>?
-          : null;
-      final hash = response?['hash']?.toString();
+      final hash = response['hash']?.toString();
       if (hash != null && hash.isNotEmpty) {
         return hash;
       }
@@ -247,13 +244,11 @@ class MomentsService extends ChangeNotifier {
   /// 删除动态
   Future<void> deletePost(String postId) async {
     try {
-      final response = await SecureBackendClient.delete(
-        '$_backendUrl/api/moments/$postId',
-      );
-      if (response.isSuccess) {
-        await fetchFromBackend();
-        debugPrint('MomentsService: Deleted post $postId from backend');
-      }
+      await SecureWebSocketClient.instance.request('moments_delete', {
+        'post_id': postId,
+      });
+      await fetchFromBackend();
+      debugPrint('MomentsService: Deleted post $postId from backend');
     } catch (e) {
       debugPrint('MomentsService: Delete post failed: $e');
     }
@@ -268,14 +263,16 @@ class MomentsService extends ChangeNotifier {
 
     try {
       if (!post.isLikedByMe) {
-        await SecureBackendClient.post(
-          '$_backendUrl/api/moments/$postId/like?user_id=me&user_name=我',
-          {},
-        );
+        await SecureWebSocketClient.instance.request('moments_like', {
+          'post_id': postId,
+          'user_id': 'me',
+          'user_name': '我',
+        });
       } else {
-        await SecureBackendClient.delete(
-          '$_backendUrl/api/moments/$postId/like/me',
-        );
+        await SecureWebSocketClient.instance.request('moments_unlike', {
+          'post_id': postId,
+          'user_id': 'me',
+        });
       }
       await fetchFromBackend();
     } catch (e) {
@@ -289,16 +286,15 @@ class MomentsService extends ChangeNotifier {
     if (post == null || post.likedBy.contains(roleId)) return;
 
     try {
-      final response = await SecureBackendClient.post(
-        '$_backendUrl/api/moments/$postId/like?user_id=$roleId&user_name=$roleName',
-        {},
-      );
-      if (response.isSuccess) {
-        if (post.authorId == 'me') {
-          _unreadCount++;
-        }
-        await fetchFromBackend();
+      await SecureWebSocketClient.instance.request('moments_like', {
+        'post_id': postId,
+        'user_id': roleId,
+        'user_name': roleName,
+      });
+      if (post.authorId == 'me') {
+        _unreadCount++;
       }
+      await fetchFromBackend();
     } catch (e) {
       debugPrint('MomentsService: AI like failed: $e');
     }
@@ -317,23 +313,19 @@ class MomentsService extends ChangeNotifier {
     if (post == null) return;
 
     try {
-      final response = await SecureBackendClient.post(
-        '$_backendUrl/api/moments/$postId/comment',
-        {
-          'author_id': authorId,
-          'author_name': authorName,
-          'content': content,
-          'reply_to_id': replyToId,
-          'reply_to_name': replyToName,
-        },
-      );
+      await SecureWebSocketClient.instance.request('moments_comment', {
+        'post_id': postId,
+        'author_id': authorId,
+        'author_name': authorName,
+        'content': content,
+        'reply_to_id': replyToId,
+        'reply_to_name': replyToName,
+      });
 
-      if (response.isSuccess) {
-        if (post.authorId == 'me' || replyToId == 'me') {
-          _unreadCount++;
-        }
-        await fetchFromBackend();
+      if (post.authorId == 'me' || replyToId == 'me') {
+        _unreadCount++;
       }
+      await fetchFromBackend();
     } catch (e) {
       debugPrint('MomentsService: Add comment failed: $e');
     }
@@ -360,19 +352,14 @@ class MomentsService extends ChangeNotifier {
 
   // ========== 后端同步 ==========
 
-  /// 获取后端 URL
-  String get _backendUrl => SettingsService.instance.backendUrl;
-
   /// 从后端获取朋友圈列表
   Future<bool> fetchFromBackend({int limit = 50, String? expectedHash}) async {
     try {
-      final secureResponse = await SecureBackendClient.get(
-        '$_backendUrl/api/moments?limit=$limit',
+      final response = await SecureWebSocketClient.instance.request(
+        'moments_list',
+        {'limit': limit},
       );
-      final response = secureResponse.isSuccess
-          ? secureResponse.data as Map<String, dynamic>?
-          : null;
-      if (response != null && response['moments'] != null) {
+      if (response['moments'] != null) {
         final List<dynamic> momentsJson = response['moments'];
         final responseHash = response['hash']?.toString();
         final backendPosts = <MomentPost>[];
@@ -405,20 +392,18 @@ class MomentsService extends ChangeNotifier {
   /// 发布动态到后端
   Future<MomentPost?> publishToBackend(MomentPost post) async {
     try {
-      final response =
-          await SecureBackendClient.post('$_backendUrl/api/moments', {
-            'author_id': post.authorId,
-            'author_name': post.authorName,
-            'content': post.content,
-            'image_urls': post.imageUrls,
-          });
-      if (response.isSuccess && response.data is Map<String, dynamic>) {
-        final payload = response.data as Map<String, dynamic>;
-        final serverPost = _parseBackendMoment(payload);
-        await fetchFromBackend();
-        return serverPost;
-      }
-      return null;
+      final payload = await SecureWebSocketClient.instance.request(
+        'moments_create',
+        {
+          'author_id': post.authorId,
+          'author_name': post.authorName,
+          'content': post.content,
+          'image_urls': post.imageUrls,
+        },
+      );
+      final serverPost = _parseBackendMoment(payload);
+      await fetchFromBackend();
+      return serverPost;
     } catch (e) {
       debugPrint('MomentsService: Publish to backend failed: $e');
       return null;
