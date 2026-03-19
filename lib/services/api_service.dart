@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import '../models/role.dart';
@@ -18,6 +19,14 @@ class ApiService {
 
   /// 最大上下文轮数（每轮包含用户消息和AI回复）
   static int maxContextRounds = 10;
+  static const int _visionChunkSize = 64 * 1024;
+  static const int _visionChunkMaxRetry = 3;
+  static bool _directBypassAuthorized = false;
+
+  /// 授权下一次前端直连请求（仅生效一次）
+  static void authorizeNextDirectBypass() {
+    _directBypassAuthorized = true;
+  }
 
   /// 获取当前使用的 API URL
   static String get _effectiveUrl {
@@ -110,7 +119,14 @@ class ApiService {
     List<Map<String, String>>? history,
     List<String>? coreMemory,
     bool isGroup = false,
+    bool requireManualConfirmation = true,
   }) async {
+    if (requireManualConfirmation && !_directBypassAuthorized) {
+      return ApiResponse.error('已拦截前端直连请求，请先手动确认后重试');
+    }
+
+    _directBypassAuthorized = false;
+
     // 检查 API Key
     final apiKey = _effectiveKey;
     if (apiKey == null || apiKey.isEmpty) {
@@ -325,26 +341,119 @@ class ApiService {
       // 读取图片并转为 base64
       final file = await _readImageFile(imagePath);
       final compressed = _compressImageBytes(file, imagePath);
-      final base64Image = base64Encode(compressed.$1);
+      final imageBytes = compressed.$1;
       final mimeType = compressed.$2;
+
+      final uploadId = await _uploadVisionImageInChunks(
+        imageBytes: imageBytes,
+        mimeType: mimeType,
+      );
 
       final response = await SecureWebSocketClient.instance.request(
         'chat_vision',
         {
-          'image_base64': base64Image,
+          'upload_id': uploadId,
           'mime_type': mimeType,
           'user_prompt': userPrompt,
           'system_prompt': rolePersona,
           'role_id': roleId,
           'run_mode': SettingsService.instance.visionMode,
         },
-        timeout: const Duration(seconds: 60),
+        timeout: const Duration(seconds: 90),
       );
       return response['reply']?.toString() ?? '图片识别失败';
     } catch (e) {
       debugPrint('chatWithImage error: $e');
       return '图片识别失败：$e';
     }
+  }
+
+  static Future<String> _uploadVisionImageInChunks({
+    required List<int> imageBytes,
+    required String mimeType,
+  }) async {
+    if (imageBytes.isEmpty) {
+      throw Exception('image bytes empty');
+    }
+
+    final uploadId = _buildVisionUploadId(imageBytes);
+    final totalChunks = (imageBytes.length / _visionChunkSize).ceil();
+    final initResp = await SecureWebSocketClient.instance.request(
+      'vision_upload_init',
+      {
+        'upload_id': uploadId,
+        'total_chunks': totalChunks,
+        'mime_type': mimeType,
+        'file_size': imageBytes.length,
+      },
+      timeout: const Duration(seconds: 20),
+    );
+
+    final resolvedUploadId = initResp['upload_id']?.toString() ?? '';
+    if (resolvedUploadId.isEmpty) {
+      throw Exception('upload init failed: upload_id missing');
+    }
+
+    final uploadedChunkSet = <int>{};
+    final uploadedRaw = initResp['uploaded_chunks'];
+    if (uploadedRaw is List) {
+      for (final item in uploadedRaw) {
+        final index = int.tryParse(item.toString());
+        if (index != null && index >= 0 && index < totalChunks) {
+          uploadedChunkSet.add(index);
+        }
+      }
+    }
+
+    final completed = initResp['completed'] == true;
+    if (!completed) {
+      for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        if (uploadedChunkSet.contains(chunkIndex)) {
+          continue;
+        }
+        final start = chunkIndex * _visionChunkSize;
+        final end = (start + _visionChunkSize > imageBytes.length)
+            ? imageBytes.length
+            : start + _visionChunkSize;
+        final chunkBytes = imageBytes.sublist(start, end);
+        final chunkBase64 = base64Encode(chunkBytes);
+
+        int attempt = 0;
+        while (true) {
+          attempt += 1;
+          try {
+            await SecureWebSocketClient.instance.request(
+              'vision_upload_chunk',
+              {
+                'upload_id': resolvedUploadId,
+                'chunk_index': chunkIndex,
+                'chunk_base64': chunkBase64,
+              },
+              timeout: const Duration(seconds: 20),
+            );
+            break;
+          } catch (e) {
+            if (attempt >= _visionChunkMaxRetry) {
+              throw Exception('chunk upload failed at index=$chunkIndex, attempts=$attempt, error=$e');
+            }
+            await Future<void>.delayed(Duration(milliseconds: 250 * attempt));
+          }
+        }
+      }
+
+      await SecureWebSocketClient.instance.request(
+        'vision_upload_commit',
+        {'upload_id': resolvedUploadId},
+        timeout: const Duration(seconds: 30),
+      );
+    }
+
+    return resolvedUploadId;
+  }
+
+  static String _buildVisionUploadId(List<int> imageBytes) {
+    final digest = md5.convert(imageBytes).toString();
+    return 'v1_${digest}_${imageBytes.length}';
   }
 
   /// 读取图片文件为字节数组

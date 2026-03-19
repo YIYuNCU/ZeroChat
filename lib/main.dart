@@ -81,7 +81,19 @@ void main() async {
 Future<void> _syncWithBackendInBackground() async {
   // Let first frame render first, then start network sync.
   await Future<void>.delayed(const Duration(milliseconds: 100));
+  unawaited(_syncRolesFromBackendOnly());
   await _syncWithBackend();
+}
+
+Future<void> _syncRolesFromBackendOnly() async {
+  try {
+    final isAvailable = await ApiService.isBackendAvailable();
+    if (!isAvailable) return;
+    await RoleService.fetchFromBackend();
+    debugPrint('✅ Roles async preload complete');
+  } catch (e) {
+    debugPrint('⚠️ Roles async preload failed: $e');
+  }
 }
 
 /// 后端同步状态

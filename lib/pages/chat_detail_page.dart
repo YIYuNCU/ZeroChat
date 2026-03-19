@@ -86,6 +86,10 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       widget.chatId,
       _onTypingChanged,
     );
+    ChatController.instance.registerDirectFallbackConfirmCallback(
+      widget.chatId,
+      _confirmDirectFallback,
+    );
 
     // 监听设置更新（包括背景图）
     SettingsService.instance.addListener(_onSettingsChanged);
@@ -114,6 +118,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     _scrollController.removeListener(_onScroll);
     SettingsService.instance.removeListener(_onSettingsChanged);
     ChatController.instance.unregisterTypingCallback(widget.chatId);
+    ChatController.instance.unregisterDirectFallbackConfirmCallback(widget.chatId);
     ChatController.instance.onChatPageExit(widget.chatId);
     _inputBarController.dispose();
     _scrollController.dispose();
@@ -187,6 +192,33 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     if (mounted) {
       setState(() => _showTyping = isTyping);
     }
+  }
+
+  Future<bool> _confirmDirectFallback(String reason) async {
+    if (!mounted) return false;
+
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('后端不可用'),
+        content: Text(
+          '检测到后端请求失败，是否允许本次改为前端直连 API？\n\n失败原因：$reason',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('允许本次直连'),
+          ),
+        ],
+      ),
+    );
+
+    return result ?? false;
   }
 
   /// 发送消息（支持引用）

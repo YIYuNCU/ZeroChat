@@ -55,6 +55,9 @@ class ChatController extends ChangeNotifier {
   /// "正在输入"状态回调（按 chatId）- 仅用于单聊
   final Map<String, void Function(bool)> _typingCallbacks = {};
 
+  /// 前端直连回退确认回调（按 chatId）
+  final Map<String, Future<bool> Function(String)> _directFallbackConfirmCallbacks = {};
+
   /// 待发送消息队列（用于消息合并等待）
   final Map<String, List<_PendingTextMessage>> _pendingMessages = {};
 
@@ -687,16 +690,26 @@ class ChatController extends ChangeNotifier {
     if (response.success && response.content != null) {
       contentToSend = response.content!;
     } else {
-      final fallbackResponse = await ApiService.sendChatMessageWithRoleDirect(
-        message: prompt,
-        role: role,
-        history: history,
-        coreMemory: coreMemory,
+      final approved = await _confirmDirectFallback(
+        chatId,
+        reason: response.error ?? '后端调用失败',
       );
-      if (fallbackResponse.success && fallbackResponse.content != null) {
-        contentToSend = fallbackResponse.content!;
+      if (approved) {
+        ApiService.authorizeNextDirectBypass();
+        final fallbackResponse = await ApiService.sendChatMessageWithRoleDirect(
+          message: prompt,
+          role: role,
+          history: history,
+          coreMemory: coreMemory,
+        );
+        if (fallbackResponse.success && fallbackResponse.content != null) {
+          contentToSend = fallbackResponse.content!;
+        } else {
+          // AI 失败时使用简洁的备用消息
+          contentToSend = '嘿～$taskContent';
+        }
       } else {
-        // AI 失败时使用简洁的备用消息
+        // 未确认前端直连时使用简洁的备用消息
         contentToSend = '嘿～$taskContent';
       }
     }
@@ -731,8 +744,37 @@ class ChatController extends ChangeNotifier {
     _typingCallbacks[chatId] = callback;
   }
 
+  /// 注册前端直连回退确认回调
+  void registerDirectFallbackConfirmCallback(
+    String chatId,
+    Future<bool> Function(String reason) callback,
+  ) {
+    _directFallbackConfirmCallbacks[chatId] = callback;
+  }
+
   void unregisterTypingCallback(String chatId) {
     _typingCallbacks.remove(chatId);
+  }
+
+  void unregisterDirectFallbackConfirmCallback(String chatId) {
+    _directFallbackConfirmCallbacks.remove(chatId);
+  }
+
+  Future<bool> _confirmDirectFallback(
+    String chatId, {
+    required String reason,
+  }) async {
+    final callback = _directFallbackConfirmCallbacks[chatId];
+    if (callback == null) {
+      debugPrint('ChatController: direct fallback blocked (no confirm callback)');
+      return false;
+    }
+    try {
+      return await callback(reason);
+    } catch (e) {
+      debugPrint('ChatController: direct fallback confirm callback error: $e');
+      return false;
+    }
   }
 
   bool isProcessing(String chatId) => _processingChats.contains(chatId);
@@ -956,6 +998,22 @@ class ChatController extends ChangeNotifier {
 
     // 后端不可用时，降级到直接调用（保持原有逻辑）
     debugPrint('ChatController: Backend unavailable, fallback to direct API');
+
+    final approved = await _confirmDirectFallback(
+      chatId,
+      reason: backendResponse.error ?? '后端不可用',
+    );
+    if (!approved) {
+      final blockedMessage = createMessage(
+        senderId: 'error',
+        receiverId: 'me',
+        content: '已取消前端直连，请手动确认后重试',
+      );
+      await MessageStore.instance.addMessage(chatId, blockedMessage);
+      return null;
+    }
+
+    ApiService.authorizeNextDirectBypass();
 
     // 注入外挂 JSON 记录（与聊天记录同级）
     if (attachedJson != null && attachedJson.isNotEmpty) {

@@ -1,13 +1,87 @@
 import base64
 import hashlib
+import json
+import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import WebSocket
 
 from routers import roles, settings
 from services import settings_service
+
+
+DATA_DIR = Path(__file__).parent.parent / "data"
+VISION_UPLOADS_DIR = DATA_DIR / "vision"
+
+
+def _safe_upload_id(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value or len(value) > 80:
+        raise ValueError("invalid upload_id")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+    if any(ch not in allowed for ch in value):
+        raise ValueError("invalid upload_id")
+    return value
+
+
+def _upload_dir(upload_id: str) -> Path:
+    return VISION_UPLOADS_DIR / _safe_upload_id(upload_id)
+
+
+def _list_uploaded_chunk_indices(upload_dir: Path, total_chunks: int) -> list[int]:
+    uploaded: list[int] = []
+    for index in range(total_chunks):
+        chunk_file = upload_dir / f"chunk_{index:06d}.part"
+        if chunk_file.exists():
+            uploaded.append(index)
+    return uploaded
+
+
+def _cleanup_expired_vision_uploads(ttl_minutes: int = 120):
+    if not VISION_UPLOADS_DIR.exists():
+        return
+    cutoff = datetime.now() - timedelta(minutes=max(10, ttl_minutes))
+    for child in VISION_UPLOADS_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            mtime = datetime.fromtimestamp(child.stat().st_mtime)
+            if mtime < cutoff:
+                shutil.rmtree(child, ignore_errors=True)
+        except Exception:
+            continue
+
+
+def _normalize_chunk_index(metadata: dict, raw_chunk_index: int, total_chunks: int) -> int:
+    """兼容历史客户端的 0-based / 1-based chunk_index。"""
+    if total_chunks <= 0:
+        return -1
+
+    index_base = metadata.get("chunk_index_base")
+    if index_base in (0, 1):
+        normalized = raw_chunk_index - int(index_base)
+        if 0 <= normalized < total_chunks:
+            return normalized
+
+        # 兼容历史会话中索引基准记录错误/漂移：尝试自动切换基准
+        alt_base = 1 - int(index_base)
+        alt_normalized = raw_chunk_index - alt_base
+        if 0 <= alt_normalized < total_chunks:
+            metadata["chunk_index_base"] = alt_base
+            return alt_normalized
+
+    # 首次判断索引基准：优先 0-based；否则尝试 1-based
+    if 0 <= raw_chunk_index < total_chunks:
+        metadata["chunk_index_base"] = 0
+        return raw_chunk_index
+
+    if 1 <= raw_chunk_index <= total_chunks:
+        metadata["chunk_index_base"] = 1
+        return raw_chunk_index - 1
+
+    return -1
 
 
 def resolve_backend_base_url_from_websocket(websocket: WebSocket, config: dict) -> str:
@@ -19,6 +93,150 @@ def resolve_backend_base_url_from_websocket(websocket: WebSocket, config: dict) 
 
 async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, config: dict):
     backend_base_url = resolve_backend_base_url_from_websocket(websocket, config)
+
+    if action == "vision_upload_init":
+        _cleanup_expired_vision_uploads()
+
+        total_chunks = int(payload.get("total_chunks") or 0)
+        mime_type = str(payload.get("mime_type") or "image/jpeg").strip() or "image/jpeg"
+        file_size = int(payload.get("file_size") or 0)
+        if total_chunks <= 0:
+            raise ValueError("total_chunks must be > 0")
+
+        preferred_upload_id = str(payload.get("upload_id") or "").strip()
+        upload_id = _safe_upload_id(preferred_upload_id) if preferred_upload_id else uuid.uuid4().hex
+        upload_dir = _upload_dir(upload_id)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        meta_file = upload_dir / "meta.json"
+        if meta_file.exists():
+            with open(meta_file, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+
+            old_total_chunks = int(metadata.get("total_chunks") or 0)
+            old_mime_type = str(metadata.get("mime_type") or "").strip()
+            old_file_size = int(metadata.get("file_size") or 0)
+
+            # 参数变化时认为是新文件，重置当前上传会话
+            if (
+                old_total_chunks != total_chunks
+                or old_mime_type != mime_type
+                or old_file_size != file_size
+            ):
+                shutil.rmtree(upload_dir, ignore_errors=True)
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                metadata = {
+                    "upload_id": upload_id,
+                    "total_chunks": total_chunks,
+                    "mime_type": mime_type,
+                    "file_size": file_size,
+                    "created_at": datetime.now().isoformat(),
+                    "completed": False,
+                    "chunk_index_base": None,
+                }
+                with open(meta_file, "w", encoding="utf-8") as f:
+                    json.dump(metadata, f, ensure_ascii=False, indent=2)
+        else:
+            metadata = {
+                "upload_id": upload_id,
+                "total_chunks": total_chunks,
+                "mime_type": mime_type,
+                "file_size": file_size,
+                "created_at": datetime.now().isoformat(),
+                "completed": False,
+                "chunk_index_base": None,
+            }
+            with open(meta_file, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        uploaded_chunks = _list_uploaded_chunk_indices(upload_dir, total_chunks)
+        completed = bool(metadata.get("completed") is True and (upload_dir / "merged.bin").exists())
+        return {
+            "success": True,
+            "upload_id": upload_id,
+            "total_chunks": total_chunks,
+            "uploaded_chunks": uploaded_chunks,
+            "completed": completed,
+        }
+
+    if action == "vision_upload_chunk":
+        upload_id = _safe_upload_id(str(payload.get("upload_id") or ""))
+        raw_chunk_index_value = payload.get("chunk_index")
+        raw_chunk_index = int(raw_chunk_index_value) if raw_chunk_index_value is not None else -1
+        chunk_base64 = str(payload.get("chunk_base64") or "").strip()
+
+        upload_dir = _upload_dir(upload_id)
+        meta_file = upload_dir / "meta.json"
+        if not upload_dir.exists() or not meta_file.exists():
+            raise ValueError("upload not found")
+
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        total_chunks = int(metadata.get("total_chunks") or 0)
+        chunk_index = _normalize_chunk_index(metadata, raw_chunk_index, total_chunks)
+        if chunk_index < 0 or chunk_index >= total_chunks:
+            raise ValueError("invalid chunk_index")
+        if not chunk_base64:
+            raise ValueError("chunk_base64 missing")
+
+        try:
+            chunk_bytes = base64.b64decode(chunk_base64, validate=True)
+        except Exception as exc:
+            raise ValueError("invalid chunk base64") from exc
+
+        chunk_file = upload_dir / f"chunk_{chunk_index:06d}.part"
+        with open(chunk_file, "wb") as f:
+            f.write(chunk_bytes)
+
+        # 写回可能更新后的索引基准
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        return {
+            "success": True,
+            "upload_id": upload_id,
+            "chunk_index": chunk_index,
+            "raw_chunk_index": raw_chunk_index,
+            "size": len(chunk_bytes),
+        }
+
+    if action == "vision_upload_commit":
+        upload_id = _safe_upload_id(str(payload.get("upload_id") or ""))
+        upload_dir = _upload_dir(upload_id)
+        meta_file = upload_dir / "meta.json"
+        if not upload_dir.exists() or not meta_file.exists():
+            raise ValueError("upload not found")
+
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
+        total_chunks = int(metadata.get("total_chunks") or 0)
+        if total_chunks <= 0:
+            raise ValueError("invalid upload metadata")
+
+        merged_file = upload_dir / "merged.bin"
+        total_size = 0
+        with open(merged_file, "wb") as out:
+            for index in range(total_chunks):
+                chunk_file = upload_dir / f"chunk_{index:06d}.part"
+                if not chunk_file.exists():
+                    raise ValueError(f"missing chunk: {index}")
+                data = chunk_file.read_bytes()
+                total_size += len(data)
+                out.write(data)
+
+        metadata["completed"] = True
+        metadata["committed_at"] = datetime.now().isoformat()
+        metadata["merged_size"] = total_size
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        return {
+            "success": True,
+            "upload_id": upload_id,
+            "size": total_size,
+            "mime_type": str(metadata.get("mime_type") or "image/jpeg"),
+        }
 
     if action == "chat_snapshot":
         client_md5 = str(payload.get("client_md5") or "").strip()
@@ -450,6 +668,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
 
         request = VisionRequest(
             image_base64=str(payload.get("image_base64") or ""),
+            upload_id=(str(payload.get("upload_id")).strip() if payload.get("upload_id") is not None else None),
             mime_type=str(payload.get("mime_type") or "image/jpeg"),
             user_prompt=str(payload.get("user_prompt") or "请描述这张图片的内容"),
             system_prompt=str(payload.get("system_prompt") or ""),

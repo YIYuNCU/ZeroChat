@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import '../services/role_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/secure_websocket_client.dart';
@@ -22,6 +24,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   bool _backendTokenObscured = true;
   bool _backendEncryptionSecretObscured = true;
   bool _isTestingConnection = false;
+  bool _isPullingBackendConfig = false;
   bool? _connectionSuccess;
   String? _connectionError;
 
@@ -177,6 +180,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
             ),
             _buildDivider(),
             _buildConnectionTestButton(),
+            _buildDivider(),
+            _buildPullBackendConfigButton(),
           ]),
 
           const SizedBox(height: 20),
@@ -477,18 +482,16 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       );
 
       if (response['status']?.toString() == 'healthy') {
-        await _saveSettingsLocalOnly();
-        final synced = await SettingsService.instance.syncApiSettingsToBackend();
-
         setState(() {
-          _connectionSuccess = synced;
-          _connectionError = synced ? null : '连接成功，但设置同步失败';
+          _connectionSuccess = true;
+          _connectionError = null;
         });
+        unawaited(_refreshRolesAfterConnection());
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(synced ? '✅ 连接成功，设置已加密同步' : '⚠️ 连接成功，但设置同步失败'),
-              backgroundColor: synced ? const Color(0xFF07C160) : Colors.orange,
+            const SnackBar(
+              content: Text('✅ 连接成功（未自动同步）'),
+              backgroundColor: Color(0xFF07C160),
             ),
           );
         }
@@ -511,6 +514,100 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
         _isTestingConnection = false;
       });
     }
+  }
+
+  Future<void> _refreshRolesAfterConnection() async {
+    try {
+      await RoleService.fetchFromBackend();
+      debugPrint('ApiSettingsPage: roles refreshed after connection test');
+    } catch (e) {
+      debugPrint('ApiSettingsPage: refresh roles failed: $e');
+    }
+  }
+
+  Widget _buildPullBackendConfigButton() {
+    final canPull = _connectionSuccess == true && !_isTestingConnection;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: (canPull && !_isPullingBackendConfig)
+                  ? _pullConfigFromBackend
+                  : null,
+              icon: _isPullingBackendConfig
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.cloud_sync, size: 18),
+              label: Text(_isPullingBackendConfig ? '拉取中...' : '从后端读取配置（加密）'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF07C160),
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pullConfigFromBackend() async {
+    setState(() => _isPullingBackendConfig = true);
+    try {
+      // 确保使用当前页面输入的后端安全参数
+      await _saveSettingsLocalOnly();
+      await SecureWebSocketClient.instance.close();
+
+      final ok = await SettingsService.instance.syncAllSettingsFromBackend();
+      if (!ok) {
+        throw Exception('后端未返回有效配置');
+      }
+
+      _reloadControllersFromSettings();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('已从后端加密拉取配置并应用'),
+            backgroundColor: Color(0xFF07C160),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('拉取后端配置失败: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isPullingBackendConfig = false);
+      }
+    }
+  }
+
+  void _reloadControllersFromSettings() {
+    final settings = SettingsService.instance;
+    setState(() {
+      _chatUrlController.text = settings.chatApiUrl;
+      _chatKeyController.text = settings.chatApiKey;
+      _chatModelController.text = settings.chatModel;
+
+      _intentEnabled = settings.intentEnabled;
+      _intentUrlController.text = settings.intentApiUrl;
+      _intentKeyController.text = settings.intentApiKey;
+      _intentModelController.text = settings.intentModel;
+
+      _visionEnabled = settings.visionEnabled;
+      _visionUrlController.text = settings.visionApiUrl;
+      _visionKeyController.text = settings.visionApiKey;
+      _visionModelController.text = settings.visionModel;
+      _visionMode = settings.visionMode;
+    });
   }
 
   /// 获取可用模型列表

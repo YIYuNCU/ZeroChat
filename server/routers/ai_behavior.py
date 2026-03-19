@@ -4,6 +4,7 @@ AI 行为统一入口
 """
 import json
 import random
+import shutil
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -18,6 +19,7 @@ router = APIRouter()
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
+VISION_UPLOADS_DIR = DATA_DIR / "vision"
 TOOL_ROLE_PREFIX = "1000000000"
 
 
@@ -716,7 +718,8 @@ import base64
 
 class VisionRequest(BaseModel):
     """图片识别请求"""
-    image_base64: str
+    image_base64: Optional[str] = ""
+    upload_id: Optional[str] = None
     mime_type: str = "image/jpeg"
     user_prompt: str = "请描述这张图片的内容"
     system_prompt: str = ""
@@ -831,6 +834,8 @@ async def chat_with_vision(request: VisionRequest):
     from services.ai_service import generate_with_role
     
     try:
+        upload_dir_for_cleanup: Optional[Path] = None
+
         settings = settings_service.load_settings()
         global_ai = settings_service.get_ai_config()
         vision_cfg = settings_service.get_vision_config()
@@ -843,7 +848,33 @@ async def chat_with_vision(request: VisionRequest):
         vision_api_key = str(vision_cfg.get("api_key") or "").strip() or str(global_ai.get("api_key") or "").strip()
         vision_model = str(vision_cfg.get("model") or "").strip() or str(global_ai.get("model") or "gpt-4o").strip()
 
-        image_data_url = f"data:{request.mime_type};base64,{request.image_base64}"
+        upload_id = str(request.upload_id or "").strip()
+        image_base64_value = str(request.image_base64 or "").strip()
+
+        if upload_id:
+            upload_dir = VISION_UPLOADS_DIR / upload_id
+            merged_file = upload_dir / "merged.bin"
+            if not merged_file.exists():
+                raise HTTPException(status_code=400, detail="上传文件不存在或未完成")
+            upload_dir_for_cleanup = upload_dir
+            image_bytes = merged_file.read_bytes()
+            if not image_bytes:
+                raise HTTPException(status_code=400, detail="上传图片为空")
+            image_base64_value = base64.b64encode(image_bytes).decode("utf-8")
+
+            meta_file = upload_dir / "meta.json"
+            if meta_file.exists():
+                try:
+                    with open(meta_file, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    request.mime_type = str(meta.get("mime_type") or request.mime_type or "image/jpeg")
+                except Exception:
+                    pass
+
+        if not image_base64_value:
+            raise HTTPException(status_code=400, detail="image_base64 或 upload_id 必须提供")
+
+        image_data_url = f"data:{request.mime_type};base64,{image_base64_value}"
         multimodal_messages: List[Dict[str, Any]] = []
 
         if request.system_prompt:
@@ -884,6 +915,8 @@ async def chat_with_vision(request: VisionRequest):
                 mode=mode,
                 image_understanding=reply,
             )
+            if upload_dir_for_cleanup is not None:
+                shutil.rmtree(upload_dir_for_cleanup, ignore_errors=True)
             return {"reply": reply, "success": True, "mode": mode, "vision_model": vision_model}
 
         # 前置模型模式：先识图，再把识图结果交给聊天模型生成最终回复
@@ -950,6 +983,8 @@ async def chat_with_vision(request: VisionRequest):
             mode=mode,
             image_understanding=image_understanding,
         )
+        if upload_dir_for_cleanup is not None:
+            shutil.rmtree(upload_dir_for_cleanup, ignore_errors=True)
         return {
             "reply": reply,
             "success": True,

@@ -76,15 +76,9 @@ class IntentService {
         debugPrint('Backend intent detection failed: $e');
       }
 
-      if (_intentApiKey.isNotEmpty) {
-        try {
-          final aiResult = await _detectByAI(message);
-          debugPrint('Intent detected by direct AI fallback: ${aiResult.type}');
-          return aiResult;
-        } catch (e) {
-          debugPrint('Direct AI intent detection failed: $e');
-        }
-      }
+      // 直连意图识别属于前端绕过后端请求，需手动确认后才可执行。
+      // 这里不做自动回退，保持 normalChat。
+      debugPrint('IntentService: direct fallback skipped (manual confirmation required)');
     }
 
     return IntentResult(type: IntentType.normalChat);
