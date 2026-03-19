@@ -720,6 +720,105 @@ class VisionRequest(BaseModel):
     mime_type: str = "image/jpeg"
     user_prompt: str = "请描述这张图片的内容"
     system_prompt: str = ""
+    role_id: Optional[str] = None
+    run_mode: Optional[str] = None
+
+
+def _normalize_chat_completions_endpoint(api_url: str) -> str:
+    value = str(api_url or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if value.endswith("/chat/completions"):
+        return value
+    if value.endswith("/v1"):
+        return f"{value}/chat/completions"
+    if "/v1/" in value:
+        return f"{value.rstrip('/')}/chat/completions"
+    return f"{value}/v1/chat/completions"
+
+
+def _resolve_role_or_global_chat_config(role_id: Optional[str]) -> Dict[str, str]:
+    from services import settings_service
+
+    global_ai = settings_service.get_ai_config()
+    resolved = {
+        "api_url": global_ai.get("api_url", ""),
+        "api_key": global_ai.get("api_key", ""),
+        "model": global_ai.get("model", "gpt-3.5-turbo"),
+    }
+
+    role_key = str(role_id or "").strip()
+    if not role_key:
+        return resolved
+
+    role_data = load_role(role_key) or {}
+    if not isinstance(role_data, dict):
+        return resolved
+
+    metadata = role_data.get("metadata") if isinstance(role_data.get("metadata"), dict) else {}
+    role_model = str(role_data.get("ai_model") or metadata.get("ai_model") or "").strip()
+    role_api_url = str(role_data.get("ai_api_url") or metadata.get("ai_api_url") or "").strip()
+    role_api_key = str(role_data.get("ai_api_key") or metadata.get("ai_api_key") or "").strip()
+
+    if role_model:
+        resolved["model"] = role_model
+    if role_api_url:
+        resolved["api_url"] = role_api_url
+    if role_api_key:
+        resolved["api_key"] = role_api_key
+
+    return resolved
+
+
+async def _post_chat_completion(api_url: str, api_key: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    endpoint = _normalize_chat_completions_endpoint(api_url)
+    if not endpoint or not api_key:
+        raise HTTPException(status_code=400, detail="AI API 未配置")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json=body,
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"AI API 错误: {response.text}",
+        )
+    return response.json()
+
+
+def _append_vision_memory(
+    role_id: Optional[str],
+    user_prompt: str,
+    final_reply: str,
+    mode: str,
+    image_understanding: Optional[str] = None,
+) -> None:
+    """将识图过程关键信息写入短期记忆。"""
+    from services.memory_service import append_short_term
+
+    rid = str(role_id or "").strip()
+    if not rid or _is_tool_role_id(rid):
+        return
+
+    prompt_text = (user_prompt or "").strip() or "请描述这张图片的内容"
+
+    understanding = str(image_understanding or "").strip()
+    if understanding:
+        append_short_term(rid, "user", f"[图片识别结果/{mode}] {understanding}")
+    else:
+        append_short_term(rid, "user", f"[图片识别请求] {prompt_text}")
+        append_short_term(rid, "assistant", f"[图片识别结果/{mode}] {(final_reply or '').strip()}")
+
+    reply_text = (final_reply or "").strip()
+    if reply_text and (not understanding or reply_text != understanding):
+        append_short_term(rid, "assistant", f"[图片识别回复] {reply_text}")
 
 @router.post("/chat/vision")
 async def chat_with_vision(request: VisionRequest):
@@ -729,74 +828,135 @@ async def chat_with_vision(request: VisionRequest):
     使用 OpenAI Vision API 或兼容的 API 进行图片识别
     """
     from services import settings_service
+    from services.ai_service import generate_with_role
     
     try:
-        # 获取 AI 配置
-        ai_settings = settings_service.get_ai_config()
-        api_url = ai_settings.get("api_url", "")
-        api_key = ai_settings.get("api_key", "")
-        model = ai_settings.get("model", "gpt-4o")
-        
-        if not api_url or not api_key:
-            raise HTTPException(status_code=400, detail="AI API 未配置")
-        
-        # 构建 vision 请求
-        messages = []
-        
-        # 添加 system prompt
+        settings = settings_service.load_settings()
+        global_ai = settings_service.get_ai_config()
+        vision_cfg = settings_service.get_vision_config()
+
+        mode = str(request.run_mode or vision_cfg.get("mode") or settings.get("vision_mode") or "standalone").strip().lower()
+        if mode not in {"standalone", "pre_model"}:
+            mode = "standalone"
+
+        vision_api_url = str(vision_cfg.get("api_url") or "").strip() or str(global_ai.get("api_url") or "").strip()
+        vision_api_key = str(vision_cfg.get("api_key") or "").strip() or str(global_ai.get("api_key") or "").strip()
+        vision_model = str(vision_cfg.get("model") or "").strip() or str(global_ai.get("model") or "gpt-4o").strip()
+
+        image_data_url = f"data:{request.mime_type};base64,{request.image_base64}"
+        multimodal_messages: List[Dict[str, Any]] = []
+
         if request.system_prompt:
-            messages.append({"role": "system", "content": request.system_prompt})
-        
-        # 添加用户消息（包含图片）
-        messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{request.mime_type};base64,{request.image_base64}"
-                    }
+            multimodal_messages.append({"role": "system", "content": request.system_prompt})
+
+        multimodal_messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_data_url},
+                    },
+                    {
+                        "type": "text",
+                        "text": request.user_prompt,
+                    },
+                ],
+            }
+        )
+
+        # 独立模型模式：全角色统一识图模型直接返回结果
+        if mode == "standalone":
+            result = await _post_chat_completion(
+                api_url=vision_api_url,
+                api_key=vision_api_key,
+                body={
+                    "model": vision_model,
+                    "messages": multimodal_messages,
+                    "max_tokens": 1024,
                 },
-                {
-                    "type": "text",
-                    "text": request.user_prompt
-                }
-            ]
-        })
-        
-        # 确保 URL 格式正确
-        if not api_url.endswith("/"):
-            api_url += "/"
-        if not api_url.endswith("v1/"):
-            api_url += "v1/"
-        
-        endpoint = f"{api_url}chat/completions"
-        
-        # 调用 API
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": 1024
-                }
             )
-        
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"AI API 错误: {response.text}"
+            reply = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            _append_vision_memory(
+                role_id=request.role_id,
+                user_prompt=request.user_prompt,
+                final_reply=reply,
+                mode=mode,
+                image_understanding=reply,
             )
-        
-        result = response.json()
-        reply = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        
-        return {"reply": reply, "success": True}
+            return {"reply": reply, "success": True, "mode": mode, "vision_model": vision_model}
+
+        # 前置模型模式：先识图，再把识图结果交给聊天模型生成最终回复
+        pre_result = await _post_chat_completion(
+            api_url=vision_api_url,
+            api_key=vision_api_key,
+            body={
+                "model": vision_model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是图片理解助手。请准确提取图像中的关键视觉信息，输出简洁文本，不要编造不可见细节。",
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": image_data_url},
+                            },
+                            {
+                                "type": "text",
+                                "text": "请提取这张图的关键内容，长度不超过100个字符。",
+                            },
+                        ],
+                    },
+                ],
+                "max_tokens": 700,
+            },
+        )
+        image_understanding = pre_result.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        chat_cfg = _resolve_role_or_global_chat_config(request.role_id)
+        final_messages: List[Dict[str, Any]] = []
+        if request.system_prompt:
+            final_messages.append({"role": "system", "content": request.system_prompt})
+        final_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "[图片识别结果]:"
+                    f"{image_understanding}\n"
+                    "[用户要求]:"
+                    f"{request.user_prompt}\n"
+                    "请仅基于图片识别结果与用户要求生成最终回复。"
+                ),
+            }
+        )
+
+        final_result = await _post_chat_completion(
+            api_url=str(chat_cfg.get("api_url") or ""),
+            api_key=str(chat_cfg.get("api_key") or ""),
+            body={
+                "model": str(chat_cfg.get("model") or "gpt-3.5-turbo"),
+                "messages": final_messages,
+                "max_tokens": 1024,
+            },
+        )
+        reply = final_result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        _append_vision_memory(
+            role_id=request.role_id,
+            user_prompt=request.user_prompt,
+            final_reply=reply,
+            mode=mode,
+            image_understanding=image_understanding,
+        )
+        return {
+            "reply": reply,
+            "success": True,
+            "mode": mode,
+            "vision_model": vision_model,
+            "chat_model": str(chat_cfg.get("model") or "gpt-3.5-turbo"),
+        }
         
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="AI 请求超时")

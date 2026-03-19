@@ -371,6 +371,10 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
                 key = settings_data["intent_api_key"]
                 settings_data["intent_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
                 del settings_data["intent_api_key"]
+            if settings_data.get("vision_api_key"):
+                key = settings_data["vision_api_key"]
+                settings_data["vision_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+                del settings_data["vision_api_key"]
         return {"settings": settings_data}
 
     if action == "settings_update":
@@ -390,6 +394,17 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             updates["intent_api_key"] = update.intent_api_key
         if update.intent_model is not None:
             updates["intent_model"] = update.intent_model
+        if update.vision_enabled is not None:
+            updates["vision_enabled"] = update.vision_enabled
+        if update.vision_api_url is not None:
+            updates["vision_api_url"] = update.vision_api_url
+        if update.vision_api_key is not None:
+            updates["vision_api_key"] = update.vision_api_key
+        if update.vision_model is not None:
+            updates["vision_model"] = update.vision_model
+        if update.vision_mode is not None:
+            mode = str(update.vision_mode).strip().lower()
+            updates["vision_mode"] = mode if mode in {"standalone", "pre_model"} else "standalone"
         if update.host is not None:
             updates["host"] = update.host
         if update.port is not None:
@@ -438,6 +453,8 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             mime_type=str(payload.get("mime_type") or "image/jpeg"),
             user_prompt=str(payload.get("user_prompt") or "请描述这张图片的内容"),
             system_prompt=str(payload.get("system_prompt") or ""),
+            role_id=(str(payload.get("role_id")).strip() if payload.get("role_id") is not None else None),
+            run_mode=(str(payload.get("run_mode")).strip() if payload.get("run_mode") is not None else None),
         )
         return await chat_with_vision(request)
 

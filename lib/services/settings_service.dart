@@ -54,6 +54,7 @@ class SettingsService extends ChangeNotifier {
   String _visionApiUrl = '';
   String _visionApiKey = '';
   String _visionModel = 'gpt-4-vision-preview';
+  String _visionMode = 'standalone';
 
   // ========== 全局提示词 ==========
   String _basePrompt = '';
@@ -87,6 +88,7 @@ class SettingsService extends ChangeNotifier {
   String get visionApiUrl => _visionApiUrl;
   String get visionApiKey => _visionApiKey;
   String get visionModel => _visionModel;
+  String get visionMode => _visionMode;
 
   String get basePrompt => _basePrompt;
   String get groupPrompt => _groupPrompt;
@@ -136,6 +138,7 @@ class SettingsService extends ChangeNotifier {
     _visionApiKey = StorageService.getString('vision_api_key') ?? '';
     _visionModel =
         StorageService.getString('vision_model') ?? 'gpt-4-vision-preview';
+    _visionMode = StorageService.getString('vision_mode') ?? 'standalone';
 
     // 全局提示词
     _basePrompt = StorageService.getString('base_prompt') ?? _defaultBasePrompt;
@@ -293,15 +296,20 @@ class SettingsService extends ChangeNotifier {
     required String url,
     required String key,
     required String model,
+    String? mode,
   }) async {
     _visionEnabled = enabled;
     _visionApiUrl = url;
     _visionApiKey = key;
     _visionModel = model;
+    if (mode != null && mode.isNotEmpty) {
+      _visionMode = mode;
+    }
     await StorageService.setBool('vision_enabled', enabled);
     await StorageService.setString('vision_api_url', url);
     await StorageService.setString('vision_api_key', key);
     await StorageService.setString('vision_model', model);
+    await StorageService.setString('vision_mode', _visionMode);
     notifyListeners();
   }
 
@@ -496,6 +504,11 @@ class SettingsService extends ChangeNotifier {
           'intent_api_url': _intentApiUrl,
           'intent_api_key': _intentApiKey,
           'intent_model': _intentModel,
+          'vision_enabled': _visionEnabled,
+          'vision_api_url': _visionApiUrl,
+          'vision_api_key': _visionApiKey,
+          'vision_model': _visionModel,
+          'vision_mode': _visionMode,
           },
         },
       );
@@ -540,12 +553,30 @@ class SettingsService extends ChangeNotifier {
           ? _intentModel
           : (server['intent_model']?.toString() ?? _intentModel).trim();
 
+        final visionEnabled = server['vision_enabled'] == true;
+        final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
+        final visionKey = (server['vision_api_key']?.toString() ?? '').trim();
+        final visionModel =
+          (server['vision_model']?.toString() ?? _visionModel).trim().isEmpty
+          ? _visionModel
+          : (server['vision_model']?.toString() ?? _visionModel).trim();
+        final visionModeRaw =
+          (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
+        final visionMode = visionModeRaw == 'pre_model' ? 'pre_model' : 'standalone';
+
       await updateChatApi(url: chatUrl, key: chatKey, model: chatModel);
       await updateIntentApi(
         enabled: intentEnabled,
         url: intentUrl,
         key: intentKey,
         model: intentModel,
+      );
+      await updateVisionApi(
+        enabled: visionEnabled,
+        url: visionUrl,
+        key: visionKey,
+        model: visionModel,
+        mode: visionMode,
       );
 
       debugPrint('SettingsService: Full settings synced from backend');
@@ -583,12 +614,29 @@ class SettingsService extends ChangeNotifier {
           ? _intentModel
           : (server['intent_model']?.toString() ?? _intentModel).trim();
 
+        final visionEnabled = server['vision_enabled'] == true;
+        final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
+        final visionModel =
+          (server['vision_model']?.toString() ?? _visionModel).trim().isEmpty
+          ? _visionModel
+          : (server['vision_model']?.toString() ?? _visionModel).trim();
+        final visionModeRaw =
+          (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
+        final visionMode = visionModeRaw == 'pre_model' ? 'pre_model' : 'standalone';
+
       await updateChatApi(url: chatUrl, key: _chatApiKey, model: chatModel);
       await updateIntentApi(
         enabled: intentEnabled,
         url: intentUrl,
         key: _intentApiKey,
         model: intentModel,
+      );
+      await updateVisionApi(
+        enabled: visionEnabled,
+        url: visionUrl,
+        key: _visionApiKey,
+        model: visionModel,
+        mode: visionMode,
       );
 
       debugPrint('SettingsService: Public settings synced from backend');

@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'package:image/image.dart' as img;
 import '../models/role.dart';
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
@@ -317,15 +319,14 @@ class ApiService {
     required String imagePath,
     required String userPrompt,
     required String rolePersona,
+    String? roleId,
   }) async {
     try {
       // 读取图片并转为 base64
       final file = await _readImageFile(imagePath);
-      final base64Image = base64Encode(file);
-
-      // 判断图片类型
-      final ext = imagePath.split('.').last.toLowerCase();
-      final mimeType = ext == 'png' ? 'image/png' : 'image/jpeg';
+      final compressed = _compressImageBytes(file, imagePath);
+      final base64Image = base64Encode(compressed.$1);
+      final mimeType = compressed.$2;
 
       final response = await SecureWebSocketClient.instance.request(
         'chat_vision',
@@ -334,6 +335,8 @@ class ApiService {
           'mime_type': mimeType,
           'user_prompt': userPrompt,
           'system_prompt': rolePersona,
+          'role_id': roleId,
+          'run_mode': SettingsService.instance.visionMode,
         },
         timeout: const Duration(seconds: 60),
       );
@@ -348,6 +351,36 @@ class ApiService {
   static Future<List<int>> _readImageFile(String path) async {
     final file = File(path);
     return await file.readAsBytes();
+  }
+
+  static (List<int>, String) _compressImageBytes(List<int> rawBytes, String imagePath) {
+    // 小图直接透传，避免不必要的处理
+    const smallImageThreshold = 350 * 1024;
+    final ext = imagePath.split('.').last.toLowerCase();
+    final fallbackMimeType = ext == 'png' ? 'image/png' : 'image/jpeg';
+    if (rawBytes.length <= smallImageThreshold) {
+      return (rawBytes, fallbackMimeType);
+    }
+
+    try {
+      final decoded = img.decodeImage(Uint8List.fromList(rawBytes));
+      if (decoded == null) {
+        return (rawBytes, fallbackMimeType);
+      }
+
+      // 约束最大边，降低上传体积与后端处理时延
+      const maxSide = 1280;
+      final resized = (decoded.width > maxSide || decoded.height > maxSide)
+          ? img.copyResize(decoded, width: decoded.width >= decoded.height ? maxSide : null, height: decoded.height > decoded.width ? maxSide : null)
+          : decoded;
+
+      // 统一转 jpeg，质量折中到 78，显著减少体积
+      final jpgBytes = img.encodeJpg(resized, quality: 78);
+      return (jpgBytes, 'image/jpeg');
+    } catch (e) {
+      debugPrint('ApiService: image compress failed, fallback to raw bytes: $e');
+      return (rawBytes, fallbackMimeType);
+    }
   }
 }
 

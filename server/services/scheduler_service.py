@@ -243,7 +243,7 @@ def _init_moment_jobs():
     # 定期检查是否有 AI 要发朋友圈
     scheduler.add_job(
         _check_moment_posts,
-        IntervalTrigger(minutes=45),
+        IntervalTrigger(minutes=180),
         id="moment_check",
         replace_existing=True
     )
@@ -454,7 +454,7 @@ async def _check_moment_comments():
                 }
             )
 
-    if comment_candidates and random.random() < 0.7:
+    if comment_candidates and random.random() < 0.5:
         target = random.choice(comment_candidates)
         await _event_callback(
             {

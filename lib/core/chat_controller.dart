@@ -22,6 +22,7 @@ import '../services/memory_service.dart';
 import '../services/sticker_service.dart';
 import '../services/secure_websocket_client.dart';
 import '../services/task_service.dart';
+import '../services/emoji_service.dart';
 
 class _PendingTextMessage {
   final String messageId;
@@ -299,6 +300,9 @@ class ChatController extends ChangeNotifier {
       return;
     }
 
+    // 图片消息做一次立即入库同步兜底，避免异步同步失败导致后端缺失该条对话
+    await _syncMessageToBackendNow(chatId, imageMessage);
+
     // 初始化上下文
     final context = await initChat(chatId);
 
@@ -315,6 +319,25 @@ class ChatController extends ChangeNotifier {
 
     // 3. 后台处理图片消息（调用 vision API）
     _processImageMessageInBackground(chatId, imagePath, context.isGroup);
+  }
+
+  Future<void> _syncMessageToBackendNow(String chatId, Message message) async {
+    try {
+      await SecureWebSocketClient.instance.request('save_chat_message', {
+        'role_id': chatId,
+        'message': {
+          'id': message.id,
+          'content': message.content,
+          'sender_id': message.senderId,
+          'timestamp': message.timestamp.toIso8601String(),
+          'type': message.type.toString().split('.').last,
+          'quote_id': message.quotedMessageId,
+          'quote_content': message.quotedPreviewText,
+        },
+      });
+    } catch (e) {
+      debugPrint('ChatController: immediate backend sync failed: $e');
+    }
   }
 
   /// 发送用户表情（支持用户表情标签注入给 AI）
@@ -423,6 +446,7 @@ class ChatController extends ChangeNotifier {
         userPrompt:
             '用户发送了一张图片，请以你扮演的角色身份自然地回应这张图片。不要描述图片内容，而是像朋友收到图片一样自然地回复，表达你的感受或想法。',
         rolePersona: systemPrompt,
+        roleId: role.id,
       );
 
       // 发送 AI 回复
@@ -962,6 +986,16 @@ class ChatController extends ChangeNotifier {
 
   // ========== 分段发送 ==========
 
+  Future<List<String>> _loadAvailableEmojiCategories(String roleId) async {
+    try {
+      final categories = await EmojiService.instance.getAiCategories(roleId);
+      return StickerService.normalizeCategorySet(categories).toList();
+    } catch (e) {
+      debugPrint('ChatController: load emoji categories failed for $roleId: $e');
+      return const <String>[];
+    }
+  }
+
   Future<void> _sendSegmentsQueued(
     String chatId,
     String roleId,
@@ -969,6 +1003,16 @@ class ChatController extends ChangeNotifier {
     required bool isGroup,
   }) async {
     final segments = SegmentSender.splitMessage(rawReply);
+    final availableEmojiCategories = await _loadAvailableEmojiCategories(roleId);
+    final preferredDefaultEmojiCategory = StickerService.resolveAvailableEmotion(
+      rawEmotion: 'neutral',
+      availableCategories: availableEmojiCategories,
+      defaultCategory: null,
+    );
+    final defaultEmojiCategory = preferredDefaultEmojiCategory ??
+        (availableEmojiCategories.isNotEmpty
+            ? availableEmojiCategories.first
+            : null);
     debugPrint('ChatController: Split into ${segments.length} segments');
 
     for (var i = 0; i < segments.length; i++) {
@@ -985,7 +1029,12 @@ class ChatController extends ChangeNotifier {
       }
 
       // 解析情绪标签
-      final (cleanedText, emotion) = StickerService.parseEmotionTag(segment);
+      final (cleanedText, emotion) =
+          StickerService.parseEmotionTagWithAvailableCategories(
+            segment,
+            availableCategories: availableEmojiCategories,
+            defaultCategory: defaultEmojiCategory,
+          );
       final displayText = cleanedText.isNotEmpty ? cleanedText : segment;
 
       final aiMessage = Message(
@@ -1049,18 +1098,61 @@ class ChatController extends ChangeNotifier {
           placeholderStickerMessage,
         );
 
-        try {
-          final data = await SecureWebSocketClient.instance.request(
-            'emoji_random',
-            {'role_id': roleId, 'emotion': emotion},
-          ).timeout(const Duration(seconds: 5));
+        String? resolveStickerUrl(Map<String, dynamic> data) {
           if (data['found'] == true && data['url'] != null) {
+            final value = data['url'].toString().trim();
+            if (value.isNotEmpty) {
+              return value;
+            }
+          }
+          return null;
+        }
+
+        Future<String?> fetchStickerUrlWithFallback() async {
+          final fallbackEmotions = <String>[emotion];
+          if (defaultEmojiCategory != null && defaultEmojiCategory.isNotEmpty) {
+            fallbackEmotions.add(defaultEmojiCategory);
+          }
+          fallbackEmotions.addAll(availableEmojiCategories);
+
+          final orderedCandidates = <String>[];
+          for (final candidate in fallbackEmotions) {
+            final normalized = candidate.trim().toLowerCase();
+            if (normalized.isEmpty || orderedCandidates.contains(normalized)) {
+              continue;
+            }
+            orderedCandidates.add(normalized);
+          }
+
+          for (final targetEmotion in orderedCandidates) {
+            try {
+              final data = await SecureWebSocketClient.instance.request(
+                'emoji_random',
+                {'role_id': roleId, 'emotion': targetEmotion},
+              ).timeout(const Duration(seconds: 5));
+
+              final stickerUrl = resolveStickerUrl(data);
+              if (stickerUrl != null) {
+                return stickerUrl;
+              }
+            } catch (e) {
+              debugPrint(
+                'ChatController: Sticker fetch error on emotion $targetEmotion: $e',
+              );
+            }
+          }
+
+          return null;
+        }
+
+        try {
+          final stickerUrl = await fetchStickerUrlWithFallback();
+          if (stickerUrl != null) {
               // 延迟一小段时间再发表情包
               await Future.delayed(
                 Duration(milliseconds: 300 + _random.nextInt(500)),
               );
 
-              final stickerUrl = data['url'].toString();
               final stickerContent = StickerService.createStickerMessageContent(
                 emotion,
                 stickerUrl,
@@ -1081,12 +1173,19 @@ class ChatController extends ChangeNotifier {
         }
 
         if (!placeholderResolved) {
-          await MessageStore.instance.deleteMessage(
+          final fallbackPlaceholderEmotion =
+              defaultEmojiCategory ?? emotion;
+          await MessageStore.instance.updateMessage(
             chatId,
             placeholderStickerId,
+            content: StickerService.createStickerMessageContent(
+              fallbackPlaceholderEmotion,
+              'placeholder://$fallbackPlaceholderEmotion',
+            ),
+            type: MessageType.sticker,
           );
           debugPrint(
-            'ChatController: Removed unresolved placeholder sticker: $emotion',
+            'ChatController: Keep fallback placeholder sticker for emotion: $emotion',
           );
         }
       }

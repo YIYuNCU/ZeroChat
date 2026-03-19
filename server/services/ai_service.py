@@ -194,8 +194,8 @@ async def generate_with_role(
             system_content += system_prompt
         if extra_context:
             system_content += f"\n\n额外上下文：{extra_context}"
-        system_content += "用户消息格式为：message: <消息内容>\ntime: <消息时间> <星期几>，请严格按照这个格式理解用户消息，并在回复中体现对时间的理解和关联。"
-        
+        system_content += "用户消息格式为：message: <消息内容>\ntime: <消息时间> <星期几>，请严格按照这个格式理解用户消息，并在回复中体现对时间的理解和关联。\n"
+        system_content += "在回复中适当使用$字符进行分段操作，在改变对话内容时进行分段，以使回复内容更易读。"
         messages.append({"role": "system", "content": system_content})
     # 历史消息
     if history:

@@ -50,6 +50,11 @@ def load_config():
         "ai_api_url": "",
         "ai_api_key": "",
         "ai_model": "gpt-3.5-turbo",
+        "vision_enabled": False,
+        "vision_api_url": "",
+        "vision_api_key": "",
+        "vision_model": "gpt-4o",
+        "vision_mode": "standalone",
         "auth_token": "ZEROCHAT_FIXED_TOKEN_2026",
         "encryption_secret": "ZEROCHAT_TRANSFER_SECRET_2026",
     }
