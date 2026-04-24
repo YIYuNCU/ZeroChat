@@ -1,0 +1,530 @@
+import 'dart:io';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
+import 'package:image/image.dart' as img;
+import '../models/role.dart';
+import 'settings_service.dart';
+import 'secure_backend_client.dart';
+import 'secure_websocket_client.dart';
+
+/// API 服务
+/// 用于调用第三方 AI API（支持 OpenAI 兼容接口）
+class ApiService {
+  // 聊天 API 配置（优先使用 SettingsService 的配置）
+  static String _baseUrl = 'https://api.openai.com/v1';
+  static String? _apiKey;
+  static String _model = 'gpt-3.5-turbo';
+
+  /// 最大上下文轮数（每轮包含用户消息和AI回复）
+  static int maxContextRounds = 10;
+  static const int _visionChunkSize = 64 * 1024;
+  static const int _visionChunkMaxRetry = 3;
+  static bool _directBypassAuthorized = false;
+
+  /// 授权下一次前端直连请求（仅生效一次）
+  static void authorizeNextDirectBypass() {
+    _directBypassAuthorized = true;
+  }
+
+  /// 获取当前使用的 API URL
+  static String get _effectiveUrl {
+    final settingsUrl = SettingsService.instance.chatApiUrl;
+    return settingsUrl.isNotEmpty ? settingsUrl : _baseUrl;
+  }
+
+  /// 获取当前使用的 API Key
+  static String? get _effectiveKey {
+    final settingsKey = SettingsService.instance.chatApiKey;
+    return settingsKey.isNotEmpty ? settingsKey : _apiKey;
+  }
+
+  /// 获取当前使用的模型
+  static String get _effectiveModel {
+    final settingsModel = SettingsService.instance.chatModel;
+    return settingsModel.isNotEmpty ? settingsModel : _model;
+  }
+
+  /// 配置聊天 API（备用配置，优先使用 SettingsService）
+  static void configure({
+    required String baseUrl,
+    required String apiKey,
+    String model = 'gpt-3.5-turbo',
+    int maxRounds = 10,
+  }) {
+    _baseUrl = baseUrl;
+    _apiKey = apiKey;
+    _model = model;
+    maxContextRounds = maxRounds;
+    debugPrint('ApiService configured: $_baseUrl, model: $_model');
+  }
+
+  /// 设置 API Key
+  static void setApiKey(String key) {
+    _apiKey = key;
+  }
+
+  /// 设置 API 地址
+  static void setBaseUrl(String url) {
+    _baseUrl = url;
+  }
+
+  /// 设置模型
+  static void setModel(String model) {
+    _model = model;
+  }
+
+  /// 发送聊天消息到 AI 接口（使用角色参数）
+  /// [message] 用户当前发送的消息
+  /// [role] 当前使用的角色（包含 systemPrompt 和参数）
+  /// [history] 对话历史
+  /// [coreMemory] 核心记忆内容
+  /// [isGroup] 是否为群聊
+  static Future<ApiResponse> sendChatMessageWithRole({
+    required String message,
+    required Role role,
+    List<Map<String, String>>? history,
+    List<String>? coreMemory,
+    bool isGroup = false,
+    bool preferBackend = true,
+  }) async {
+    if (preferBackend && role.id != 'temp' && _backendUrl.isNotEmpty) {
+      final backendResponse = await sendChatViaBackend(
+        roleId: role.id,
+        message: message,
+      );
+      if (backendResponse.success && backendResponse.content != null) {
+        debugPrint('ApiService: sendChatMessageWithRole via backend');
+        return backendResponse;
+      }
+      debugPrint(
+        'ApiService: backend-first failed, fallback to direct API: ${backendResponse.error}',
+      );
+    }
+
+    return sendChatMessageWithRoleDirect(
+      message: message,
+      role: role,
+      history: history,
+      coreMemory: coreMemory,
+      isGroup: isGroup,
+    );
+  }
+
+  /// 直连 AI 接口（用于后端不可用时显式回退）
+  static Future<ApiResponse> sendChatMessageWithRoleDirect({
+    required String message,
+    required Role role,
+    List<Map<String, String>>? history,
+    List<String>? coreMemory,
+    bool isGroup = false,
+    bool requireManualConfirmation = true,
+  }) async {
+    if (requireManualConfirmation && !_directBypassAuthorized) {
+      return ApiResponse.error('已拦截前端直连请求，请先手动确认后重试');
+    }
+
+    _directBypassAuthorized = false;
+
+    // 检查 API Key
+    final apiKey = _effectiveKey;
+    if (apiKey == null || apiKey.isEmpty) {
+      return ApiResponse.error('请先在"我"->"AI接口设置"中配置 API Key');
+    }
+
+    try {
+      // 构建消息列表
+      final List<Map<String, String>> messages = [];
+
+      // 使用 SettingsService 构建完整的系统提示词（包含全局 base prompt）
+      String fullSystemPrompt = SettingsService.instance.buildSystemPrompt(
+        rolePrompt: role.systemPrompt,
+        isGroup: isGroup,
+      );
+
+      // 添加核心记忆
+      if (coreMemory != null && coreMemory.isNotEmpty) {
+        fullSystemPrompt += '\n\n[核心记忆 - 用户的重要信息]\n${coreMemory.join('\n')}';
+      }
+      messages.add({'role': 'system', 'content': fullSystemPrompt});
+
+      // 添加对话历史
+      if (history != null) {
+        messages.addAll(history);
+      }
+
+      // 添加当前用户消息
+      messages.add({'role': 'user', 'content': message});
+
+      // ========== 详细调试日志 ==========
+      debugPrint('═══════════════════════════════════════════════════════════');
+      debugPrint(
+        '🔷 API Request: role=${role.name}, messages=${messages.length}',
+      );
+      debugPrint(
+        '📝 System Prompt: ${fullSystemPrompt.length > 200 ? '${fullSystemPrompt.substring(0, 200)}...' : fullSystemPrompt}',
+      );
+      debugPrint('💬 User Message: $message');
+      if (history != null && history.isNotEmpty) {
+        debugPrint('📜 History: ${history.length} messages');
+        for (var i = 0; i < history.length && i < 3; i++) {
+          debugPrint(
+            '   └─ ${history[i]['role']}: ${history[i]['content']?.toString().substring(0, history[i]['content']!.length > 50 ? 50 : history[i]['content']!.length)}...',
+          );
+        }
+      }
+      debugPrint(
+        '⚙️ Params: temp=${role.temperature}, freq=${role.frequencyPenalty}, pres=${role.presencePenalty}',
+      );
+      debugPrint('───────────────────────────────────────────────────────────');
+
+      final response = await SecureBackendClient.postRawJson(
+        '$_effectiveUrl/chat/completions',
+        headers: {'Authorization': 'Bearer $apiKey'},
+        includeAuth: false,
+        body: {
+          'model': _effectiveModel,
+          'messages': messages,
+          'temperature': role.temperature,
+          'top_p': role.topP,
+          'frequency_penalty': role.frequencyPenalty,
+          'presence_penalty': role.presencePenalty,
+          'max_tokens': 2000,
+        },
+      );
+
+      debugPrint('📡 API Response: ${response.statusCode}');
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final content = data['choices']?[0]?['message']?['content'] as String?;
+        if (content != null) {
+          debugPrint(
+            '🤖 AI Response: ${content.length > 300 ? '${content.substring(0, 300)}...' : content}',
+          );
+          debugPrint(
+            '═══════════════════════════════════════════════════════════',
+          );
+          return ApiResponse.success(content.trim());
+        }
+        return ApiResponse.error('AI 返回内容为空');
+      } else {
+        final errorBody = response.body;
+        debugPrint('❌ API Error: $errorBody');
+        debugPrint(
+          '═══════════════════════════════════════════════════════════',
+        );
+        return ApiResponse.error('API 请求失败 (${response.statusCode})');
+      }
+    } catch (e) {
+      debugPrint('❌ API Exception: $e');
+      debugPrint('═══════════════════════════════════════════════════════════');
+      return ApiResponse.error('网络错误: $e');
+    }
+  }
+
+  /// 发送聊天消息（不使用角色，使用默认参数）
+  static Future<ApiResponse> sendChatMessage({
+    required String message,
+    String? systemPrompt,
+    List<Map<String, String>>? history,
+    List<String>? coreMemory,
+  }) async {
+    // 创建临时角色使用默认参数
+    final tempRole = Role(
+      id: 'temp',
+      name: 'Temp',
+      systemPrompt: systemPrompt ?? '你是一个友好的AI助手。',
+    );
+    return sendChatMessageWithRole(
+      message: message,
+      role: tempRole,
+      history: history,
+      coreMemory: coreMemory,
+    );
+  }
+
+  /// 快速发送消息（不带历史）
+  static Future<ApiResponse> quickChat(String message) async {
+    return sendChatMessage(message: message);
+  }
+
+  /// 获取当前配置的模型
+  static String get currentModel => _model;
+
+  /// 检查 API 是否已配置
+  static bool get isConfigured => _apiKey != null && _apiKey!.isNotEmpty;
+
+  // ========== 后端集成 ==========
+
+  /// 获取后端 URL
+  static String get _backendUrl => SettingsService.instance.backendUrl;
+
+  /// 通过后端调用 AI（统一入口）
+  /// [roleId] 角色 ID
+  /// [eventType] 事件类型: chat, task, proactive, moment, comment
+  /// [content] 消息内容
+  /// [context] 额外上下文
+  static Future<ApiResponse> callBackendAI({
+    required String roleId,
+    required String eventType,
+    String content = '',
+    Map<String, dynamic>? context,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    try {
+      final wsData = await SecureWebSocketClient.instance.request(
+        'ai_event',
+        {
+          'event': {
+            'role_id': roleId,
+            'event_type': eventType,
+            'content': content,
+            'context': context ?? <String, dynamic>{},
+          },
+        },
+        timeout: timeout,
+      );
+
+      debugPrint('ApiService: Backend AI call via websocket - $eventType for $roleId');
+      if (wsData['success'] == true && wsData['content'] != null) {
+        final rawMetadata = wsData['metadata'];
+        final metadata = rawMetadata is Map
+            ? Map<String, dynamic>.from(rawMetadata)
+            : null;
+        return ApiResponse.success(
+          wsData['content'].toString(),
+          metadata: metadata,
+        );
+      }
+      if (wsData['action']?.toString() == 'ignore') {
+        return ApiResponse.error('AI chose to ignore');
+      }
+      final wsError = wsData['error']?.toString();
+      if (wsError != null && wsError.isNotEmpty) {
+        return ApiResponse.error(wsError);
+      }
+
+      return ApiResponse.error('Unknown backend response');
+    } catch (e) {
+      debugPrint('ApiService: websocket backend call failed: $e');
+      return ApiResponse.error('后端WebSocket不可用: $e');
+    }
+  }
+
+  /// 通过后端发送聊天消息
+  /// 这是 sendChatMessageWithRole 的后端版本
+  static Future<ApiResponse> sendChatViaBackend({
+    required String roleId,
+    required String message,
+    Map<String, dynamic>? context,
+  }) async {
+    return callBackendAI(
+      roleId: roleId,
+      eventType: 'chat',
+      content: message,
+      context: context,
+      timeout: const Duration(seconds: 20),
+    );
+  }
+
+  /// 检查后端是否可用
+  static Future<bool> isBackendAvailable() async {
+    try {
+      final response = await SecureWebSocketClient.instance.request(
+        'health',
+        const <String, dynamic>{},
+        timeout: const Duration(seconds: 3),
+      );
+      return response['status']?.toString() == 'healthy';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 图片识别聊天（通过后端调用 vision API）
+  static Future<String> chatWithImage({
+    required String imagePath,
+    required String userPrompt,
+    required String rolePersona,
+    String? roleId,
+  }) async {
+    try {
+      // 读取图片并转为 base64
+      final file = await _readImageFile(imagePath);
+      final compressed = _compressImageBytes(file, imagePath);
+      final imageBytes = compressed.$1;
+      final mimeType = compressed.$2;
+
+      final uploadId = await _uploadVisionImageInChunks(
+        imageBytes: imageBytes,
+        mimeType: mimeType,
+      );
+
+      final response = await SecureWebSocketClient.instance.request(
+        'chat_vision',
+        {
+          'upload_id': uploadId,
+          'mime_type': mimeType,
+          'user_prompt': userPrompt,
+          'system_prompt': rolePersona,
+          'role_id': roleId,
+          'run_mode': SettingsService.instance.visionMode,
+        },
+        timeout: const Duration(seconds: 120),
+      );
+      return response['reply']?.toString() ?? '图片识别失败';
+    } catch (e) {
+      debugPrint('chatWithImage error: $e');
+      return '图片识别失败：$e';
+    }
+  }
+
+  static Future<String> _uploadVisionImageInChunks({
+    required List<int> imageBytes,
+    required String mimeType,
+  }) async {
+    if (imageBytes.isEmpty) {
+      throw Exception('image bytes empty');
+    }
+
+    final uploadId = _buildVisionUploadId(imageBytes);
+    final totalChunks = (imageBytes.length / _visionChunkSize).ceil();
+    final initResp = await SecureWebSocketClient.instance.request(
+      'vision_upload_init',
+      {
+        'upload_id': uploadId,
+        'total_chunks': totalChunks,
+        'mime_type': mimeType,
+        'file_size': imageBytes.length,
+      },
+      timeout: const Duration(seconds: 20),
+    );
+
+    final resolvedUploadId = initResp['upload_id']?.toString() ?? '';
+    if (resolvedUploadId.isEmpty) {
+      throw Exception('upload init failed: upload_id missing');
+    }
+
+    final uploadedChunkSet = <int>{};
+    final uploadedRaw = initResp['uploaded_chunks'];
+    if (uploadedRaw is List) {
+      for (final item in uploadedRaw) {
+        final index = int.tryParse(item.toString());
+        if (index != null && index >= 0 && index < totalChunks) {
+          uploadedChunkSet.add(index);
+        }
+      }
+    }
+
+    final completed = initResp['completed'] == true;
+    if (!completed) {
+      for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        if (uploadedChunkSet.contains(chunkIndex)) {
+          continue;
+        }
+        final start = chunkIndex * _visionChunkSize;
+        final end = (start + _visionChunkSize > imageBytes.length)
+            ? imageBytes.length
+            : start + _visionChunkSize;
+        final chunkBytes = imageBytes.sublist(start, end);
+        final chunkBase64 = base64Encode(chunkBytes);
+
+        int attempt = 0;
+        while (true) {
+          attempt += 1;
+          try {
+            await SecureWebSocketClient.instance.request(
+              'vision_upload_chunk',
+              {
+                'upload_id': resolvedUploadId,
+                'chunk_index': chunkIndex,
+                'chunk_base64': chunkBase64,
+              },
+              timeout: const Duration(seconds: 20),
+            );
+            break;
+          } catch (e) {
+            if (attempt >= _visionChunkMaxRetry) {
+              throw Exception('chunk upload failed at index=$chunkIndex, attempts=$attempt, error=$e');
+            }
+            await Future<void>.delayed(Duration(milliseconds: 250 * attempt));
+          }
+        }
+      }
+
+      await SecureWebSocketClient.instance.request(
+        'vision_upload_commit',
+        {'upload_id': resolvedUploadId},
+        timeout: const Duration(seconds: 30),
+      );
+    }
+
+    return resolvedUploadId;
+  }
+
+  static String _buildVisionUploadId(List<int> imageBytes) {
+    final digest = md5.convert(imageBytes).toString();
+    return 'v1_${digest}_${imageBytes.length}';
+  }
+
+  /// 读取图片文件为字节数组
+  static Future<List<int>> _readImageFile(String path) async {
+    final file = File(path);
+    return await file.readAsBytes();
+  }
+
+  static (List<int>, String) _compressImageBytes(List<int> rawBytes, String imagePath) {
+    // 小图直接透传，避免不必要的处理
+    const smallImageThreshold = 350 * 1024;
+    final ext = imagePath.split('.').last.toLowerCase();
+    final fallbackMimeType = ext == 'png' ? 'image/png' : 'image/jpeg';
+    if (rawBytes.length <= smallImageThreshold) {
+      return (rawBytes, fallbackMimeType);
+    }
+
+    try {
+      final decoded = img.decodeImage(Uint8List.fromList(rawBytes));
+      if (decoded == null) {
+        return (rawBytes, fallbackMimeType);
+      }
+
+      // 约束最大边，降低上传体积与后端处理时延
+      const maxSide = 1280;
+      final resized = (decoded.width > maxSide || decoded.height > maxSide)
+          ? img.copyResize(decoded, width: decoded.width >= decoded.height ? maxSide : null, height: decoded.height > decoded.width ? maxSide : null)
+          : decoded;
+
+      // 统一转 jpeg，质量折中到 78，显著减少体积
+      final jpgBytes = img.encodeJpg(resized, quality: 78);
+      return (jpgBytes, 'image/jpeg');
+    } catch (e) {
+      debugPrint('ApiService: image compress failed, fallback to raw bytes: $e');
+      return (rawBytes, fallbackMimeType);
+    }
+  }
+}
+
+/// API 响应封装
+class ApiResponse {
+  final bool success;
+  final String? content;
+  final Map<String, dynamic>? metadata; // 后端返回的元信息（如 request_id）
+  final String? error;
+
+  ApiResponse._({
+    required this.success,
+    this.content,
+    this.metadata,
+    this.error,
+  });
+
+  factory ApiResponse.success(String content, {Map<String, dynamic>? metadata}) {
+    return ApiResponse._(success: true, content: content, metadata: metadata);
+  }
+
+  factory ApiResponse.error(String error) {
+    return ApiResponse._(success: false, error: error);
+  }
+}

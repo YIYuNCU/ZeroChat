@@ -4,6 +4,7 @@ AI 服务
 """
 import json
 import httpx
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -56,6 +57,71 @@ def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optio
 
     return _resolve_ai_config(model, api_url, api_key, temperature)
 
+
+def _extract_plain_message_content(content: Any) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+
+    if text.startswith("```") and text.endswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", text).rstrip("`").strip()
+
+    normalized = text.replace("：", ":")
+    lines = [line.rstrip() for line in normalized.splitlines()]
+
+    def _is_meta_key_line(line_text: str) -> bool:
+        stripped = line_text.strip().lower()
+        return (
+            stripped.startswith("message:")
+            or stripped.startswith("time:")
+            or stripped.startswith("origin:")
+            or stripped.startswith("sender:")
+        )
+
+    message_idx = -1
+    for idx, line in enumerate(lines):
+        if line.strip().lower().startswith("message:"):
+            message_idx = idx
+            break
+
+    if message_idx >= 0:
+        first_line = lines[message_idx]
+        first_part = re.sub(r"(?i)^\s*message\s*:\s*", "", first_line).strip()
+        message_parts = [first_part] if first_part else []
+        for follow in lines[message_idx + 1:]:
+            if _is_meta_key_line(follow):
+                break
+            follow_text = follow.strip()
+            if follow_text:
+                message_parts.append(follow_text)
+        if message_parts:
+            return "\n".join(message_parts).strip()
+
+    non_empty = [line.strip() for line in lines if line.strip()]
+    if len(non_empty) < 4:
+        return normalized.strip()
+
+    header = [line.lower() for line in non_empty[:4]]
+    if not (
+        header[0].startswith("message:")
+        and header[1].startswith("time:")
+        and header[2].startswith("origin:")
+        and header[3].startswith("sender:")
+    ):
+        cleaned_lines = [line for line in non_empty if not _is_meta_key_line(line)]
+        if cleaned_lines:
+            return "\n".join(cleaned_lines).strip()
+        return normalized.strip()
+
+    message_text = non_empty[0][len("message:"):].strip()
+    if message_text:
+        return message_text
+
+    match = re.search(r"(?im)^message\s*[:：]\s*(.+)$", normalized)
+    if match:
+        return match.group(1).strip()
+    return normalized.strip()
+
 async def _post_chat(
     messages: List[Dict[str, str]],
     api_url: str,
@@ -81,7 +147,8 @@ async def _post_chat(
             )
             response.raise_for_status()
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            raw_content = data["choices"][0]["message"]["content"]
+            content = _extract_plain_message_content(raw_content)
             if "usage" in data:
                 print(
                     "hit chache:{},miss cache:{},total tokens:{}".format(
@@ -165,7 +232,9 @@ async def generate_with_role(
     role_data: Dict,
     user_message: str,
     history: Optional[List[Dict]] = None,
-    extra_context: Optional[str] = None
+    extra_context: Optional[str] = None,
+    origin: str = "zerochat",
+    sender: str = "user",
 ) -> Dict[str, Any]:
     """
     以角色身份生成回复
@@ -194,8 +263,9 @@ async def generate_with_role(
             system_content += system_prompt
         if extra_context:
             system_content += f"\n\n额外上下文：{extra_context}"
-        system_content += "用户消息格式为：message: <消息内容>\ntime: <消息时间> <星期几>，请严格按照这个格式理解用户消息，并在回复中体现对时间的理解和关联。\n"
-        system_content += "在回复中适当使用$字符进行分段操作，在改变对话内容时进行分段，以使回复内容更易读。"
+        system_content += "用户发送给你的消息格式为：message: <消息内容>\ntime: <消息时间> <星期几>\norigin: <来源>\nsender: <发送者>，请严格按照这个格式理解用户消息，并在回复中体现对时间与来源的理解和关联。\n"
+        system_content += "你给用户的回复必须严格执行以下要求:只包含消息正文(即只包含message部分),如\"<整个人僵了一下> 诶？！<脸瞬间通红> 这、这也算礼物吗...\"，不要输出其他字段内容\n"
+        system_content += "在回复中适当使用$字符进行分段操作，在改变对话内容时进行分段，以使回复内容更易读，但不要每句话都分段，不要每句话都转换内容。"
         messages.append({"role": "system", "content": system_content})
     # 历史消息
     if history:
@@ -204,7 +274,12 @@ async def generate_with_role(
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
             })
-    user_message = f"message: {user_message}\ntime: {now.strftime('%Y-%m-%d %H:%M:%S')} {weekday}"
+    user_message = (
+        f"message: {user_message}\n"
+        f"time: {now.strftime('%Y-%m-%d %H:%M:%S')} {weekday}\n"
+        f"origin: {str(origin or 'zerochat').strip() or 'zerochat'}\n"
+        f"sender: {str(sender or 'user').strip() or 'user'}"
+    )
     # 当前消息
     messages.append({"role": "user", "content": user_message})
 

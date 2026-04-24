@@ -211,15 +211,16 @@ server/data/**
 server/data/roles/**
 !server/data/roles/1000000000*/
 !server/data/roles/1000000000*/**
-web/
-windows/
+client/web/
+client/windows/
 .flutter-plugins/
 .flutter-plugins-dependencies
-.metadata
-devtools_options.yaml
-zerochat.iml
-.idea/
-.dart_tool/
+client/.metadata
+client/devtools_options.yaml
+client/zerochat.iml
+client/.idea/
+client/.dart_tool/
+client/build/
 
 *.properties
 *.lock

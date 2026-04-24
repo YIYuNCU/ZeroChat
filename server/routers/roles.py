@@ -164,8 +164,44 @@ class RoleUpdate(BaseModel):
 
 class MemoryUpdate(BaseModel):
     """记忆更新"""
-    core_memory: Optional[str] = None
-    short_term: Optional[List[str]] = None
+    core_memory: Optional[Any] = None
+    short_term: Optional[List[Any]] = None
+
+
+def _core_memory_to_lines(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value)
+    if not text.strip():
+        return []
+    if "\n" in text:
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    if "；" in text:
+        return [part.strip() for part in text.split("；") if part.strip()]
+    if ";" in text:
+        return [part.strip() for part in text.split(";") if part.strip()]
+    return [text.strip()] if text.strip() else []
+
+
+def _core_memory_to_text(value: Any) -> str:
+    return "\n".join(_core_memory_to_lines(value))
+
+
+def _overlay_role_core_memory_from_db(role_data: Dict[str, Any]) -> Dict[str, Any]:
+    role_id = str(role_data.get("id") or "").strip()
+    if not role_id:
+        return role_data
+    try:
+        from services.memory_service import load_memory
+
+        memory = load_memory(role_id)
+        role_copy = dict(role_data)
+        role_copy["core_memory"] = _core_memory_to_lines(memory.get("core_memory", ""))
+        return role_copy
+    except Exception:
+        return role_data
 
 def get_role_dir(role_id: str) -> Path:
     """获取角色目录，自动创建完整目录结构"""
@@ -242,7 +278,7 @@ async def list_roles(request: Request):
             if role_dir.is_dir():
                 role = load_role(role_dir.name)
                 if role:
-                    roles.append(normalize_role_avatar_url(role, request))
+                    roles.append(normalize_role_avatar_url(_overlay_role_core_memory_from_db(role), request))
     return {"roles": roles}
 
 @router.get("/roles/{role_id}")
@@ -251,7 +287,7 @@ async def get_role(role_id: str, request: Request):
     role = load_role(role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
-    return normalize_role_avatar_url(role, request)
+    return normalize_role_avatar_url(_overlay_role_core_memory_from_db(role), request)
 
 @router.post("/roles")
 async def create_role(role: RoleCreate, request: Request):
@@ -265,8 +301,14 @@ async def create_role(role: RoleCreate, request: Request):
             if key != 'id' and value is not None:
                 existing[key] = value
         save_role(role.id, existing)
+        if role.core_memory is not None:
+            from services.memory_service import load_memory, save_memory
+
+            runtime_memory = load_memory(role.id)
+            runtime_memory["core_memory"] = _core_memory_to_text(role.core_memory)
+            save_memory(role.id, runtime_memory)
         print(f"[ROLES] Role updated: {role.id}, core_memory count: {len(existing.get('core_memory', []))}")
-        return normalize_role_avatar_url(existing, request)
+        return normalize_role_avatar_url(_overlay_role_core_memory_from_db(existing), request)
     
     # 创建新角色
     print(f"[ROLES] Creating new role: {role.id}")
@@ -305,10 +347,13 @@ async def create_role(role: RoleCreate, request: Request):
     save_role(role.id, data)
     # Ensure an empty memory database exists for the new role.
     if not _is_tool_role_id(role.id):
-        from services.memory_service import load_memory
-        load_memory(role.id)
+        from services.memory_service import load_memory, save_memory
+
+        runtime_memory = load_memory(role.id)
+        runtime_memory["core_memory"] = _core_memory_to_text(role.core_memory or [])
+        save_memory(role.id, runtime_memory)
     print(f"[ROLES] Role created: {role.id}")
-    return normalize_role_avatar_url(data, request)
+    return normalize_role_avatar_url(_overlay_role_core_memory_from_db(data), request)
 
 @router.put("/roles/{role_id}")
 async def update_role(role_id: str, update: RoleUpdate, request: Request):
@@ -321,7 +366,13 @@ async def update_role(role_id: str, update: RoleUpdate, request: Request):
         role[key] = value
     
     save_role(role_id, role)
-    return normalize_role_avatar_url(role, request)
+    if update.core_memory is not None:
+        from services.memory_service import load_memory, save_memory
+
+        runtime_memory = load_memory(role_id)
+        runtime_memory["core_memory"] = _core_memory_to_text(update.core_memory)
+        save_memory(role_id, runtime_memory)
+    return normalize_role_avatar_url(_overlay_role_core_memory_from_db(role), request)
 
 @router.delete("/roles/{role_id}")
 async def delete_role(role_id: str):
@@ -341,11 +392,24 @@ def _normalize_short_term(items: List[Any]) -> List[Dict[str, Any]]:
             content = str(item.get("content", ""))
             role = item.get("role") or "assistant"
             timestamp = item.get("timestamp") or datetime.now().isoformat()
+            task_id = item.get("task_id")
+            request_id = item.get("request_id")
+            json_memory = item.get("json_memory")
         else:
             content = str(item)
             role = "assistant"
             timestamp = datetime.now().isoformat()
-        normalized.append({"role": role, "content": content, "timestamp": timestamp})
+            task_id = None
+            request_id = None
+            json_memory = None
+        normalized.append({
+            "role": role,
+            "content": content,
+            "timestamp": timestamp,
+            "task_id": task_id,
+            "request_id": request_id,
+            "json_memory": json_memory,
+        })
     return normalized
 
 @router.get("/roles/{role_id}/memory")
@@ -355,7 +419,7 @@ async def get_memory(role_id: str):
 
     memory = load_memory(role_id)
     return {
-        "core_memory": memory.get("core_memory", ""),
+        "core_memory": _core_memory_to_lines(memory.get("core_memory", "")),
         "short_term": memory.get("short_term", [])
     }
 
@@ -367,13 +431,13 @@ async def update_memory(role_id: str, update: MemoryUpdate):
     memory = load_memory(role_id)
     
     if update.core_memory is not None:
-        memory["core_memory"] = update.core_memory
+        memory["core_memory"] = _core_memory_to_text(update.core_memory)
     if update.short_term is not None:
         memory["short_term"] = _normalize_short_term(update.short_term)
     
     save_memory(role_id, memory)
     return {
-        "core_memory": memory.get("core_memory", ""),
+        "core_memory": _core_memory_to_lines(memory.get("core_memory", "")),
         "short_term": memory.get("short_term", [])
     }
 
@@ -385,7 +449,7 @@ async def append_memory(role_id: str, content: str):
     append_short_term(role_id, "assistant", content, window_size=50)
     memory = load_memory(role_id)
     return {
-        "core_memory": memory.get("core_memory", ""),
+        "core_memory": _core_memory_to_lines(memory.get("core_memory", "")),
         "short_term": memory.get("short_term", [])
     }
 

@@ -523,11 +523,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             raise ValueError("role_id missing")
 
         update = roles.MemoryUpdate(
-            core_memory=(
-                str(payload.get("core_memory"))
-                if payload.get("core_memory") is not None
-                else None
-            ),
+            core_memory=payload.get("core_memory"),
             short_term=(
                 list(payload.get("short_term") or [])
                 if payload.get("short_term") is not None
@@ -535,6 +531,12 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             ),
         )
         return await roles.update_memory(role_id, update)
+
+    if action == "roles_memory_get":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        return await roles.get_memory(role_id)
 
     if action == "roles_avatar_upload":
         role_id = str(payload.get("role_id") or "").strip()

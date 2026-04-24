@@ -54,20 +54,23 @@
 
 ```
 zerochat/
-├── lib/                        # Flutter 前端
-│   ├── main.dart               # 应用入口
-│   ├── core/                   # 核心逻辑
-│   │   ├── chat_controller.dart    # 聊天控制器（核心）
-│   │   ├── message_store.dart      # 消息存储
-│   │   ├── moments_scheduler.dart  # 朋友圈调度器
-│   │   ├── proactive_message_scheduler.dart  # 主动消息调度
-│   │   ├── group_scheduler.dart    # 群聊调度
-│   │   ├── memory_manager.dart     # 记忆管理
-│   │   └── segment_sender.dart     # 分段发送工具
-│   ├── models/                 # 数据模型
-│   ├── pages/                  # 页面（21个）
-│   ├── services/               # 服务层（15个）
-│   └── widgets/                # 自定义组件
+├── client/                     # Flutter 前端
+│   ├── lib/                    # 应用主代码
+│   │   ├── main.dart           # 应用入口
+│   │   ├── core/               # 核心逻辑
+│   │   │   ├── chat_controller.dart    # 聊天控制器（核心）
+│   │   │   ├── message_store.dart      # 消息存储
+│   │   │   ├── moments_scheduler.dart  # 朋友圈调度器
+│   │   │   ├── proactive_message_scheduler.dart  # 主动消息调度
+│   │   │   ├── group_scheduler.dart    # 群聊调度
+│   │   │   ├── memory_manager.dart     # 记忆管理
+│   │   │   └── segment_sender.dart     # 分段发送工具
+│   │   ├── models/             # 数据模型
+│   │   ├── pages/              # 页面（21个）
+│   │   ├── services/           # 服务层（15个）
+│   │   ├── widgets/            # 自定义组件
+│   │   └── android/            # Android 平台配置
+│   └── pubspec.yaml            # Dart 依赖
 │
 └── server/                     # FastAPI 后端
     ├── main.py                 # 服务入口
@@ -230,6 +233,7 @@ start.bat          # Windows
 # 或: chmod +x start.sh && ./start.sh  # Linux/Mac
 
 # 2. 启动前端
+cd client
 flutter pub get
 flutter run
 ```

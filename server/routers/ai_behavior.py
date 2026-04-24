@@ -4,7 +4,9 @@ AI 行为统一入口
 """
 import json
 import random
+import re
 import shutil
+import uuid
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -105,6 +107,35 @@ def _normalize_core_memory(raw_core_memory: Any) -> List[str]:
         if text:
             result.append(text)
     return result
+
+
+def _sanitize_reply_content(reply: Any) -> str:
+    text = str(reply or "").strip()
+    if not text:
+        return ""
+
+    normalized = text.replace("：", ":")
+    lines = [line.rstrip() for line in normalized.splitlines()]
+    message_idx = -1
+    for idx, line in enumerate(lines):
+        if line.strip().lower().startswith("message:"):
+            message_idx = idx
+            break
+
+    if message_idx >= 0:
+        first = re.sub(r"(?i)^\s*message\s*:\s*", "", lines[message_idx]).strip()
+        parts = [first] if first else []
+        for line in lines[message_idx + 1:]:
+            low = line.strip().lower()
+            if low.startswith("time:") or low.startswith("origin:") or low.startswith("sender:"):
+                break
+            local = line.strip()
+            if local:
+                parts.append(local)
+        if parts:
+            return "\n".join(parts).strip()
+
+    return text
 
 
 def _load_moments_posts() -> List[Dict[str, Any]]:
@@ -446,12 +477,110 @@ async def detect_intent(request: IntentDetectRequest):
 
 # ========== 聊天处理 ==========
 
-async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
-    """处理用户聊天消息"""
+async def _run_memory_ai_pipeline(
+    role: Dict,
+    role_id: str,
+    user_message: str,
+    event_context: Optional[Dict[str, Any]] = None,
+    extra_parts: Optional[List[str]] = None,
+    task_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    attached_json: Optional[str] = None,
+    origin: str = "zerochat",
+    user_sender: str = "user",
+    include_user_memory: bool = True,
+    include_assistant_memory: bool = True,
+    trigger_summary_after_reply: bool = True,
+) -> Dict[str, Any]:
     from services.ai_service import generate_with_role
     from services.memory_service import (
-        get_context_messages, get_memory_context_string,
-        append_short_term, trigger_memory_summary,
+        get_context_messages,
+        get_memory_context_string,
+        append_short_term,
+        trigger_memory_summary,
+        _get_memory_length,
+    )
+
+    local_context = event_context or {}
+    backend_history = await get_context_messages(role_id, limit=_get_memory_length())
+    client_history = _normalize_history_items(local_context.get("history"))
+    history = backend_history if backend_history else client_history
+
+    backend_memory_context = (get_memory_context_string(role_id) or "").strip()
+    client_core_memory = _normalize_core_memory(local_context.get("core_memory"))
+    client_memory_context = "\n".join(client_core_memory).strip()
+    memory_context = backend_memory_context if backend_memory_context else client_memory_context
+
+    combined_parts: List[str] = []
+    if memory_context:
+        combined_parts.append(memory_context)
+    if extra_parts:
+        combined_parts.extend([str(part).strip() for part in extra_parts if str(part or "").strip()])
+    extra_context = "\n\n".join(combined_parts) if combined_parts else None
+
+    normalized_request_id = str(request_id or local_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
+
+    result = await generate_with_role(
+        role_data=role,
+        user_message=user_message,
+        history=history,
+        extra_context=extra_context,
+        origin=origin,
+        sender=user_sender,
+    )
+
+    if not result.get("success"):
+        return {
+            "success": False,
+            "error": result.get("error") or "AI 请求失败",
+            "request_id": normalized_request_id,
+            "reply": None,
+            "history": history,
+            "extra_context": extra_context,
+            "new_core": None,
+        }
+
+    ai_reply = _sanitize_reply_content(result.get("content") or "")
+    if include_user_memory:
+        append_short_term(
+            role_id,
+            "user",
+            result.get("user_content", {"content": user_message}).get("content", user_message),
+            task_id=task_id,
+            request_id=normalized_request_id,
+            json_memory=attached_json,
+            origin=origin,
+            sender=user_sender,
+        )
+    if include_assistant_memory:
+        append_short_term(
+            role_id,
+            "assistant",
+            ai_reply,
+            task_id=task_id,
+            request_id=normalized_request_id,
+            json_memory=attached_json,
+            origin=origin,
+            sender=role.get("name") or "assistant",
+        )
+
+    new_core = None
+    if trigger_summary_after_reply:
+        new_core = await trigger_memory_summary("1000000000000", role)
+
+    return {
+        "success": True,
+        "error": None,
+        "request_id": normalized_request_id,
+        "reply": ai_reply,
+        "history": history,
+        "extra_context": extra_context,
+        "new_core": new_core,
+    }
+
+async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
+    """处理用户聊天消息"""
+    from services.memory_service import (
         _if_in_menstruation, _get_memory_length,
         sequential_memory_generation,_get_menstruation_cycle_info
     )
@@ -460,16 +589,6 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     user_message = event.content or ""
     event_context = event.context or {}
 
-    # 获取上下文：优先使用后端记忆与历史，前端传入仅作兜底
-    backend_history = await get_context_messages(role_id, limit=_get_memory_length())
-    client_history = _normalize_history_items(event_context.get("history"))
-    history = backend_history if backend_history else client_history
-
-    backend_memory_context = (get_memory_context_string(role_id) or "").strip()
-    client_core_memory = _normalize_core_memory(event_context.get("core_memory"))
-    client_memory_context = "\n".join(client_core_memory).strip()
-    memory_context = backend_memory_context if backend_memory_context else client_memory_context
-    
     # 联网搜索（如果角色开启了搜索功能）
     search_context = ""
     allow_search = role.get("allow_web_search", True)
@@ -490,9 +609,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     else:
         print(f"衔接事件生成：角色 {role.get('name')} 没有生成新的衔接事件记忆，AI 可能未能正确判断或发生错误")
     # 合并额外上下文
-    extra_parts = []
-    if memory_context:
-        extra_parts.append(memory_context)
+    extra_parts: List[str] = []
     backend_moments_context = _build_moments_chat_context(role_id)
     if backend_moments_context:
         extra_parts.append(backend_moments_context)
@@ -505,10 +622,10 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         extra_parts.append(f"\n生理期数据：你当前处于生理期第{menstruation_day}天，预计持续时间{cycle_info['period_length']}天，请考虑这一点对你的情绪和状态的影响。\n")
     elif in_menstruation is False and menstruation_day is not None:
         if cycle_info:
-            extra_parts.append(f"\n生理期数据：你当前不处于生理期，距离上次生理期结束已第{menstruation_day}天，平均月经周期天数为 {cycle_info['cycle_length']} 天\n")
+            extra_parts.append(f"\n生理期数据：你当前不处于生理期，预计还有{menstruation_day}天来生理期")
         else:
-            print(f"生理期检测：角色 {role.get('name')} 当前不处于生理期，距结束已第 {menstruation_day} 天")
-            extra_parts.append(f"\n生理期数据：你当前不处于生理期，距离上次生理期结束已第{menstruation_day}天。\n")
+            print(f"生理期检测：角色 {role.get('name')} 当前不处于生理期，预计还有 {menstruation_day} 天来生理期")
+            extra_parts.append(f"\n生理期数据：你当前不处于生理期，预计还有{menstruation_day}天来生理期。\n")
     else:
         print(f"生理期检测：角色 {role.get('name')} 当前不需要进行生理期检测")
     # 外挂 JSON 记录
@@ -517,28 +634,31 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         attached_json = str(event_context.get("attached_json") or "").strip()
     if attached_json:
         extra_parts.append(f"[外挂记录]\n{attached_json}")
-    
-    extra_context = "\n\n".join(extra_parts) if extra_parts else None
-    print(f"AI 事件触发：角色 {role.get('name')} 收到消息，历史消息数：{len(history)}, 额外上下文长度：{len(extra_context) if extra_context else 0}")
-    # 生成回复
-    result = await generate_with_role(
-        role_data=role,
-        user_message=user_message,
-        history=history,
-        extra_context=extra_context
-    )
+    request_id = str(event_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
 
-    if not result["success"]:
-        return AIResponse(success=False, action="ignore", error=result["error"])
-    
-    ai_reply = result["content"]
-    
-    # 更新记忆
-    append_short_term(role_id, "user", result.get("user_content", {"content": user_message}).get("content", user_message))
-    append_short_term(role_id, "assistant", ai_reply)
-    
-    # 触发记忆总结
-    new_core = await trigger_memory_summary("1000000000000", role)
+    pipeline_result = await _run_memory_ai_pipeline(
+        role=role,
+        role_id=role_id,
+        user_message=user_message,
+        event_context=event_context,
+        extra_parts=extra_parts,
+        request_id=request_id,
+        attached_json=attached_json or None,
+        origin=str(event_context.get("origin") or "zerochat").strip() or "zerochat",
+        user_sender=str(event_context.get("sender") or "user").strip() or "user",
+        include_user_memory=True,
+        include_assistant_memory=True,
+        trigger_summary_after_reply=True,
+    )
+    if not pipeline_result.get("success"):
+        return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
+
+    ai_reply = pipeline_result.get("reply") or ""
+    extra_context = pipeline_result.get("extra_context")
+    history = pipeline_result.get("history") or []
+    new_core = pipeline_result.get("new_core")
+
+    print(f"AI 事件触发：角色 {role.get('name')} 收到消息，历史消息数：{len(history)}, 额外上下文长度：{len(extra_context) if extra_context else 0}")
     if new_core != "noneed" and new_core is not None:
         print(f"记忆总结触发：角色 {role.get('name')} 生成了新的核心记忆{new_core}")
     elif new_core is None:
@@ -556,6 +676,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         content=ai_reply,
         metadata={
             "role_name": role.get("name"),
+            "request_id": pipeline_result.get("request_id") or request_id,
             "emoji": emoji  # 如果有匹配的表情包，返回表情包名称
         }
     )
@@ -564,30 +685,25 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
 
 async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
     """处理主动消息触发"""
-    from services.ai_service import generate_with_role
-    from services.memory_service import get_memory_context_string, append_short_term, get_context_messages,_get_memory_length
-    
+
     role_id = event.role_id
     trigger_prompt = event.content or "请生成一条主动消息与用户互动，内容可以是问候、关心、建议等，要求符合角色设定，并符合上下文。"
-    
-    memory_context = get_memory_context_string(role_id)
 
-    history = await get_context_messages(role_id, limit=_get_memory_length())
-    
-    result = await generate_with_role(
-        role_data=role,
+    pipeline_result = await _run_memory_ai_pipeline(
+        role=role,
+        role_id=role_id,
         user_message=trigger_prompt,
-        history=history,
-        extra_context=memory_context
+        event_context=event.context or {},
+        origin="proactive",
+        user_sender="system",
+        include_user_memory=False,
+        include_assistant_memory=True,
+        trigger_summary_after_reply=False,
     )
-    
-    if not result["success"]:
-        return AIResponse(success=False, action="ignore", error=result["error"])
-    
-    ai_message = result["content"]
-    
-    # 记录到短期记忆
-    append_short_term(role_id, "assistant", ai_message)
+    if not pipeline_result.get("success"):
+        return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
+
+    ai_message = pipeline_result.get("reply") or ""
     
     return AIResponse(
         success=True,
@@ -601,35 +717,42 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
 
 async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
     """处理定时任务触发"""
-    from services.ai_service import generate_with_role
-    from services.memory_service import get_memory_context_string, append_short_term
-    
+
     role_id = event.role_id
     task_prompt = event.content or ""
     task_context = event.context or {}
-    
-    backend_memory_context = (get_memory_context_string(role_id) or "").strip()
-    client_core_memory = _normalize_core_memory(task_context.get("core_memory"))
-    client_memory_context = "\n".join(client_core_memory).strip()
-    memory_context = backend_memory_context if backend_memory_context else client_memory_context
-    
-    result = await generate_with_role(
-        role_data=role,
+    task_id = str(task_context.get("task_id") or "").strip() or None
+    request_id = str(task_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
+    attached_json = str(task_context.get("attached_json") or "").strip() or None
+
+    pipeline_result = await _run_memory_ai_pipeline(
+        role=role,
+        role_id=role_id,
         user_message=task_prompt,
-        extra_context=memory_context
+        event_context=task_context,
+        task_id=task_id,
+        request_id=request_id,
+        attached_json=attached_json,
+        origin=str(task_context.get("origin") or "task").strip() or "task",
+        user_sender=str(task_context.get("sender") or "scheduler").strip() or "scheduler",
+        include_user_memory=False,
+        include_assistant_memory=True,
+        trigger_summary_after_reply=False,
     )
-    
-    if not result["success"]:
-        return AIResponse(success=False, action="ignore", error=result["error"])
-    
-    ai_message = result["content"]
-    append_short_term(role_id, "assistant", ai_message)
+    if not pipeline_result.get("success"):
+        return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
+
+    ai_message = pipeline_result.get("reply") or ""
     
     return AIResponse(
         success=True,
         action="reply",
         content=ai_message,
-        metadata={"type": "task", "task_id": task_context.get("task_id")}
+        metadata={
+            "type": "task",
+            "task_id": task_context.get("task_id"),
+            "request_id": pipeline_result.get("request_id") or request_id,
+        }
     )
 
 # ========== 朋友圈发布 ==========
@@ -950,32 +1073,74 @@ async def chat_with_vision(request: VisionRequest):
         image_understanding = pre_result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
         chat_cfg = _resolve_role_or_global_chat_config(request.role_id)
-        final_messages: List[Dict[str, Any]] = []
-        if request.system_prompt:
-            final_messages.append({"role": "system", "content": request.system_prompt})
-        final_messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "[图片识别结果]:"
-                    f"{image_understanding}\n"
-                    "[用户要求]:"
-                    f"{request.user_prompt}\n"
-                    "请仅基于图片识别结果与用户要求生成最终回复。"
-                ),
-            }
-        )
+        role_id_text = str(request.role_id or "").strip()
+        reply = ""
+        chat_model = str(chat_cfg.get("model") or "gpt-3.5-turbo")
 
-        final_result = await _post_chat_completion(
-            api_url=str(chat_cfg.get("api_url") or ""),
-            api_key=str(chat_cfg.get("api_key") or ""),
-            body={
-                "model": str(chat_cfg.get("model") or "gpt-3.5-turbo"),
-                "messages": final_messages,
-                "max_tokens": 1024,
-            },
-        )
-        reply = final_result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if role_id_text and not _is_tool_role_id(role_id_text):
+            role_for_pipeline = load_role(role_id_text) or {"id": role_id_text, "name": "vision_chat"}
+            role_for_pipeline["ai_model"] = role_for_pipeline.get("ai_model") or str(chat_cfg.get("model") or "gpt-3.5-turbo")
+            role_for_pipeline["ai_api_url"] = role_for_pipeline.get("ai_api_url") or str(chat_cfg.get("api_url") or "")
+            role_for_pipeline["ai_api_key"] = role_for_pipeline.get("ai_api_key") or str(chat_cfg.get("api_key") or "")
+            chat_model = str(role_for_pipeline.get("ai_model") or chat_model)
+
+            if request.system_prompt:
+                existing_system_prompt = str(role_for_pipeline.get("system_prompt") or "").strip()
+                request_system_prompt = str(request.system_prompt or "").strip()
+                if existing_system_prompt and request_system_prompt:
+                    role_for_pipeline["system_prompt"] = f"{existing_system_prompt}\n\n{request_system_prompt}"
+                elif request_system_prompt:
+                    role_for_pipeline["system_prompt"] = request_system_prompt
+
+            vision_extra_parts = [
+                f"[图片识别结果]\n{image_understanding}",
+                "请仅基于图片识别结果与用户要求生成最终回复。",
+            ]
+            pipeline_result = await _run_memory_ai_pipeline(
+                role=role_for_pipeline,
+                role_id=role_id_text,
+                user_message=str(request.user_prompt or "").strip() or "请描述这张图片的内容",
+                event_context={
+                    "origin": "vision_pre_model",
+                    "sender": "user_vision",
+                },
+                extra_parts=vision_extra_parts,
+                origin="vision_pre_model",
+                user_sender="user_vision",
+                include_user_memory=False,
+                include_assistant_memory=False,
+                trigger_summary_after_reply=False,
+            )
+            if not pipeline_result.get("success"):
+                raise HTTPException(status_code=502, detail=pipeline_result.get("error") or "识图前置聊天模型生成失败")
+            reply = pipeline_result.get("reply") or ""
+        else:
+            final_messages: List[Dict[str, Any]] = []
+            if request.system_prompt:
+                final_messages.append({"role": "system", "content": request.system_prompt})
+            final_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "[图片识别结果]:"
+                        f"{image_understanding}\n"
+                        "[用户要求]:"
+                        f"{request.user_prompt}\n"
+                        "请仅基于图片识别结果与用户要求生成最终回复。"
+                    ),
+                }
+            )
+
+            final_result = await _post_chat_completion(
+                api_url=str(chat_cfg.get("api_url") or ""),
+                api_key=str(chat_cfg.get("api_key") or ""),
+                body={
+                    "model": str(chat_cfg.get("model") or "gpt-3.5-turbo"),
+                    "messages": final_messages,
+                    "max_tokens": 1024,
+                },
+            )
+            reply = _sanitize_reply_content(final_result.get("choices", [{}])[0].get("message", {}).get("content", ""))
         _append_vision_memory(
             role_id=request.role_id,
             user_prompt=request.user_prompt,
@@ -990,7 +1155,7 @@ async def chat_with_vision(request: VisionRequest):
             "success": True,
             "mode": mode,
             "vision_model": vision_model,
-            "chat_model": str(chat_cfg.get("model") or "gpt-3.5-turbo"),
+            "chat_model": chat_model,
         }
         
     except httpx.TimeoutException:

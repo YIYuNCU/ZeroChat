@@ -7,10 +7,12 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import uuid
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 TOOL_ROLE_PREFIX = "1000000000"
+DEFAULT_MEMORY_ORIGIN = "zerochat"
 
 
 def _is_tool_role_id(role_id: str) -> bool:
@@ -38,13 +40,64 @@ def _init_db(conn: sqlite3.Connection):
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS short_term (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY,
             role TEXT,
             content TEXT,
-            timestamp TEXT
+            timestamp TEXT,
+            task_id TEXT,
+            request_id TEXT,
+            json_memory TEXT
         )
         """
     )
+    _ensure_short_term_schema(conn)
+
+
+def _table_has_autoincrement(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    if not row or not row[0]:
+        return False
+    return "AUTOINCREMENT" in str(row[0]).upper()
+
+
+def _ensure_short_term_schema(conn: sqlite3.Connection):
+    cols = conn.execute("PRAGMA table_info(short_term)").fetchall()
+    existing_cols = {str(c[1]) for c in cols}
+
+    if "task_id" not in existing_cols:
+        conn.execute("ALTER TABLE short_term ADD COLUMN task_id TEXT")
+    if "request_id" not in existing_cols:
+        conn.execute("ALTER TABLE short_term ADD COLUMN request_id TEXT")
+    if "json_memory" not in existing_cols:
+        conn.execute("ALTER TABLE short_term ADD COLUMN json_memory TEXT")
+
+    if _table_has_autoincrement(conn, "short_term"):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS short_term_new (
+                id INTEGER PRIMARY KEY,
+                role TEXT,
+                content TEXT,
+                timestamp TEXT,
+                task_id TEXT,
+                request_id TEXT,
+                json_memory TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO short_term_new (id, role, content, timestamp, task_id, request_id, json_memory)
+            SELECT id, role, content, timestamp, task_id, request_id, json_memory
+            FROM short_term
+            ORDER BY id ASC
+            """
+        )
+        conn.execute("DROP TABLE short_term")
+        conn.execute("ALTER TABLE short_term_new RENAME TO short_term")
 
 def _get_meta(conn: sqlite3.Connection, key: str, default: Optional[str] = None) -> Optional[str]:
     row = conn.execute("SELECT value FROM memory_meta WHERE key = ?", (key,)).fetchone()
@@ -63,8 +116,59 @@ def _normalize_core_memory(value: Any) -> str:
         return ""
     return str(value)
 
+
+def _core_memory_to_list(value: Any) -> List[str]:
+    text = _normalize_core_memory(value)
+    if not text.strip():
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
 def _get_memory_length() -> int:
     return 60
+
+
+def _looks_like_structured_memory(content: str) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 4:
+        return False
+    required_prefixes = ("message:", "time:", "origin:", "sender:")
+    first_four = [line.lower() for line in lines[:4]]
+    return all(first_four[idx].startswith(required_prefixes[idx]) for idx in range(4))
+
+
+def format_memory_message(
+    message: str,
+    timestamp: Optional[str] = None,
+    origin: Optional[str] = None,
+    sender: Optional[str] = None,
+) -> str:
+    msg_text = str(message or "").strip()
+    time_text = str(timestamp or "").strip() or datetime.now().isoformat()
+    origin_text = str(origin or "").strip() or DEFAULT_MEMORY_ORIGIN
+    sender_text = str(sender or "").strip() or "unknown"
+    return f"message: {msg_text}\ntime: {time_text}\norigin: {origin_text}\nsender: {sender_text}"
+
+
+def ensure_structured_memory_message(
+    content: str,
+    role: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    origin: Optional[str] = None,
+    sender: Optional[str] = None,
+) -> str:
+    if _looks_like_structured_memory(content):
+        return str(content or "").strip()
+    role_text = str(role or "").strip() or "assistant"
+    sender_text = str(sender or "").strip() or role_text
+    return format_memory_message(
+        message=str(content or ""),
+        timestamp=timestamp,
+        origin=origin,
+        sender=sender_text,
+    )
 
 def _if_in_menstruation(role_id: str) -> tuple[Optional[bool], Optional[int]]:
     profile_path = ROLES_DIR / role_id / "profile.json"
@@ -76,9 +180,27 @@ def _if_in_menstruation(role_id: str) -> tuple[Optional[bool], Optional[int]]:
             data = json.load(f)
     except Exception:
         return None, None
-    gentle = data.get("gender", "men")
+    gender_raw = str(data.get("gender", "men") or "men").strip().lower()
+    legacy_women_values = {"women", "woman", "female", "girl", "f", "女", "女生", "女性"}
+    legacy_men_values = {"men", "man", "male", "boy", "m", "男", "男生", "男性"}
+    if gender_raw in legacy_women_values:
+        gentle = "women"
+    elif gender_raw in legacy_men_values:
+        gentle = "men"
+    else:
+        gentle = "men"
+
+    gender_updated = False
+    if data.get("gender") != gentle:
+        data["gender"] = gentle
+        gender_updated = True
+
     if gentle != "women":
         print(f"生理期检测：角色 {role_id} 性别为 {gentle}，不进行生理期检测")
+        if gender_updated:
+            profile_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(profile_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
         return None, None
     import random
 
@@ -87,15 +209,27 @@ def _if_in_menstruation(role_id: str) -> tuple[Optional[bool], Optional[int]]:
     if not isinstance(cycle_data, dict):
         cycle_data = {}
 
-    cycle_length = cycle_data.get("cycle_length")
-    if not cycle_length:
+    cycle_length_raw = cycle_data.get("cycle_length")
+    try:
+        cycle_length = int(cycle_length_raw)
+    except (TypeError, ValueError):
         cycle_length = 28 + random.randint(-5, 5)
+    if cycle_length < 20 or cycle_length > 40:
+        cycle_length = 28 + random.randint(-5, 5)
+    if cycle_data.get("cycle_length") != cycle_length:
         cycle_data["cycle_length"] = cycle_length
         profile_updated = True
 
-    period_length = cycle_data.get("period_length")
-    if not period_length:
+    period_length_raw = cycle_data.get("period_length")
+    try:
+        period_length = int(period_length_raw)
+    except (TypeError, ValueError):
         period_length = 5 + random.randint(-1, 2)
+    if period_length < 2 or period_length > 10:
+        period_length = 5 + random.randint(-1, 2)
+    if period_length >= cycle_length:
+        period_length = max(2, min(10, cycle_length - 1))
+    if cycle_data.get("period_length") != period_length:
         cycle_data["period_length"] = period_length
         profile_updated = True
 
@@ -107,29 +241,51 @@ def _if_in_menstruation(role_id: str) -> tuple[Optional[bool], Optional[int]]:
     with _get_connection(role_id) as conn:
         last_period_start_raw = _get_meta(conn, "last_period_start")
 
+        today = datetime.now().date()
+
         if not last_period_start_raw:
             profile_last_period_start = cycle_data.get("last_period_start")
-            if profile_last_period_start:
-                last_period_start_raw = profile_last_period_start
+            try:
+                last_period_start_date = datetime.fromisoformat(profile_last_period_start).date()
+            except (TypeError, ValueError):
+                fallback_days = random.randint(0, max(1, cycle_length - 1))
+                last_period_start_date = today - timedelta(days=fallback_days)
+            if last_period_start_date > today:
+                last_period_start_date = today
+            _set_meta(conn, "last_period_start", last_period_start_date.isoformat())
+            last_period_start_raw = last_period_start_date.isoformat()
 
         try:
             last_period_start_date = datetime.fromisoformat(last_period_start_raw).date()
         except (TypeError, ValueError):
-            last_period_start_date = (datetime.now() - timedelta(days=random.randint(0, cycle_length))).date()
+            fallback_days = random.randint(0, max(1, cycle_length - 1))
+            last_period_start_date = today - timedelta(days=fallback_days)
 
-        today = datetime.now().date()
+        if last_period_start_date > today:
+            last_period_start_date = today
 
         while last_period_start_date + timedelta(days=cycle_length) <= today:
-            last_period_start_date = last_period_start_date + timedelta(days=cycle_length + random.randint(-5, 5))
-            if last_period_start_date > today:
-                last_period_start_date = today
-        _set_meta(conn, "last_period_start", last_period_start_date.isoformat())
+            jittered_days = cycle_length + random.randint(-2, 2)
+            if jittered_days < 1:
+                jittered_days = cycle_length
+            next_start = last_period_start_date + timedelta(days=jittered_days)
+            if next_start <= last_period_start_date:
+                next_start = last_period_start_date + timedelta(days=cycle_length)
+            if next_start > today:
+                break
+            last_period_start_date = next_start
 
-    day_offset = (today - last_period_start_date).days
+        final_last_period_start = last_period_start_date.isoformat()
+        _set_meta(conn, "last_period_start", final_last_period_start)
+        _set_meta(conn, "next_period_start", (last_period_start_date + timedelta(days=cycle_length)).isoformat())
+    
+    day_offset = max(0, (today - last_period_start_date).days)
     if day_offset < period_length:
         return True, day_offset + 1
 
-    return False, day_offset - period_length + 1
+    next_period_start_date = last_period_start_date + timedelta(days=cycle_length)
+    days_until_next_period = max(1, (next_period_start_date - today).days)
+    return False, days_until_next_period
 
 def _get_menstruation_cycle_info(role_id: str) -> Optional[Dict[str, Any]]:
     profile_path = ROLES_DIR / role_id / "profile.json"
@@ -189,18 +345,40 @@ def _maybe_migrate_from_json(role_id: str, conn: sqlite3.Connection):
     for item in short_term:
         if isinstance(item, dict):
             role = item.get("role") or "assistant"
-            content = item.get("content", "")
+            content = ensure_structured_memory_message(
+                content=item.get("content", ""),
+                role=role,
+                timestamp=item.get("timestamp"),
+                origin=item.get("origin") or item.get("source") or DEFAULT_MEMORY_ORIGIN,
+                sender=item.get("sender") or role,
+            )
             timestamp = item.get("timestamp") or datetime.now().isoformat()
+            task_id = item.get("task_id")
+            request_id = item.get("request_id") or item.get("req_id")
+            json_memory = item.get("json_memory")
         else:
             role = "assistant"
-            content = str(item)
             timestamp = datetime.now().isoformat()
+            content = ensure_structured_memory_message(
+                content=str(item),
+                role=role,
+                timestamp=timestamp,
+                origin=DEFAULT_MEMORY_ORIGIN,
+                sender=role,
+            )
+            task_id = None
+            request_id = None
+            json_memory = None
         conn.execute(
-            "INSERT INTO short_term (role, content, timestamp) VALUES (?, ?, ?)",
-            (role, content, timestamp)
+            """
+            INSERT INTO short_term (role, content, timestamp, task_id, request_id, json_memory)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (role, content, timestamp, task_id, request_id, json_memory)
         )
 
     _set_meta(conn, "migrated_from_json", datetime.now().isoformat())
+
 
 def _get_connection(role_id: str) -> sqlite3.Connection:
     db_path = get_memory_db(role_id)
@@ -235,18 +413,38 @@ def load_memory(role_id: str) -> Dict:
             message_count_int = 0
 
         rows = conn.execute(
-            "SELECT role, content, timestamp FROM short_term ORDER BY id ASC"
+            """
+            SELECT id, role, content, timestamp, task_id, request_id, json_memory
+            FROM short_term
+            ORDER BY id ASC
+            """
         ).fetchall()
         short_term = [
-            {"role": row[0] or "assistant", "content": row[1], "timestamp": row[2]}
+            {
+                "id": row[0],
+                "role": row[1] or "assistant",
+                "content": ensure_structured_memory_message(
+                    content=row[2],
+                    role=row[1] or "assistant",
+                    timestamp=row[3],
+                    origin=DEFAULT_MEMORY_ORIGIN,
+                    sender=row[1] or "assistant",
+                ),
+                "timestamp": row[3],
+                "task_id": row[4],
+                "request_id": row[5],
+                "json_memory": row[6],
+            }
             for row in rows
         ]
 
-        # role_core = _get_role_core_memory(role_id)
-        # if role_core and role_core != core_memory:
-        #     core_memory = role_core
-        #     _set_meta(conn, "core_memory", core_memory)
-        #     _set_meta(conn, "updated_at", datetime.now().isoformat())
+        # 兼容存量角色：若 DB 里没有核心记忆，则回退读取 profile.json 并写回 DB。
+        if not str(core_memory or "").strip():
+            role_core = _get_role_core_memory(role_id)
+            if role_core and role_core.strip():
+                core_memory = role_core
+                _set_meta(conn, "core_memory", core_memory)
+                _set_meta(conn, "updated_at", datetime.now().isoformat())
 
     return {
         "core_memory": core_memory,
@@ -272,18 +470,50 @@ def save_memory(role_id: str, memory: Dict):
         for item in short_term:
             if isinstance(item, dict):
                 role = item.get("role") or "assistant"
-                content = item.get("content", "")
                 timestamp = item.get("timestamp") or datetime.now().isoformat()
+                content = ensure_structured_memory_message(
+                    content=item.get("content", ""),
+                    role=role,
+                    timestamp=timestamp,
+                    origin=item.get("origin") or item.get("source") or DEFAULT_MEMORY_ORIGIN,
+                    sender=item.get("sender") or role,
+                )
+                task_id = item.get("task_id")
+                request_id = item.get("request_id") or item.get("req_id")
+                json_memory = item.get("json_memory")
             else:
                 role = "assistant"
-                content = str(item)
                 timestamp = datetime.now().isoformat()
+                content = ensure_structured_memory_message(
+                    content=str(item),
+                    role=role,
+                    timestamp=timestamp,
+                    origin=DEFAULT_MEMORY_ORIGIN,
+                    sender=role,
+                )
+                task_id = None
+                request_id = None
+                json_memory = None
             conn.execute(
-                "INSERT INTO short_term (role, content, timestamp) VALUES (?, ?, ?)",
-                (role, content, timestamp)
+                """
+                INSERT INTO short_term (role, content, timestamp, task_id, request_id, json_memory)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (role, content, timestamp, task_id, request_id, json_memory)
             )
+        # memory.json 由前端维护，后端不主动覆盖。
 
-def append_short_term(role_id: str, role: str, content: str, window_size: int = 100):
+def append_short_term(
+    role_id: str,
+    role: str,
+    content: str,
+    window_size: int = 100,
+    task_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    json_memory: Optional[str] = None,
+    origin: Optional[str] = None,
+    sender: Optional[str] = None,
+):
     """
     追加短期记忆，使用滑动窗口机制
     
@@ -291,17 +521,46 @@ def append_short_term(role_id: str, role: str, content: str, window_size: int = 
         role_id: 角色 ID
         role: 消息角色 (user/assistant)
         content: 消息内容
-        window_size: 滑动窗口大小，默认为100条
+        window_size: 兼容旧参数，当前不再用于写入裁剪
     """
     if _is_tool_role_id(role_id):
         return
 
-    with _get_connection(role_id) as conn:
-        total = conn.execute("SELECT COUNT(*) FROM short_term").fetchone()[0]
+    normalized_task_id = str(task_id).strip() if task_id is not None else None
+    if normalized_task_id == "":
+        normalized_task_id = None
+    normalized_request_id = str(request_id).strip() if request_id is not None else ""
+    if not normalized_request_id:
+        normalized_request_id = f"req_{uuid.uuid4().hex}"
+    normalized_json_memory = str(json_memory).strip() if json_memory is not None else None
+    if normalized_json_memory == "":
+        normalized_json_memory = None
+    created_at = datetime.now().isoformat()
+    if role == "assistant":
+        normalized_content = content
+    else:
+        normalized_content = ensure_structured_memory_message(
+            content=content,
+            role=role,
+            timestamp=created_at,
+            origin=origin or DEFAULT_MEMORY_ORIGIN,
+            sender=sender or role,
+        )
 
+    with _get_connection(role_id) as conn:
         conn.execute(
-            "INSERT INTO short_term (role, content, timestamp) VALUES (?, ?, ?)",
-            (role, content, datetime.now().isoformat())
+            """
+            INSERT INTO short_term (role, content, timestamp, task_id, request_id, json_memory)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                role,
+                normalized_content,
+                created_at,
+                normalized_task_id,
+                normalized_request_id,
+                normalized_json_memory,
+            )
         )
 
         current_count = _get_meta(conn, "message_count_since_summary", "0")
@@ -311,6 +570,7 @@ def append_short_term(role_id: str, role: str, content: str, window_size: int = 
             current_count_int = 0
         _set_meta(conn, "message_count_since_summary", str(current_count_int + 1))
         _set_meta(conn, "updated_at", datetime.now().isoformat())
+        # memory.json 由前端维护，后端仅保证 request_id 在 DB 记录中可用。
 
 async def trigger_chat_summary(worker_id:str,role_id: str) -> Optional[str]:
     """
@@ -327,7 +587,7 @@ async def trigger_chat_summary(worker_id:str,role_id: str) -> Optional[str]:
 
         # 构建总结提示
         conversation = "\n".join([
-            f"{m['role']}：{m['content']}"
+            str(m.get("content", ""))
             for m in short_term[-_get_memory_length():]
         ])
         
@@ -345,8 +605,8 @@ async def trigger_chat_summary(worker_id:str,role_id: str) -> Optional[str]:
         result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1))
         if result["success"] and result["content"]:
             new_memory = result["content"].strip()
-            append_short_term(role_id, "user", f"system:触发记忆总结")
-            append_short_term(role_id, "assistant", f"记忆总结结果：{new_memory}")
+            append_short_term(role_id, "user", "system:触发记忆总结", origin="system", sender="system")
+            append_short_term(role_id, "assistant", f"记忆总结结果：{new_memory}", origin="system", sender="memory_summary")
             return new_memory
         else:
             print(f"记忆总结失败：{result}")
@@ -363,7 +623,8 @@ async def get_context_messages(role_id: str, limit: int = 20) -> List[Dict]:
     Returns:
         [{"role": "user/assistant", "content": "..."}]
     """
-    if limit <= 0:
+    effective_limit = _get_memory_length()
+    if effective_limit <= 0:
         return []
     if _is_tool_role_id(role_id):
         return []
@@ -376,7 +637,7 @@ async def get_context_messages(role_id: str, limit: int = 20) -> List[Dict]:
         if total == 0:
             return []
 
-        block_start = ((total - 1) // limit) * limit
+        block_start = ((total - 1) // effective_limit) * effective_limit
         last_block_value = _get_meta(conn, "last_context_block_start", "-1")
         try:
             last_block = int(last_block_value)
@@ -394,12 +655,21 @@ async def get_context_messages(role_id: str, limit: int = 20) -> List[Dict]:
 
     with _get_connection(role_id) as conn:
         rows = conn.execute(
-            "SELECT role, content FROM short_term ORDER BY id ASC LIMIT ? OFFSET ?",
-            (limit, block_start)
+            "SELECT role, content, timestamp FROM short_term ORDER BY id ASC LIMIT ? OFFSET ?",
+            (effective_limit, block_start)
         ).fetchall()
 
     return [
-        {"role": row[0] or "assistant", "content": row[1]}
+        {
+            "role": row[0] or "assistant",
+            "content": ensure_structured_memory_message(
+                content=row[1],
+                role=row[0] or "assistant",
+                timestamp=row[2],
+                origin=DEFAULT_MEMORY_ORIGIN,
+                sender=row[0] or "assistant",
+            ),
+        }
         for row in rows
     ]
 
@@ -422,6 +692,7 @@ def update_core_memory(role_id: str, core_memory: str):
         _set_meta(conn, "last_summarized_at", datetime.now().isoformat())
         _set_meta(conn, "message_count_since_summary", "0")
         _set_meta(conn, "updated_at", datetime.now().isoformat())
+        # memory.json 由前端维护，后端不主动覆盖。
 
 def should_generate_sequential_memory(role_id: str) -> bool:
     """
@@ -484,7 +755,7 @@ async def sequential_memory_generation(role_id:str,worker_id:str,now_content:str
         worker = load_role(worker_id)
         short_term = memory.get("short_term", [])
         conversation = "\n".join([
-            f"{m['role']}：{m['content']}"
+            str(m.get("content", ""))
             for m in short_term[-_get_memory_length():]
         ])
         prompt = f"""历史对话内容：{conversation}\n当前对话内容：{now_content}\n当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
@@ -501,8 +772,8 @@ async def sequential_memory_generation(role_id:str,worker_id:str,now_content:str
             if result["content"].strip().lower() == "none":
                 return "noneed"
             new_memory = result["content"].strip()
-            append_short_term(role_id, "user", f"system:触发衔接记忆生成")
-            append_short_term(role_id, "assistant", f"衔接记忆内容：{new_memory}")
+            append_short_term(role_id, "user", "system:触发衔接记忆生成", origin="system", sender="system")
+            append_short_term(role_id, "assistant", f"衔接记忆内容：{new_memory}", origin="system", sender="sequential_memory")
             return new_memory
         else:
             print(f"衔接记忆生成失败：{result}")
@@ -533,7 +804,7 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
         
         # 构建总结提示
         conversation = "\n".join([
-            f"{m['role']}：{m['content']}"
+            str(m.get("content", ""))
             for m in short_term[-_get_memory_length():]
         ])
         
@@ -573,6 +844,7 @@ def clear_short_term(role_id: str):
     with _get_connection(role_id) as conn:
         conn.execute("DELETE FROM short_term")
         _set_meta(conn, "updated_at", datetime.now().isoformat())
+        # memory.json 由前端维护，后端不主动覆盖。
 
 def get_memory_context_string(role_id: str) -> str:
     """
