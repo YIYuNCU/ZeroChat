@@ -439,15 +439,9 @@ class ChatBubble extends StatelessWidget {
     // 对于发送者（用户），使用 SettingsService 的头像
     String? effectiveAvatarUrl = avatarUrl;
     if (isSender) {
-      final userAvatar = SettingsService.instance.userAvatarUrl;
-      if (userAvatar.isNotEmpty) {
-        // 如果是相对路径，加上后端URL前缀
-        if (userAvatar.startsWith('/')) {
-          effectiveAvatarUrl =
-              '${SettingsService.instance.backendUrl}$userAvatar';
-        } else {
-          effectiveAvatarUrl = userAvatar;
-        }
+      final fullUrl = SettingsService.instance.userAvatarFullUrl;
+      if (fullUrl.isNotEmpty) {
+        effectiveAvatarUrl = fullUrl;
       }
     }
 

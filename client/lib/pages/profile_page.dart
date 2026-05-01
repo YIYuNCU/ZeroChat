@@ -106,9 +106,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
   Widget _buildProfileCard() {
     final settings = SettingsService.instance;
-    final avatarUrl = settings.userAvatarUrl.startsWith('http')
-        ? settings.userAvatarUrl
-        : '${settings.backendUrl}${settings.userAvatarUrl}';
+    final avatarUrl = settings.userAvatarFullUrl;
     return InkWell(
       onTap: _editProfile,
       child: Container(

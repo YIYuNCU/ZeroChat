@@ -55,8 +55,11 @@ class ChatController extends ChangeNotifier {
   /// "正在输入"状态回调（按 chatId）- 仅用于单聊
   final Map<String, void Function(bool)> _typingCallbacks = {};
 
-  /// 前端直连回退确认回调（按 chatId）
-  final Map<String, Future<bool> Function(String)> _directFallbackConfirmCallbacks = {};
+  /// 异步聊天任务等待（按 task_id）
+  final Map<String, Completer<Map<String, dynamic>>> _pendingChatTasks = {};
+
+  /// 异步聊天任务推送订阅
+  StreamSubscription<Map<String, dynamic>>? _chatPushSubscription;
 
   /// 待发送消息队列（用于消息合并等待）
   final Map<String, List<_PendingTextMessage>> _pendingMessages = {};
@@ -136,34 +139,36 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<bool> _ensureConnectionBeforeSend(String chatId) async {
-    Future<void> ping() async {
-      await SecureWebSocketClient.instance.request(
-        'health',
-        const <String, dynamic>{},
-        timeout: const Duration(seconds: 4),
-      );
-    }
-
     try {
-      if (!SecureWebSocketClient.instance.isConnected) {
-        await SecureWebSocketClient.instance.ensureConnected();
+      if (SecureWebSocketClient.instance.isConnected) {
+        return true;
       }
-      await ping();
-      return true;
+
+      await SecureWebSocketClient.instance.ensureConnected();
+      return SecureWebSocketClient.instance.isConnected;
     } catch (e) {
       debugPrint(
         'ChatController: pre-send websocket check failed for $chatId, retrying: $e',
       );
       try {
-        await SecureWebSocketClient.instance.close();
+        // Prefer in-place reconnect to avoid unnecessary active disconnects.
         await SecureWebSocketClient.instance.ensureConnected();
-        await ping();
-        return true;
+        return SecureWebSocketClient.instance.isConnected;
       } catch (e2) {
         debugPrint(
-          'ChatController: websocket reconnect failed before send for $chatId: $e2',
+          'ChatController: in-place websocket retry failed for $chatId, forcing reconnect: $e2',
         );
-        return false;
+        try {
+          await SecureWebSocketClient.instance.recoverConnectionWithoutClose(
+            reason: 'chat_pre_send',
+          );
+          return SecureWebSocketClient.instance.isConnected;
+        } catch (e3) {
+          debugPrint(
+            'ChatController: forced websocket reconnect failed before send for $chatId: $e3',
+          );
+          return false;
+        }
       }
     }
   }
@@ -672,13 +677,6 @@ class ChatController extends ChangeNotifier {
         '你需要自然地提醒用户以下事项，不要说"这是提醒"或"定时任务"之类的话，用日常对话的方式。提醒内容：$taskContent';
 
     // 调用 AI 生成消息
-    final recentMessages = MessageStore.instance.getRecentRounds(
-      chatId,
-      role.maxContextRounds,
-    );
-    final history = MessageStore.toApiHistory(recentMessages);
-    final coreMemory = MemoryManager.getCoreMemoryForRequest();
-
     final response = await ApiService.callBackendAI(
       roleId: role.id,
       eventType: 'task',
@@ -690,28 +688,8 @@ class ChatController extends ChangeNotifier {
     if (response.success && response.content != null) {
       contentToSend = response.content!;
     } else {
-      final approved = await _confirmDirectFallback(
-        chatId,
-        reason: response.error ?? '后端调用失败',
-      );
-      if (approved) {
-        ApiService.authorizeNextDirectBypass();
-        final fallbackResponse = await ApiService.sendChatMessageWithRoleDirect(
-          message: prompt,
-          role: role,
-          history: history,
-          coreMemory: coreMemory,
-        );
-        if (fallbackResponse.success && fallbackResponse.content != null) {
-          contentToSend = fallbackResponse.content!;
-        } else {
-          // AI 失败时使用简洁的备用消息
-          contentToSend = '嘿～$taskContent';
-        }
-      } else {
-        // 未确认前端直连时使用简洁的备用消息
-        contentToSend = '嘿～$taskContent';
-      }
+      debugPrint('ChatController: Backend task AI call failed: ${response.error}');
+      contentToSend = '嘿～$taskContent';
     }
 
     // 分段发送
@@ -744,37 +722,8 @@ class ChatController extends ChangeNotifier {
     _typingCallbacks[chatId] = callback;
   }
 
-  /// 注册前端直连回退确认回调
-  void registerDirectFallbackConfirmCallback(
-    String chatId,
-    Future<bool> Function(String reason) callback,
-  ) {
-    _directFallbackConfirmCallbacks[chatId] = callback;
-  }
-
   void unregisterTypingCallback(String chatId) {
     _typingCallbacks.remove(chatId);
-  }
-
-  void unregisterDirectFallbackConfirmCallback(String chatId) {
-    _directFallbackConfirmCallbacks.remove(chatId);
-  }
-
-  Future<bool> _confirmDirectFallback(
-    String chatId, {
-    required String reason,
-  }) async {
-    final callback = _directFallbackConfirmCallbacks[chatId];
-    if (callback == null) {
-      debugPrint('ChatController: direct fallback blocked (no confirm callback)');
-      return false;
-    }
-    try {
-      return await callback(reason);
-    } catch (e) {
-      debugPrint('ChatController: direct fallback confirm callback error: $e');
-      return false;
-    }
   }
 
   bool isProcessing(String chatId) => _processingChats.contains(chatId);
@@ -943,6 +892,35 @@ class ChatController extends ChangeNotifier {
 
   // ========== AI 调用 ==========
 
+  /// 确保异步聊天推送监听器已注册（幂等）
+  void _ensureChatPushListener() {
+    if (_chatPushSubscription != null) return;
+
+    _chatPushSubscription = SecureWebSocketClient.instance.serverPushStream.listen(
+      (Map<String, dynamic> event) {
+        final eventType = (event['event_type'] ?? event['type'] ?? '').toString().trim();
+        if (eventType != 'chat_response') return;
+
+        final dynamic rawPayload = event['payload'];
+        if (rawPayload is! Map) return;
+
+        final payload = Map<String, dynamic>.from(rawPayload);
+        final taskId = (payload['task_id'] ?? '').toString();
+        if (taskId.isEmpty) return;
+
+        final completer = _pendingChatTasks.remove(taskId);
+        if (completer == null || completer.isCompleted) return;
+
+        completer.complete(payload);
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('ChatController: chat push stream error: $error');
+      },
+    );
+
+    debugPrint('ChatController: chat push listener initialized');
+  }
+
   Future<String?> _callAI({
     required String chatId,
     required Role role,
@@ -972,8 +950,10 @@ class ChatController extends ChangeNotifier {
         ? '$userMessage\n\n$momentsContext'
         : userMessage;
 
-    // 优先尝试后端 API
-    final backendResponse = await ApiService.sendChatViaBackend(
+    // 优先尝试后端 API（异步任务机制）
+    _ensureChatPushListener();
+
+    final submitResponse = await ApiService.submitChatTask(
       roleId: role.id,
       message: finalMessage,
       context: {
@@ -986,72 +966,54 @@ class ChatController extends ChangeNotifier {
       },
     );
 
-    if (backendResponse.success && backendResponse.content != null) {
-      debugPrint('ChatController: AI response via backend');
-      final backendRequestId =
-          backendResponse.metadata?['request_id']?.toString().trim();
-      await MemoryService.appendJsonMemoryPair(
-        roleId: role.id,
-        userContent: userMessage,
-        assistantContent: backendResponse.content!,
-        requestId: (backendRequestId != null && backendRequestId.isNotEmpty)
-            ? backendRequestId
-            : null,
-        jsonMemory:
-            (attachedJson != null && attachedJson.isNotEmpty) ? attachedJson : null,
-      );
-      if (backendResponse.metadata != null) {
-        debugPrint(
-          'ChatController: Detected metadata from backend: ${backendResponse.metadata}',
-        );
+    // 异步任务：等待推送结果
+    if (submitResponse.status == 'queued' && submitResponse.taskId != null) {
+      final taskId = submitResponse.taskId!;
+      final completer = Completer<Map<String, dynamic>>();
+      _pendingChatTasks[taskId] = completer;
+
+      try {
+        final pushPayload = await completer.future;
+
+        final success = pushPayload['success'] == true;
+        final content = pushPayload['content']?.toString();
+        final metadata = pushPayload['metadata'] is Map
+            ? Map<String, dynamic>.from(pushPayload['metadata'])
+            : null;
+
+        if (success && content != null) {
+          debugPrint('ChatController: AI response via backend (async push)');
+          final requestId = metadata?['request_id']?.toString().trim();
+          await MemoryService.appendJsonMemoryPair(
+            roleId: role.id,
+            userContent: userMessage,
+            assistantContent: content,
+            requestId: (requestId != null && requestId.isNotEmpty) ? requestId : null,
+            jsonMemory:
+                (attachedJson != null && attachedJson.isNotEmpty) ? attachedJson : null,
+          );
+          if (metadata != null) {
+            debugPrint('ChatController: Metadata from async push: $metadata');
+          }
+          return content;
+        }
+
+        debugPrint('ChatController: Async chat failed: ${pushPayload['error']}');
+      } catch (e) {
+        _pendingChatTasks.remove(taskId);
+        debugPrint('ChatController: Async chat error (taskId=$taskId): $e');
       }
-      return backendResponse.content;
     }
 
-    // 后端不可用时，降级到直接调用（保持原有逻辑）
-    debugPrint('ChatController: Backend unavailable, fallback to direct API');
-
-    final approved = await _confirmDirectFallback(
-      chatId,
-      reason: backendResponse.error ?? '后端不可用',
+    // 仅通过 WebSocket 通信，无直连回退
+    debugPrint('ChatController: WebSocket chat failed: ${submitResponse.error}');
+    final errorMessage = createMessage(
+      senderId: 'error',
+      receiverId: 'me',
+      content: '消息发送失败：后端WebSocket不可用',
     );
-    if (!approved) {
-      final blockedMessage = createMessage(
-        senderId: 'error',
-        receiverId: 'me',
-        content: '已取消前端直连，请手动确认后重试',
-      );
-      await MessageStore.instance.addMessage(chatId, blockedMessage);
-      return null;
-    }
-
-    ApiService.authorizeNextDirectBypass();
-
-    // 注入外挂 JSON 记录（与聊天记录同级）
-    if (attachedJson != null && attachedJson.isNotEmpty) {
-      history.insert(0, {'role': 'system', 'content': '[外挂记录]\n$attachedJson'});
-    }
-
-    final response = await ApiService.sendChatMessageWithRoleDirect(
-      message: finalMessage,
-      role: role,
-      history: history,
-      coreMemory: coreMemory,
-      isGroup: isGroup,
-    );
-
-    if (response.success && response.content != null) {
-      return response.content;
-    } else {
-      debugPrint('ChatController: AI call failed: ${response.error}');
-      final errorMessage = createMessage(
-        senderId: 'error',
-        receiverId: 'me',
-        content: response.error ?? '发送失败，请重试',
-      );
-      await MessageStore.instance.addMessage(chatId, errorMessage);
-      return null;
-    }
+    await MessageStore.instance.addMessage(chatId, errorMessage);
+    return null;
   }
 
   // ========== 分段发送 ==========

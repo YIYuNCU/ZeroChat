@@ -15,15 +15,12 @@ from apscheduler.triggers.date import DateTrigger
 
 logger = logging.getLogger(__name__)
 
+from core.utils import is_tool_role_id
+
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 TASKS_DIR = DATA_DIR / "tasks"
 TASKS_FILE = TASKS_DIR / "scheduled.json"
-TOOL_ROLE_PREFIX = "1000000000"
-
-
-def _is_tool_role_id(role_id: str) -> bool:
-    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
 
 # 全局调度器实例
 _scheduler: Optional[AsyncIOScheduler] = None
@@ -72,7 +69,7 @@ def _init_proactive_jobs():
 
 def schedule_proactive_for_role(role_id: str):
     """为角色调度主动消息"""
-    if _is_tool_role_id(role_id):
+    if is_tool_role_id(role_id):
         return
 
     scheduler = get_scheduler()
@@ -324,7 +321,7 @@ def _load_non_tool_roles() -> List[Dict]:
             with open(profile_file, "r", encoding="utf-8") as f:
                 profile = json.load(f)
             role_id = str(profile.get("id", "")).strip()
-            if not role_id or _is_tool_role_id(role_id):
+            if not role_id or is_tool_role_id(role_id):
                 continue
             roles.append(profile)
         except Exception:

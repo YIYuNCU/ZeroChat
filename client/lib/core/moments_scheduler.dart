@@ -314,41 +314,11 @@ class MomentsScheduler {
       );
 
       if (!response.success || response.content == null) {
-        final prompt =
-            '''用户在你发的朋友圈下评论了：「${userComment.content}」
-
-你的朋友圈内容是：「${post.content}」
-
-现在你想回复这条评论，要求：
-- 简短自然，像朋友间的互动
-- 不要太正式
-- 可以用表情或简单语气词
-- 直接输出回复内容，不要任何解释''';
-
-        final fallback = await ApiService.sendChatMessageWithRoleDirect(
-          message: prompt,
-          role: role,
-        );
-        if (!fallback.success || fallback.content == null) continue;
-
-        String reply = fallback.content!.trim();
-        if (reply.startsWith('\"') && reply.endsWith('\"')) {
-          reply = reply.substring(1, reply.length - 1);
-        }
-
-        await MomentsService.instance.addComment(
-          post.id,
-          authorId: role.id,
-          authorName: role.name,
-          content: reply,
-          replyToId: 'me',
-          replyToName: userComment.authorName,
-        );
-
+        // 仅通过 WebSocket 通信，跳过直连回退
         debugPrint(
-          'MomentsScheduler: ${role.name} replied to user comment: $reply',
+          'MomentsScheduler: comment reply via WebSocket failed, skipping: ${response.error}',
         );
-        break;
+        continue;
       }
 
       String reply = response.content!.trim();

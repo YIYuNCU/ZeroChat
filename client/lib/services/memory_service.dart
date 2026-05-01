@@ -13,6 +13,9 @@ class MemoryService {
   /// 核心记忆：重要的长期记忆
   static List<String> _coreMemory = [];
 
+  /// 向量记忆数量（后端向量记忆库）
+  static int vectorMemoryCount = 0;
+
   /// 短期记忆的最大条数（每个会话）
   static int maxShortTermSize = 100;
   static const String _jsonMemoryKeyPrefix = 'json_memory_';
@@ -56,8 +59,12 @@ class MemoryService {
       } else {
         _coreMemory = [];
       }
+      // 读取向量记忆数量
+      if (response['vector_memory_count'] is int) {
+        vectorMemoryCount = response['vector_memory_count'] as int;
+      }
       await _saveCoreMemory();
-      debugPrint('MemoryService: Core memory refreshed from backend for role $rid');
+      debugPrint('MemoryService: Core memory refreshed from backend for role $rid, vector memories: $vectorMemoryCount');
     } catch (e) {
       debugPrint('MemoryService: Refresh core memory from backend failed: $e');
     }
@@ -256,6 +263,26 @@ class MemoryService {
     await _syncCoreMemoryToBackend();
   }
 
+  /// 清空后端向量记忆库
+  static Future<bool> clearVectorMemory() async {
+    try {
+      final roleId = RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'vector_memory_clear',
+        {'role_id': roleId},
+      );
+      final bool success = response['success'] == true;
+      if (success) {
+        vectorMemoryCount = 0;
+      }
+      debugPrint('MemoryService: Vector memory cleared for role $roleId');
+      return success;
+    } catch (e) {
+      debugPrint('MemoryService: Clear vector memory failed: $e');
+      return false;
+    }
+  }
+
   /// 同步核心记忆到后端
   static Future<void> _syncCoreMemoryToBackend() async {
     try {
@@ -273,23 +300,4 @@ class MemoryService {
     }
   }
 
-  /// 从用户输入中提取要记住的内容（已弃用，核心记忆改为AI自动总结）
-  @Deprecated('Use autoSummarizeCoreMemory instead')
-  static String extractMemoryContent(String message) {
-    // 尝试提取关键信息
-    final patterns = [
-      RegExp(r'记住(.+)'),
-      RegExp(r'记得(.+)'),
-      RegExp(r'我(喜欢|讨厌|爱|是|叫)(.+)'),
-    ];
-
-    for (final pattern in patterns) {
-      final match = pattern.firstMatch(message);
-      if (match != null) {
-        return match.group(match.groupCount) ?? message;
-      }
-    }
-
-    return message;
-  }
 }

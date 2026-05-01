@@ -300,12 +300,26 @@ class BackgroundRuntimeService {
           'BackgroundRuntimeService: connection check failed after network switch, reconnecting: $e',
         );
         try {
-          await SecureWebSocketClient.instance.close();
+          // Try to recover in place first; avoid aggressive close loops.
           await SecureWebSocketClient.instance.ensureConnected();
+          await SecureWebSocketClient.instance.request(
+            'health',
+            const <String, dynamic>{},
+            timeout: const Duration(seconds: 4),
+          );
         } catch (e2) {
           debugPrint(
-            'BackgroundRuntimeService: websocket reconnect failed after check: $e2',
+            'BackgroundRuntimeService: in-place reconnect failed after check, forcing reconnect: $e2',
           );
+          try {
+            await SecureWebSocketClient.instance.recoverConnectionWithoutClose(
+              reason: 'background_network_switch',
+            );
+          } catch (e3) {
+            debugPrint(
+              'BackgroundRuntimeService: forced websocket reconnect failed after check: $e3',
+            );
+          }
         }
       }
     }

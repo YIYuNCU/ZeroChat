@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from fastapi import WebSocket
 
+from core.utils import is_tool_role_id, mask_api_key
 from routers import roles, settings
 from services import settings_service
 
@@ -91,52 +93,41 @@ def resolve_backend_base_url_from_websocket(websocket: WebSocket, config: dict) 
     return f"{http_scheme}://{host}".rstrip("/")
 
 
-async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, config: dict):
-    backend_base_url = resolve_backend_base_url_from_websocket(websocket, config)
+# ---------------------------------------------------------------------------
+# Extracted action handlers
+# ---------------------------------------------------------------------------
 
-    if action == "vision_upload_init":
-        _cleanup_expired_vision_uploads()
+async def _handle_vision_upload_init(payload: dict, backend_base_url: str) -> dict:
+    _cleanup_expired_vision_uploads()
 
-        total_chunks = int(payload.get("total_chunks") or 0)
-        mime_type = str(payload.get("mime_type") or "image/jpeg").strip() or "image/jpeg"
-        file_size = int(payload.get("file_size") or 0)
-        if total_chunks <= 0:
-            raise ValueError("total_chunks must be > 0")
+    total_chunks = int(payload.get("total_chunks") or 0)
+    mime_type = str(payload.get("mime_type") or "image/jpeg").strip() or "image/jpeg"
+    file_size = int(payload.get("file_size") or 0)
+    if total_chunks <= 0:
+        raise ValueError("total_chunks must be > 0")
 
-        preferred_upload_id = str(payload.get("upload_id") or "").strip()
-        upload_id = _safe_upload_id(preferred_upload_id) if preferred_upload_id else uuid.uuid4().hex
-        upload_dir = _upload_dir(upload_id)
-        upload_dir.mkdir(parents=True, exist_ok=True)
+    preferred_upload_id = str(payload.get("upload_id") or "").strip()
+    upload_id = _safe_upload_id(preferred_upload_id) if preferred_upload_id else uuid.uuid4().hex
+    upload_dir = _upload_dir(upload_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
-        meta_file = upload_dir / "meta.json"
-        if meta_file.exists():
-            with open(meta_file, "r", encoding="utf-8") as f:
-                metadata = json.load(f)
+    meta_file = upload_dir / "meta.json"
+    if meta_file.exists():
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
 
-            old_total_chunks = int(metadata.get("total_chunks") or 0)
-            old_mime_type = str(metadata.get("mime_type") or "").strip()
-            old_file_size = int(metadata.get("file_size") or 0)
+        old_total_chunks = int(metadata.get("total_chunks") or 0)
+        old_mime_type = str(metadata.get("mime_type") or "").strip()
+        old_file_size = int(metadata.get("file_size") or 0)
 
-            # 参数变化时认为是新文件，重置当前上传会话
-            if (
-                old_total_chunks != total_chunks
-                or old_mime_type != mime_type
-                or old_file_size != file_size
-            ):
-                shutil.rmtree(upload_dir, ignore_errors=True)
-                upload_dir.mkdir(parents=True, exist_ok=True)
-                metadata = {
-                    "upload_id": upload_id,
-                    "total_chunks": total_chunks,
-                    "mime_type": mime_type,
-                    "file_size": file_size,
-                    "created_at": datetime.now().isoformat(),
-                    "completed": False,
-                    "chunk_index_base": None,
-                }
-                with open(meta_file, "w", encoding="utf-8") as f:
-                    json.dump(metadata, f, ensure_ascii=False, indent=2)
-        else:
+        # 参数变化时认为是新文件，重置当前上传会话
+        if (
+            old_total_chunks != total_chunks
+            or old_mime_type != mime_type
+            or old_file_size != file_size
+        ):
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            upload_dir.mkdir(parents=True, exist_ok=True)
             metadata = {
                 "upload_id": upload_id,
                 "total_chunks": total_chunks,
@@ -148,96 +139,546 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             }
             with open(meta_file, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-        uploaded_chunks = _list_uploaded_chunk_indices(upload_dir, total_chunks)
-        completed = bool(metadata.get("completed") is True and (upload_dir / "merged.bin").exists())
-        return {
-            "success": True,
+    else:
+        metadata = {
             "upload_id": upload_id,
             "total_chunks": total_chunks,
-            "uploaded_chunks": uploaded_chunks,
-            "completed": completed,
+            "mime_type": mime_type,
+            "file_size": file_size,
+            "created_at": datetime.now().isoformat(),
+            "completed": False,
+            "chunk_index_base": None,
         }
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    uploaded_chunks = _list_uploaded_chunk_indices(upload_dir, total_chunks)
+    completed = bool(metadata.get("completed") is True and (upload_dir / "merged.bin").exists())
+    return {
+        "success": True,
+        "upload_id": upload_id,
+        "total_chunks": total_chunks,
+        "uploaded_chunks": uploaded_chunks,
+        "completed": completed,
+    }
+
+
+async def _handle_vision_upload_chunk(payload: dict, backend_base_url: str) -> dict:
+    upload_id = _safe_upload_id(str(payload.get("upload_id") or ""))
+    raw_chunk_index_value = payload.get("chunk_index")
+    raw_chunk_index = int(raw_chunk_index_value) if raw_chunk_index_value is not None else -1
+    chunk_base64 = str(payload.get("chunk_base64") or "").strip()
+
+    upload_dir = _upload_dir(upload_id)
+    meta_file = upload_dir / "meta.json"
+    if not upload_dir.exists() or not meta_file.exists():
+        raise ValueError("upload not found")
+
+    with open(meta_file, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+    total_chunks = int(metadata.get("total_chunks") or 0)
+    chunk_index = _normalize_chunk_index(metadata, raw_chunk_index, total_chunks)
+    if chunk_index < 0 or chunk_index >= total_chunks:
+        raise ValueError("invalid chunk_index")
+    if not chunk_base64:
+        raise ValueError("chunk_base64 missing")
+
+    try:
+        chunk_bytes = base64.b64decode(chunk_base64, validate=True)
+    except Exception as exc:
+        raise ValueError("invalid chunk base64") from exc
+
+    chunk_file = upload_dir / f"chunk_{chunk_index:06d}.part"
+    with open(chunk_file, "wb") as f:
+        f.write(chunk_bytes)
+
+    # 写回可能更新后的索引基准
+    with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    return {
+        "success": True,
+        "upload_id": upload_id,
+        "chunk_index": chunk_index,
+        "raw_chunk_index": raw_chunk_index,
+        "size": len(chunk_bytes),
+    }
+
+
+async def _handle_vision_upload_commit(payload: dict, backend_base_url: str) -> dict:
+    upload_id = _safe_upload_id(str(payload.get("upload_id") or ""))
+    upload_dir = _upload_dir(upload_id)
+    meta_file = upload_dir / "meta.json"
+    if not upload_dir.exists() or not meta_file.exists():
+        raise ValueError("upload not found")
+
+    with open(meta_file, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    total_chunks = int(metadata.get("total_chunks") or 0)
+    if total_chunks <= 0:
+        raise ValueError("invalid upload metadata")
+
+    merged_file = upload_dir / "merged.bin"
+    total_size = 0
+    with open(merged_file, "wb") as out:
+        for index in range(total_chunks):
+            chunk_file = upload_dir / f"chunk_{index:06d}.part"
+            if not chunk_file.exists():
+                raise ValueError(f"missing chunk: {index}")
+            data = chunk_file.read_bytes()
+            total_size += len(data)
+            out.write(data)
+
+    metadata["completed"] = True
+    metadata["committed_at"] = datetime.now().isoformat()
+    metadata["merged_size"] = total_size
+    with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    return {
+        "success": True,
+        "upload_id": upload_id,
+        "size": total_size,
+        "mime_type": str(metadata.get("mime_type") or "image/jpeg"),
+    }
+
+
+async def _handle_settings_get(payload: dict, backend_base_url: str) -> dict:
+    settings_data = settings_service.load_settings()
+    include_secrets = payload.get("include_secrets") is True
+    if not include_secrets:
+        for key_name in ("ai_api_key", "intent_api_key", "vision_api_key"):
+            masked = mask_api_key(settings_data.get(key_name))
+            if masked is not None:
+                settings_data[f"{key_name}_masked"] = masked
+                del settings_data[key_name]
+    return {"settings": settings_data}
+
+
+async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
+    update = settings.SettingsUpdate(**dict(payload.get("updates") or {}))
+    updates = {}
+    if update.ai_api_url is not None:
+        updates["ai_api_url"] = update.ai_api_url
+    if update.ai_api_key is not None:
+        updates["ai_api_key"] = update.ai_api_key
+    if update.ai_model is not None:
+        updates["ai_model"] = update.ai_model
+    if update.intent_enabled is not None:
+        updates["intent_enabled"] = update.intent_enabled
+    if update.intent_api_url is not None:
+        updates["intent_api_url"] = update.intent_api_url
+    if update.intent_api_key is not None:
+        updates["intent_api_key"] = update.intent_api_key
+    if update.intent_model is not None:
+        updates["intent_model"] = update.intent_model
+    if update.vision_enabled is not None:
+        updates["vision_enabled"] = update.vision_enabled
+    if update.vision_api_url is not None:
+        updates["vision_api_url"] = update.vision_api_url
+    if update.vision_api_key is not None:
+        updates["vision_api_key"] = update.vision_api_key
+    if update.vision_model is not None:
+        updates["vision_model"] = update.vision_model
+    if update.vision_mode is not None:
+        mode = str(update.vision_mode).strip().lower()
+        updates["vision_mode"] = mode if mode in {"standalone", "pre_model"} else "standalone"
+    if update.host is not None:
+        updates["host"] = update.host
+    if update.port is not None:
+        updates["port"] = update.port
+
+    if not updates:
+        return {"success": True, "message": "No changes"}
+    if settings_service.save_settings(updates):
+        return {"success": True, "message": "Settings updated"}
+    return {"success": False, "error": "Failed to save settings"}
+
+
+async def _handle_settings_avatar_upload(payload: dict, backend_base_url: str) -> dict:
+    filename = str(payload.get("filename") or "avatar.jpg").strip()
+    content_base64 = str(payload.get("content_base64") or "").strip()
+    if not content_base64:
+        raise ValueError("content_base64 missing")
+
+    ext = filename.split(".")[-1].lower() if "." in filename else "jpg"
+    if ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
+        ext = "jpg"
+
+    try:
+        file_bytes = base64.b64decode(content_base64, validate=True)
+    except Exception as exc:
+        raise ValueError("invalid base64 content") from exc
+
+    settings.AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+    stored_name = f"user_avatar_{uuid.uuid4().hex[:8]}.{ext}"
+    filepath = settings.AVATARS_DIR / stored_name
+    with open(filepath, "wb") as f:
+        f.write(file_bytes)
+
+    avatar_hash = hashlib.md5(file_bytes).hexdigest()
+    return {
+        "success": True,
+        "filename": stored_name,
+        "path": f"/files/avatars/{stored_name}",
+        "hash": avatar_hash,
+    }
+
+
+async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
+    role_payload = dict(payload.get("role") or {})
+    role_model = roles.RoleCreate(**role_payload)
+    existing = roles.load_role(role_model.id)
+
+    if existing:
+        for key, value in role_model.model_dump(exclude_none=True).items():
+            if key != "id" and value is not None:
+                existing[key] = value
+        roles.save_role(role_model.id, existing)
+        role_data = existing
+    else:
+        role_data = {
+            "id": role_model.id,
+            "name": role_model.name,
+            "avatar_url": role_model.avatar_url or "",
+            "persona": role_model.persona or "",
+            "system_prompt": role_model.system_prompt or "",
+            "greeting": role_model.greeting or "",
+            "description": role_model.description or "",
+            "core_memory": role_model.core_memory or [],
+            "ai_model": role_model.ai_model or "deepseek-chat",
+            "ai_api_url": role_model.ai_api_url or "",
+            "ai_api_key": role_model.ai_api_key or "",
+            "ai_temperature": (
+                role_model.ai_temperature
+                if role_model.ai_temperature is not None
+                else 0.7
+            ),
+            "personality": (
+                role_model.personality.model_dump()
+                if role_model.personality
+                else {
+                    "openness": 50,
+                    "conscientiousness": 50,
+                    "extraversion": 50,
+                    "agreeableness": 50,
+                    "neuroticism": 50,
+                }
+            ),
+            "proactive_config": (
+                role_model.proactive_config.model_dump()
+                if role_model.proactive_config
+                else {
+                    "enabled": False,
+                    "min_interval_minutes": 30,
+                    "max_interval_minutes": 120,
+                    "trigger_prompt": "",
+                    "quiet_hours_start": 23,
+                    "quiet_hours_end": 7,
+                    "next_trigger_time": None,
+                }
+            ),
+            "tags": role_model.tags or [],
+            "gender": role_model.gender or "men",
+            "menstruation_cycle": (
+                role_model.menstruation_cycle.model_dump()
+                if role_model.menstruation_cycle
+                else {
+                    "cycle_length": 30,
+                    "period_length": 6,
+                    "last_period_start": "2026-01-24",
+                }
+            ),
+            "metadata": role_model.metadata or {},
+            "created_at": datetime.now().isoformat(),
+        }
+        roles.save_role(role_model.id, role_data)
+
+        if not is_tool_role_id(role_model.id):
+            from services.memory_service import load_memory
+
+            load_memory(role_model.id)
+
+    role_copy = dict(role_data)
+    role_id = str(role_copy.get("id", "")).strip()
+    if role_id and role_copy.get("avatar_url"):
+        role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
+        role_copy["avatar_hash"] = roles._get_role_avatar_hash(role_id)
+
+    return role_copy
+
+
+async def _handle_roles_avatar_upload(payload: dict, backend_base_url: str) -> dict:
+    role_id = str(payload.get("role_id") or "").strip()
+    content_base64 = str(payload.get("content_base64") or "").strip()
+    filename = str(payload.get("filename") or "avatar.jpg").strip()
+
+    if not role_id:
+        raise ValueError("role_id missing")
+    if not content_base64:
+        raise ValueError("content_base64 missing")
+
+    role = roles.load_role(role_id)
+    if not role:
+        raise ValueError("role not found")
+
+    ext = filename.split(".")[-1].lower() if "." in filename else "jpg"
+    if ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
+        ext = "jpg"
+
+    try:
+        file_bytes = base64.b64decode(content_base64, validate=True)
+    except Exception as exc:
+        raise ValueError("invalid base64 content") from exc
+
+    role_dir = roles.get_role_dir(role_id)
+    avatar_path = role_dir / "assets" / f"avatar.{ext}"
+    with open(avatar_path, "wb") as f:
+        f.write(file_bytes)
+
+    avatar_url = f"{backend_base_url}/files/roles/{role_id}/avatar"
+    role["avatar_url"] = avatar_url
+    roles.save_role(role_id, role)
+
+    return {
+        "success": True,
+        "avatar_url": avatar_url,
+        "avatar_hash": roles._get_role_avatar_hash(role_id),
+    }
+
+
+async def _handle_user_emoji_upload(payload: dict, backend_base_url: str) -> dict:
+    category = roles._normalize_category_name(str(payload.get("category") or ""))
+    tag_value = str(payload.get("tag") or "").strip()
+    filename = str(payload.get("filename") or "emoji.png")
+    content_base64 = str(payload.get("content_base64") or "").strip()
+    if not tag_value:
+        raise ValueError("标签不能为空")
+    if not content_base64:
+        raise ValueError("content_base64 missing")
+
+    try:
+        file_bytes = base64.b64decode(content_base64, validate=True)
+    except Exception as exc:
+        raise ValueError("invalid base64 content") from exc
+
+    with roles._get_user_emoji_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO user_emoji_categories(name, created_at) VALUES(?, ?)",
+            (category, datetime.now().isoformat()),
+        )
+
+        ext = roles._guess_ext(filename)
+        emoji_id = f"u_{uuid.uuid4().hex[:12]}"
+        saved_filename = f"{emoji_id}.{ext}"
+        category_dir = roles.USER_EMOJI_DIR / category
+        category_dir.mkdir(parents=True, exist_ok=True)
+        file_path = category_dir / saved_filename
+
+        with open(file_path, "wb") as f:
+            f.write(file_bytes)
+
+        conn.execute(
+            "INSERT INTO user_emojis(id, category, tag, filename, file_path, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+            (
+                emoji_id,
+                category,
+                tag_value,
+                saved_filename,
+                str(file_path),
+                datetime.now().isoformat(),
+            ),
+        )
+
+    return {
+        "success": True,
+        "emoji": {
+            "id": emoji_id,
+            "category": category,
+            "tag": tag_value,
+            "filename": saved_filename,
+            "url": f"{backend_base_url}/files/user-emojis/{emoji_id}",
+        },
+    }
+
+
+async def _handle_user_emojis_list(payload: dict, backend_base_url: str) -> dict:
+    category = payload.get("category")
+    with roles._get_user_emoji_connection() as conn:
+        if category:
+            normalized = roles._normalize_category_name(str(category))
+            rows = conn.execute(
+                "SELECT id, category, tag, filename, created_at FROM user_emojis WHERE category = ? ORDER BY created_at DESC",
+                (normalized,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, category, tag, filename, created_at FROM user_emojis ORDER BY created_at DESC"
+            ).fetchall()
+
+    emojis = [
+        {
+            "id": str(r["id"]),
+            "category": str(r["category"]),
+            "tag": str(r["tag"]),
+            "filename": str(r["filename"]),
+            "created_at": str(r["created_at"]),
+            "url": f"{backend_base_url}/files/user-emojis/{r['id']}",
+        }
+        for r in rows
+    ]
+    return {"emojis": emojis}
+
+
+async def _handle_user_emoji_category_delete(payload: dict, backend_base_url: str) -> dict:
+    import shutil
+
+    category = roles._normalize_category_name(str(payload.get("category") or ""))
+    with roles._get_user_emoji_connection() as conn:
+        rows = conn.execute(
+            "SELECT file_path FROM user_emojis WHERE category = ?",
+            (category,),
+        ).fetchall()
+        for row in rows:
+            path = Path(str(row["file_path"]))
+            if path.exists():
+                path.unlink()
+        conn.execute("DELETE FROM user_emojis WHERE category = ?", (category,))
+        conn.execute("DELETE FROM user_emoji_categories WHERE name = ?", (category,))
+
+    category_dir = roles.USER_EMOJI_DIR / category
+    if category_dir.exists():
+        shutil.rmtree(category_dir)
+    return {"success": True, "category": category}
+
+
+async def _handle_chat_vision(payload: dict, backend_base_url: str) -> dict:
+    from routers.ai_behavior import VisionRequest, chat_with_vision
+
+    request = VisionRequest(
+        image_base64=str(payload.get("image_base64") or ""),
+        upload_id=(str(payload.get("upload_id")).strip() if payload.get("upload_id") is not None else None),
+        mime_type=str(payload.get("mime_type") or "image/jpeg"),
+        user_prompt=str(payload.get("user_prompt") or "请描述这张图片的内容"),
+        system_prompt=str(payload.get("system_prompt") or ""),
+        role_id=(str(payload.get("role_id")).strip() if payload.get("role_id") is not None else None),
+        run_mode=(str(payload.get("run_mode")).strip() if payload.get("run_mode") is not None else None),
+    )
+    return await chat_with_vision(request)
+
+
+async def _handle_ai_intent(payload: dict, backend_base_url: str) -> dict:
+    from routers.ai_behavior import IntentDetectRequest, detect_intent
+
+    intent_request = IntentDetectRequest(
+        message=str(payload.get("message") or ""),
+        api_url=(
+            str(payload.get("api_url"))
+            if payload.get("api_url") is not None
+            else None
+        ),
+        api_key=(
+            str(payload.get("api_key"))
+            if payload.get("api_key") is not None
+            else None
+        ),
+        model=(
+            str(payload.get("model"))
+            if payload.get("model") is not None
+            else None
+        ),
+    )
+
+    result = await detect_intent(intent_request)
+    if hasattr(result, "model_dump"):
+        return result.model_dump()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Background chat task processing
+# ---------------------------------------------------------------------------
+
+async def _process_chat_background(task_id: str, event):
+    """Process chat event in background, push result via server push."""
+    from routers.ai_behavior import handle_ai_event as handle_ai_behavior_event
+    from transport.push_hub import publish_server_push
+
+    try:
+        result = await handle_ai_behavior_event(event)
+        if hasattr(result, "model_dump"):
+            result_dict = result.model_dump()
+        elif isinstance(result, dict):
+            result_dict = result
+        else:
+            result_dict = {"success": False, "error": "Unexpected result type"}
+
+        await publish_server_push("chat_response", {
+            "task_id": task_id,
+            "role_id": event.role_id,
+            "success": result_dict.get("success", False),
+            "content": result_dict.get("content"),
+            "error": result_dict.get("error"),
+            "metadata": result_dict.get("metadata", {}),
+        })
+    except Exception as exc:
+        await publish_server_push("chat_response", {
+            "task_id": task_id,
+            "role_id": event.role_id,
+            "success": False,
+            "error": str(exc),
+        })
+
+
+# ---------------------------------------------------------------------------
+# Main dispatcher
+# ---------------------------------------------------------------------------
+
+async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, config: dict):
+    backend_base_url = resolve_backend_base_url_from_websocket(websocket, config)
+
+    # --- Extracted handlers ---
+    if action == "vision_upload_init":
+        return await _handle_vision_upload_init(payload, backend_base_url)
 
     if action == "vision_upload_chunk":
-        upload_id = _safe_upload_id(str(payload.get("upload_id") or ""))
-        raw_chunk_index_value = payload.get("chunk_index")
-        raw_chunk_index = int(raw_chunk_index_value) if raw_chunk_index_value is not None else -1
-        chunk_base64 = str(payload.get("chunk_base64") or "").strip()
-
-        upload_dir = _upload_dir(upload_id)
-        meta_file = upload_dir / "meta.json"
-        if not upload_dir.exists() or not meta_file.exists():
-            raise ValueError("upload not found")
-
-        with open(meta_file, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-        total_chunks = int(metadata.get("total_chunks") or 0)
-        chunk_index = _normalize_chunk_index(metadata, raw_chunk_index, total_chunks)
-        if chunk_index < 0 or chunk_index >= total_chunks:
-            raise ValueError("invalid chunk_index")
-        if not chunk_base64:
-            raise ValueError("chunk_base64 missing")
-
-        try:
-            chunk_bytes = base64.b64decode(chunk_base64, validate=True)
-        except Exception as exc:
-            raise ValueError("invalid chunk base64") from exc
-
-        chunk_file = upload_dir / f"chunk_{chunk_index:06d}.part"
-        with open(chunk_file, "wb") as f:
-            f.write(chunk_bytes)
-
-        # 写回可能更新后的索引基准
-        with open(meta_file, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-        return {
-            "success": True,
-            "upload_id": upload_id,
-            "chunk_index": chunk_index,
-            "raw_chunk_index": raw_chunk_index,
-            "size": len(chunk_bytes),
-        }
+        return await _handle_vision_upload_chunk(payload, backend_base_url)
 
     if action == "vision_upload_commit":
-        upload_id = _safe_upload_id(str(payload.get("upload_id") or ""))
-        upload_dir = _upload_dir(upload_id)
-        meta_file = upload_dir / "meta.json"
-        if not upload_dir.exists() or not meta_file.exists():
-            raise ValueError("upload not found")
+        return await _handle_vision_upload_commit(payload, backend_base_url)
 
-        with open(meta_file, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
+    if action == "settings_get":
+        return await _handle_settings_get(payload, backend_base_url)
 
-        total_chunks = int(metadata.get("total_chunks") or 0)
-        if total_chunks <= 0:
-            raise ValueError("invalid upload metadata")
+    if action == "settings_update":
+        return await _handle_settings_update(payload, backend_base_url)
 
-        merged_file = upload_dir / "merged.bin"
-        total_size = 0
-        with open(merged_file, "wb") as out:
-            for index in range(total_chunks):
-                chunk_file = upload_dir / f"chunk_{index:06d}.part"
-                if not chunk_file.exists():
-                    raise ValueError(f"missing chunk: {index}")
-                data = chunk_file.read_bytes()
-                total_size += len(data)
-                out.write(data)
+    if action == "settings_avatar_upload":
+        return await _handle_settings_avatar_upload(payload, backend_base_url)
 
-        metadata["completed"] = True
-        metadata["committed_at"] = datetime.now().isoformat()
-        metadata["merged_size"] = total_size
-        with open(meta_file, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
+    if action == "roles_upsert":
+        return await _handle_roles_upsert(payload, backend_base_url)
 
-        return {
-            "success": True,
-            "upload_id": upload_id,
-            "size": total_size,
-            "mime_type": str(metadata.get("mime_type") or "image/jpeg"),
-        }
+    if action == "roles_avatar_upload":
+        return await _handle_roles_avatar_upload(payload, backend_base_url)
 
+    if action == "user_emoji_upload":
+        return await _handle_user_emoji_upload(payload, backend_base_url)
+
+    if action == "user_emojis_list":
+        return await _handle_user_emojis_list(payload, backend_base_url)
+
+    if action == "user_emoji_category_delete":
+        return await _handle_user_emoji_category_delete(payload, backend_base_url)
+
+    if action == "chat_vision":
+        return await _handle_chat_vision(payload, backend_base_url)
+
+    if action == "ai_intent":
+        return await _handle_ai_intent(payload, backend_base_url)
+
+    # --- Inline short delegation handlers ---
     if action == "chat_snapshot":
         client_md5 = str(payload.get("client_md5") or "").strip()
         snapshot = roles._build_chats_snapshot(backend_base_url)
@@ -284,10 +725,18 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         return await roles.sync_chat_messages(role_id, sync_payload)
 
     if action == "ai_event":
-        from routers.ai_behavior import AIEvent, handle_ai_event as handle_ai_behavior_event
+        from routers.ai_behavior import AIEvent, AIEventType, handle_ai_event as handle_ai_behavior_event
 
         event_payload = payload.get("event") or {}
         event = AIEvent(**event_payload)
+
+        # Chat events with async flag → background task mechanism
+        if event.event_type == AIEventType.CHAT and (event.context or {}).get("async"):
+            task_id = f"chat_{uuid.uuid4().hex}"
+            asyncio.create_task(_process_chat_background(task_id, event))
+            return {"success": True, "task_id": task_id, "status": "queued"}
+
+        # All other events / non-async chat → synchronous (unchanged)
         result = await handle_ai_behavior_event(event)
         if hasattr(result, "model_dump"):
             return result.model_dump()
@@ -423,88 +872,6 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
 
         return {"roles": role_items}
 
-    if action == "roles_upsert":
-        role_payload = dict(payload.get("role") or {})
-        role_model = roles.RoleCreate(**role_payload)
-        existing = roles.load_role(role_model.id)
-
-        if existing:
-            for key, value in role_model.model_dump(exclude_none=True).items():
-                if key != "id" and value is not None:
-                    existing[key] = value
-            roles.save_role(role_model.id, existing)
-            role_data = existing
-        else:
-            role_data = {
-                "id": role_model.id,
-                "name": role_model.name,
-                "avatar_url": role_model.avatar_url or "",
-                "persona": role_model.persona or "",
-                "system_prompt": role_model.system_prompt or "",
-                "greeting": role_model.greeting or "",
-                "description": role_model.description or "",
-                "core_memory": role_model.core_memory or [],
-                "ai_model": role_model.ai_model or "deepseek-chat",
-                "ai_api_url": role_model.ai_api_url or "",
-                "ai_api_key": role_model.ai_api_key or "",
-                "ai_temperature": (
-                    role_model.ai_temperature
-                    if role_model.ai_temperature is not None
-                    else 0.7
-                ),
-                "personality": (
-                    role_model.personality.model_dump()
-                    if role_model.personality
-                    else {
-                        "openness": 50,
-                        "conscientiousness": 50,
-                        "extraversion": 50,
-                        "agreeableness": 50,
-                        "neuroticism": 50,
-                    }
-                ),
-                "proactive_config": (
-                    role_model.proactive_config.model_dump()
-                    if role_model.proactive_config
-                    else {
-                        "enabled": False,
-                        "min_interval_minutes": 30,
-                        "max_interval_minutes": 120,
-                        "trigger_prompt": "",
-                        "quiet_hours_start": 23,
-                        "quiet_hours_end": 7,
-                        "next_trigger_time": None,
-                    }
-                ),
-                "tags": role_model.tags or [],
-                "gender": role_model.gender or "men",
-                "menstruation_cycle": (
-                    role_model.menstruation_cycle.model_dump()
-                    if role_model.menstruation_cycle
-                    else {
-                        "cycle_length": 30,
-                        "period_length": 6,
-                        "last_period_start": "2026-01-24",
-                    }
-                ),
-                "metadata": role_model.metadata or {},
-                "created_at": datetime.now().isoformat(),
-            }
-            roles.save_role(role_model.id, role_data)
-
-            if not roles._is_tool_role_id(role_model.id):
-                from services.memory_service import load_memory
-
-                load_memory(role_model.id)
-
-        role_copy = dict(role_data)
-        role_id = str(role_copy.get("id", "")).strip()
-        if role_id and role_copy.get("avatar_url"):
-            role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
-            role_copy["avatar_hash"] = roles._get_role_avatar_hash(role_id)
-
-        return role_copy
-
     if action == "roles_delete":
         import shutil
 
@@ -538,146 +905,16 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             raise ValueError("role_id missing")
         return await roles.get_memory(role_id)
 
-    if action == "roles_avatar_upload":
+    if action == "vector_memory_clear":
         role_id = str(payload.get("role_id") or "").strip()
-        content_base64 = str(payload.get("content_base64") or "").strip()
-        filename = str(payload.get("filename") or "avatar.jpg").strip()
-
         if not role_id:
             raise ValueError("role_id missing")
-        if not content_base64:
-            raise ValueError("content_base64 missing")
-
-        role = roles.load_role(role_id)
-        if not role:
-            raise ValueError("role not found")
-
-        ext = filename.split(".")[-1].lower() if "." in filename else "jpg"
-        if ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
-            ext = "jpg"
-
-        try:
-            file_bytes = base64.b64decode(content_base64, validate=True)
-        except Exception as exc:
-            raise ValueError("invalid base64 content") from exc
-
-        role_dir = roles.get_role_dir(role_id)
-        avatar_path = role_dir / "assets" / f"avatar.{ext}"
-        with open(avatar_path, "wb") as f:
-            f.write(file_bytes)
-
-        avatar_url = f"{backend_base_url}/files/roles/{role_id}/avatar"
-        role["avatar_url"] = avatar_url
-        roles.save_role(role_id, role)
-
-        return {
-            "success": True,
-            "avatar_url": avatar_url,
-            "avatar_hash": roles._get_role_avatar_hash(role_id),
-        }
+        from services.memory_service import clear_vector_memory
+        clear_vector_memory(role_id)
+        return {"success": True, "vector_memory_count": 0}
 
     if action == "health":
         return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
-    if action == "settings_get":
-        settings_data = settings_service.load_settings()
-        include_secrets = payload.get("include_secrets") is True
-        if not include_secrets:
-            if settings_data.get("ai_api_key"):
-                key = settings_data["ai_api_key"]
-                settings_data["ai_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-                del settings_data["ai_api_key"]
-            if settings_data.get("intent_api_key"):
-                key = settings_data["intent_api_key"]
-                settings_data["intent_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-                del settings_data["intent_api_key"]
-            if settings_data.get("vision_api_key"):
-                key = settings_data["vision_api_key"]
-                settings_data["vision_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-                del settings_data["vision_api_key"]
-        return {"settings": settings_data}
-
-    if action == "settings_update":
-        update = settings.SettingsUpdate(**dict(payload.get("updates") or {}))
-        updates = {}
-        if update.ai_api_url is not None:
-            updates["ai_api_url"] = update.ai_api_url
-        if update.ai_api_key is not None:
-            updates["ai_api_key"] = update.ai_api_key
-        if update.ai_model is not None:
-            updates["ai_model"] = update.ai_model
-        if update.intent_enabled is not None:
-            updates["intent_enabled"] = update.intent_enabled
-        if update.intent_api_url is not None:
-            updates["intent_api_url"] = update.intent_api_url
-        if update.intent_api_key is not None:
-            updates["intent_api_key"] = update.intent_api_key
-        if update.intent_model is not None:
-            updates["intent_model"] = update.intent_model
-        if update.vision_enabled is not None:
-            updates["vision_enabled"] = update.vision_enabled
-        if update.vision_api_url is not None:
-            updates["vision_api_url"] = update.vision_api_url
-        if update.vision_api_key is not None:
-            updates["vision_api_key"] = update.vision_api_key
-        if update.vision_model is not None:
-            updates["vision_model"] = update.vision_model
-        if update.vision_mode is not None:
-            mode = str(update.vision_mode).strip().lower()
-            updates["vision_mode"] = mode if mode in {"standalone", "pre_model"} else "standalone"
-        if update.host is not None:
-            updates["host"] = update.host
-        if update.port is not None:
-            updates["port"] = update.port
-
-        if not updates:
-            return {"success": True, "message": "No changes"}
-        if settings_service.save_settings(updates):
-            return {"success": True, "message": "Settings updated"}
-        return {"success": False, "error": "Failed to save settings"}
-
-    if action == "settings_avatar_upload":
-        filename = str(payload.get("filename") or "avatar.jpg").strip()
-        content_base64 = str(payload.get("content_base64") or "").strip()
-        if not content_base64:
-            raise ValueError("content_base64 missing")
-
-        ext = filename.split(".")[-1].lower() if "." in filename else "jpg"
-        if ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
-            ext = "jpg"
-
-        try:
-            file_bytes = base64.b64decode(content_base64, validate=True)
-        except Exception as exc:
-            raise ValueError("invalid base64 content") from exc
-
-        settings.AVATARS_DIR.mkdir(parents=True, exist_ok=True)
-        stored_name = f"user_avatar_{uuid.uuid4().hex[:8]}.{ext}"
-        filepath = settings.AVATARS_DIR / stored_name
-        with open(filepath, "wb") as f:
-            f.write(file_bytes)
-
-        avatar_hash = hashlib.md5(file_bytes).hexdigest()
-        return {
-            "success": True,
-            "filename": stored_name,
-            "path": f"/files/avatars/{stored_name}",
-            "hash": avatar_hash,
-        }
-
-    if action == "chat_vision":
-        from routers.ai_behavior import VisionRequest, chat_with_vision
-
-        request = VisionRequest(
-            image_base64=str(payload.get("image_base64") or ""),
-            upload_id=(str(payload.get("upload_id")).strip() if payload.get("upload_id") is not None else None),
-            mime_type=str(payload.get("mime_type") or "image/jpeg"),
-            user_prompt=str(payload.get("user_prompt") or "请描述这张图片的内容"),
-            system_prompt=str(payload.get("system_prompt") or ""),
-            role_id=(str(payload.get("role_id")).strip() if payload.get("role_id") is not None else None),
-            run_mode=(str(payload.get("run_mode")).strip() if payload.get("run_mode") is not None else None),
-        )
-        return await chat_with_vision(request)
 
     if action == "emoji_random":
         import random
@@ -812,108 +1049,6 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         (roles.USER_EMOJI_DIR / category).mkdir(parents=True, exist_ok=True)
         return {"success": True, "category": category}
 
-    if action == "user_emoji_category_delete":
-        import shutil
-
-        category = roles._normalize_category_name(str(payload.get("category") or ""))
-        with roles._get_user_emoji_connection() as conn:
-            rows = conn.execute(
-                "SELECT file_path FROM user_emojis WHERE category = ?",
-                (category,),
-            ).fetchall()
-            for row in rows:
-                path = Path(str(row["file_path"]))
-                if path.exists():
-                    path.unlink()
-            conn.execute("DELETE FROM user_emojis WHERE category = ?", (category,))
-            conn.execute("DELETE FROM user_emoji_categories WHERE name = ?", (category,))
-
-        category_dir = roles.USER_EMOJI_DIR / category
-        if category_dir.exists():
-            shutil.rmtree(category_dir)
-        return {"success": True, "category": category}
-
-    if action == "user_emojis_list":
-        category = payload.get("category")
-        with roles._get_user_emoji_connection() as conn:
-            if category:
-                normalized = roles._normalize_category_name(str(category))
-                rows = conn.execute(
-                    "SELECT id, category, tag, filename, created_at FROM user_emojis WHERE category = ? ORDER BY created_at DESC",
-                    (normalized,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT id, category, tag, filename, created_at FROM user_emojis ORDER BY created_at DESC"
-                ).fetchall()
-
-        emojis = [
-            {
-                "id": str(r["id"]),
-                "category": str(r["category"]),
-                "tag": str(r["tag"]),
-                "filename": str(r["filename"]),
-                "created_at": str(r["created_at"]),
-                "url": f"{backend_base_url}/files/user-emojis/{r['id']}",
-            }
-            for r in rows
-        ]
-        return {"emojis": emojis}
-
-    if action == "user_emoji_upload":
-        category = roles._normalize_category_name(str(payload.get("category") or ""))
-        tag_value = str(payload.get("tag") or "").strip()
-        filename = str(payload.get("filename") or "emoji.png")
-        content_base64 = str(payload.get("content_base64") or "").strip()
-        if not tag_value:
-            raise ValueError("标签不能为空")
-        if not content_base64:
-            raise ValueError("content_base64 missing")
-
-        try:
-            file_bytes = base64.b64decode(content_base64, validate=True)
-        except Exception as exc:
-            raise ValueError("invalid base64 content") from exc
-
-        with roles._get_user_emoji_connection() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO user_emoji_categories(name, created_at) VALUES(?, ?)",
-                (category, datetime.now().isoformat()),
-            )
-
-            ext = roles._guess_ext(filename)
-            emoji_id = f"u_{uuid.uuid4().hex[:12]}"
-            saved_filename = f"{emoji_id}.{ext}"
-            category_dir = roles.USER_EMOJI_DIR / category
-            category_dir.mkdir(parents=True, exist_ok=True)
-            file_path = category_dir / saved_filename
-
-            with open(file_path, "wb") as f:
-                f.write(file_bytes)
-
-            conn.execute(
-                "INSERT INTO user_emojis(id, category, tag, filename, file_path, created_at) VALUES(?, ?, ?, ?, ?, ?)",
-                (
-                    emoji_id,
-                    category,
-                    tag_value,
-                    saved_filename,
-                    str(file_path),
-                    datetime.now().isoformat(),
-                ),
-            )
-
-        return {
-            "success": True,
-            "emoji": {
-                "id": emoji_id,
-                "category": category,
-                "tag": tag_value,
-                "filename": saved_filename,
-                "url": f"{backend_base_url}/files/user-emojis/{emoji_id}",
-            },
-        }
-
     if action == "user_emoji_delete":
         emoji_id = str(payload.get("emoji_id") or "").strip()
         with roles._get_user_emoji_connection() as conn:
@@ -946,32 +1081,5 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             "tag": str(row["tag"]),
             "category": str(row["category"]),
         }
-
-    if action == "ai_intent":
-        from routers.ai_behavior import IntentDetectRequest, detect_intent
-
-        intent_request = IntentDetectRequest(
-            message=str(payload.get("message") or ""),
-            api_url=(
-                str(payload.get("api_url"))
-                if payload.get("api_url") is not None
-                else None
-            ),
-            api_key=(
-                str(payload.get("api_key"))
-                if payload.get("api_key") is not None
-                else None
-            ),
-            model=(
-                str(payload.get("model"))
-                if payload.get("model") is not None
-                else None
-            ),
-        )
-
-        result = await detect_intent(intent_request)
-        if hasattr(result, "model_dump"):
-            return result.model_dump()
-        return result
 
     raise ValueError(f"unsupported websocket action: {action}")

@@ -218,16 +218,10 @@ class _MomentsPageState extends State<MomentsPage> {
   }
 
   Widget _buildUserAvatar() {
-    final rawAvatarUrl = SettingsService.instance.userAvatarUrl;
+    final avatarUrl = SettingsService.instance.userAvatarFullUrl;
     final nickname = SettingsService.instance.userNickname.isNotEmpty
         ? SettingsService.instance.userNickname
         : '我';
-
-    // 如果是相对路径，加上后端URL前缀
-    String avatarUrl = rawAvatarUrl;
-    if (rawAvatarUrl.isNotEmpty && rawAvatarUrl.startsWith('/')) {
-      avatarUrl = '${SettingsService.instance.backendUrl}$rawAvatarUrl';
-    }
 
     if (avatarUrl.isNotEmpty) {
       return Container(
@@ -518,11 +512,9 @@ class _MomentsPageState extends State<MomentsPage> {
     String? avatarHash;
 
     if (post.isFromUser) {
-      final userAvatar = SettingsService.instance.userAvatarUrl;
-      if (userAvatar.isNotEmpty) {
-        avatarUrl = userAvatar.startsWith('/')
-            ? '${SettingsService.instance.backendUrl}$userAvatar'
-            : userAvatar;
+      final fullUrl = SettingsService.instance.userAvatarFullUrl;
+      if (fullUrl.isNotEmpty) {
+        avatarUrl = fullUrl;
       }
       avatarHash = SettingsService.instance.userAvatarHash;
     } else {

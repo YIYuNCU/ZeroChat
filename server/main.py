@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from fastapi.responses import FileResponse
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -137,6 +138,9 @@ async def health():
 async def scheduler_status():
     return scheduler_service.get_scheduler_status()
 
+@app.get("/favicon.ico")
+async def get_favicon():
+    return FileResponse(str(ROOT_DIR / "favicon.ico"), media_type="image/x-icon")
 
 app.websocket("/ws/secure")(create_secure_websocket_endpoint(CONFIG, logger))
 

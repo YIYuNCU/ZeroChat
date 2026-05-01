@@ -7,6 +7,8 @@ import hashlib
 from pydantic import BaseModel, ConfigDict
 from fastapi import APIRouter, Query
 
+from core.utils import mask_api_key
+
 router = APIRouter()
 
 # 导入设置服务
@@ -27,6 +29,10 @@ class SettingsUpdate(BaseModel):
     vision_api_key: Optional[str] = None
     vision_model: Optional[str] = None
     vision_mode: Optional[str] = None
+    embedding_enabled: Optional[bool] = None
+    embedding_api_url: Optional[str] = None
+    embedding_api_key: Optional[str] = None
+    embedding_model: Optional[str] = None
     host: Optional[str] = None
     port: Optional[int] = None
 
@@ -37,18 +43,11 @@ async def get_settings(include_secrets: bool = Query(False)):
 
     # 默认隐藏敏感信息，避免泄露；用于新安装客户端全量同步时可显式请求明文
     if not include_secrets:
-        if settings.get("ai_api_key"):
-            key = settings["ai_api_key"]
-            settings["ai_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-            del settings["ai_api_key"]
-        if settings.get("intent_api_key"):
-            key = settings["intent_api_key"]
-            settings["intent_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-            del settings["intent_api_key"]
-        if settings.get("vision_api_key"):
-            key = settings["vision_api_key"]
-            settings["vision_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-            del settings["vision_api_key"]
+        for key_name in ("ai_api_key", "intent_api_key", "vision_api_key"):
+            masked = mask_api_key(settings.get(key_name))
+            if masked is not None:
+                settings[f"{key_name}_masked"] = masked
+                del settings[key_name]
     return {"settings": settings}
 
 @router.put("/settings")
@@ -100,9 +99,9 @@ async def get_ai_settings():
     """获取 AI API 配置（不含敏感信息）"""
     config = settings_service.get_ai_config()
     # 隐藏 API KEY
-    if config.get("api_key"):
-        key = config["api_key"]
-        config["api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+    masked = mask_api_key(config.get("api_key"))
+    if masked is not None:
+        config["api_key_masked"] = masked
         del config["api_key"]
     return config
 
@@ -111,9 +110,9 @@ async def get_ai_settings():
 async def get_vision_settings():
     """获取图像识别配置（不含敏感信息）"""
     config = settings_service.get_vision_config()
-    if config.get("api_key"):
-        key = config["api_key"]
-        config["api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+    masked = mask_api_key(config.get("api_key"))
+    if masked is not None:
+        config["api_key_masked"] = masked
         del config["api_key"]
     return config
 

@@ -15,12 +15,9 @@ router = APIRouter()
 DATA_DIR = Path(__file__).parent.parent / "data"
 MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
 MOMENTS_HASH_FILE = DATA_DIR / "moments" / "posts.hash"
-TOOL_ROLE_PREFIX = "1000000000"
+from core.utils import is_tool_role_id
+
 DEFAULT_HASH_LIMIT = 50
-
-
-def _is_tool_role_id(role_id: str) -> bool:
-    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
 
 
 def _normalize_text(value: Optional[str]) -> str:
@@ -93,7 +90,7 @@ def _dedupe_moments_for_render(moments: List[dict]) -> List[dict]:
 
 
 def _build_rendered_moments(limit: int) -> List[dict]:
-    moments = [m for m in load_moments() if not _is_tool_role_id(str(m.get("author_id", "")))]
+    moments = [m for m in load_moments() if not is_tool_role_id(str(m.get("author_id", "")))]
     moments = _dedupe_moments_for_render(moments)
     moments.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return moments[:limit]
@@ -180,7 +177,7 @@ async def get_moments_hash(limit: int = 50):
 @router.post("/moments")
 async def create_moment(moment: MomentCreate):
     """发布朋友圈"""
-    if _is_tool_role_id(moment.author_id):
+    if is_tool_role_id(moment.author_id):
         raise HTTPException(status_code=403, detail="工具角色禁止发布朋友圈")
 
     moments = load_moments()

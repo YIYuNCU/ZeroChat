@@ -329,6 +329,61 @@ class ApiService {
     );
   }
 
+  /// 通过任务机制提交聊天（异步：后端处理完后通过 WebSocket 推送结果）
+  static Future<ChatSubmitResponse> submitChatTask({
+    required String roleId,
+    required String message,
+    Map<String, dynamic>? context,
+  }) async {
+    try {
+      final mergedContext = Map<String, dynamic>.from(context ?? {});
+      mergedContext['async'] = true; // 标记使用异步任务机制
+
+      final wsData = await SecureWebSocketClient.instance.request(
+        'ai_event',
+        {
+          'event': {
+            'role_id': roleId,
+            'event_type': 'chat',
+            'content': message,
+            'context': mergedContext,
+          },
+        },
+        // Queue response can be delayed by backend load; avoid premature timeout-triggered reconnect.
+        timeout: const Duration(seconds: 120),
+      );
+
+      // 后端接受异步任务，返回 task_id
+      if (wsData['status'] == 'queued' && wsData['task_id'] != null) {
+        return ChatSubmitResponse.queued(wsData['task_id'].toString());
+      }
+
+      // 后端同步返回（旧后端或不支持 async 时兜底）
+      if (wsData['success'] == true && wsData['content'] != null) {
+        final rawMetadata = wsData['metadata'];
+        final metadata = rawMetadata is Map
+            ? Map<String, dynamic>.from(rawMetadata)
+            : null;
+        return ChatSubmitResponse.completed(
+          content: wsData['content'].toString(),
+          metadata: metadata,
+        );
+      }
+
+      if (wsData['action']?.toString() == 'ignore') {
+        return ChatSubmitResponse.error('AI chose to ignore');
+      }
+      final wsError = wsData['error']?.toString();
+      if (wsError != null && wsError.isNotEmpty) {
+        return ChatSubmitResponse.error(wsError);
+      }
+      return ChatSubmitResponse.error('Unknown backend response');
+    } catch (e) {
+      debugPrint('ApiService: submitChatTask failed: $e');
+      return ChatSubmitResponse.error('后端WebSocket不可用: $e');
+    }
+  }
+
   /// 检查后端是否可用
   static Future<bool> isBackendAvailable() async {
     try {
@@ -526,5 +581,52 @@ class ApiResponse {
 
   factory ApiResponse.error(String error) {
     return ApiResponse._(success: false, error: error);
+  }
+}
+
+/// 异步聊天任务提交响应
+class ChatSubmitResponse {
+  final bool success;
+  final String? taskId;
+  final String status; // queued / completed / error
+  final String? content;
+  final Map<String, dynamic>? metadata;
+  final String? error;
+
+  ChatSubmitResponse._({
+    required this.success,
+    this.taskId,
+    required this.status,
+    this.content,
+    this.metadata,
+    this.error,
+  });
+
+  factory ChatSubmitResponse.queued(String taskId) {
+    return ChatSubmitResponse._(
+      success: true,
+      taskId: taskId,
+      status: 'queued',
+    );
+  }
+
+  factory ChatSubmitResponse.completed({
+    required String content,
+    Map<String, dynamic>? metadata,
+  }) {
+    return ChatSubmitResponse._(
+      success: true,
+      status: 'completed',
+      content: content,
+      metadata: metadata,
+    );
+  }
+
+  factory ChatSubmitResponse.error(String error) {
+    return ChatSubmitResponse._(
+      success: false,
+      status: 'error',
+      error: error,
+    );
   }
 }

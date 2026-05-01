@@ -3,6 +3,8 @@
 """
 import json
 import hashlib
+import random
+import shutil
 import sqlite3
 import uuid
 from datetime import datetime
@@ -11,6 +13,7 @@ from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
+from fastapi.responses import FileResponse, JSONResponse
 
 router = APIRouter()
 
@@ -18,12 +21,7 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 USER_EMOJI_DIR = DATA_DIR / "user_emojis"
 USER_EMOJI_DB = DATA_DIR / "user_emojis.sqlite"
-TOOL_ROLE_PREFIX = "1000000000"
-
-
-def _is_tool_role_id(role_id: str) -> bool:
-    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
-
+from core.utils import is_tool_role_id
 
 def _normalize_category_name(name: str) -> str:
     normalized = str(name or "").strip().lower()
@@ -32,7 +30,6 @@ def _normalize_category_name(name: str) -> str:
     if any(c in normalized for c in ["..", "/", "\\"]):
         raise HTTPException(status_code=400, detail="分类名不合法")
     return normalized
-
 
 def _init_user_emoji_db(conn: sqlite3.Connection):
     conn.execute(
@@ -58,7 +55,6 @@ def _init_user_emoji_db(conn: sqlite3.Connection):
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_user_emojis_category ON user_emojis(category)")
 
-
 def _get_user_emoji_connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     USER_EMOJI_DIR.mkdir(parents=True, exist_ok=True)
@@ -67,17 +63,14 @@ def _get_user_emoji_connection() -> sqlite3.Connection:
     _init_user_emoji_db(conn)
     return conn
 
-
 def _guess_ext(filename: str) -> str:
     ext = filename.split(".")[-1].lower() if "." in filename else "png"
     if ext not in {"png", "jpg", "jpeg", "gif", "webp"}:
         ext = "png"
     return ext
 
-
 class EmojiCategoryPayload(BaseModel):
     category: str
-
 
 class ResolveUserEmojiTagPayload(BaseModel):
     emoji_id: str
@@ -99,7 +92,6 @@ class PersonalityTraits(BaseModel):
     extraversion: int = 50      # 外向性
     agreeableness: int = 50     # 宜人性
     neuroticism: int = 50       # 神经质
-
 
 class MenstruationCycle(BaseModel):
     """生理周期配置"""
@@ -167,7 +159,6 @@ class MemoryUpdate(BaseModel):
     core_memory: Optional[Any] = None
     short_term: Optional[List[Any]] = None
 
-
 def _core_memory_to_lines(value: Any) -> List[str]:
     if value is None:
         return []
@@ -184,10 +175,8 @@ def _core_memory_to_lines(value: Any) -> List[str]:
         return [part.strip() for part in text.split(";") if part.strip()]
     return [text.strip()] if text.strip() else []
 
-
 def _core_memory_to_text(value: Any) -> str:
     return "\n".join(_core_memory_to_lines(value))
-
 
 def _overlay_role_core_memory_from_db(role_data: Dict[str, Any]) -> Dict[str, Any]:
     role_id = str(role_data.get("id") or "").strip()
@@ -235,7 +224,6 @@ def load_role(role_id: str) -> Optional[Dict]:
             return json.load(f)
     return None
 
-
 def _get_role_avatar_path(role_id: str) -> Optional[Path]:
     role_dir = get_role_dir(role_id)
     assets_dir = role_dir / "assets"
@@ -244,7 +232,6 @@ def _get_role_avatar_path(role_id: str) -> Optional[Path]:
         if avatar_path.exists():
             return avatar_path
     return None
-
 
 def _get_role_avatar_hash(role_id: str) -> str:
     avatar_path = _get_role_avatar_path(role_id)
@@ -346,7 +333,7 @@ async def create_role(role: RoleCreate, request: Request):
     }
     save_role(role.id, data)
     # Ensure an empty memory database exists for the new role.
-    if not _is_tool_role_id(role.id):
+    if not is_tool_role_id(role.id):
         from services.memory_service import load_memory, save_memory
 
         runtime_memory = load_memory(role.id)
@@ -379,7 +366,6 @@ async def delete_role(role_id: str):
     """删除角色"""
     role_dir = ROLES_DIR / role_id
     if role_dir.exists():
-        import shutil
         shutil.rmtree(role_dir)
     return {"success": True}
 
@@ -420,7 +406,8 @@ async def get_memory(role_id: str):
     memory = load_memory(role_id)
     return {
         "core_memory": _core_memory_to_lines(memory.get("core_memory", "")),
-        "short_term": memory.get("short_term", [])
+        "short_term": memory.get("short_term", []),
+        "vector_memory_count": memory.get("vector_memory_count", 0),
     }
 
 @router.put("/roles/{role_id}/memory")
@@ -454,11 +441,6 @@ async def append_memory(role_id: str, content: str):
     }
 
 # ========== 素材管理 ==========
-
-import uuid
-import shutil
-from fastapi import UploadFile, File
-from fastapi.responses import FileResponse
 
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
@@ -593,7 +575,6 @@ async def list_role_emoji_categories(role_id: str):
     categories = sorted([d.name for d in emojis_dir.iterdir() if d.is_dir()])
     return {"role_id": role_id, "categories": categories}
 
-
 @router.post("/roles/{role_id}/emoji-categories")
 async def create_role_emoji_category(role_id: str, payload: EmojiCategoryPayload):
     category = _normalize_category_name(payload.category)
@@ -601,10 +582,8 @@ async def create_role_emoji_category(role_id: str, payload: EmojiCategoryPayload
     category_dir.mkdir(parents=True, exist_ok=True)
     return {"success": True, "role_id": role_id, "category": category}
 
-
 @router.delete("/roles/{role_id}/emoji-categories/{category}")
 async def delete_role_emoji_category(role_id: str, category: str):
-    import shutil
 
     normalized = _normalize_category_name(category)
     category_dir = get_role_dir(role_id) / "emojis" / normalized
@@ -612,7 +591,6 @@ async def delete_role_emoji_category(role_id: str, category: str):
         raise HTTPException(status_code=404, detail="分类不存在")
     shutil.rmtree(category_dir)
     return {"success": True, "role_id": role_id, "category": normalized}
-
 
 @router.get("/roles/{role_id}/emojis/{category}/list")
 async def list_role_emojis(role_id: str, category: str):
@@ -638,10 +616,8 @@ async def list_role_emojis(role_id: str, category: str):
     ]
     return {"role_id": role_id, "category": normalized, "emojis": emojis}
 
-
 @router.post("/roles/{role_id}/emojis/{category}/upload")
 async def upload_role_emoji(role_id: str, category: str, file: UploadFile = File(...)):
-    import shutil
 
     normalized = _normalize_category_name(category)
     emoji_dir = get_role_dir(role_id) / "emojis" / normalized
@@ -664,7 +640,6 @@ async def upload_role_emoji(role_id: str, category: str, file: UploadFile = File
         },
     }
 
-
 @router.delete("/roles/{role_id}/emojis/{category}/{filename}")
 async def delete_role_emoji(role_id: str, category: str, filename: str):
     normalized = _normalize_category_name(category)
@@ -680,8 +655,6 @@ async def delete_role_emoji(role_id: str, category: str, filename: str):
 @router.get("/emojis/{role_id}/{emotion}/{filename}")
 async def get_emoji(role_id: str, emotion: str, filename: str):
     """获取角色表情包文件"""
-    from fastapi.responses import FileResponse
-    from fastapi import HTTPException
     
     emoji_path = ROLES_DIR / role_id / "emojis" / emotion / filename
     if emoji_path.exists() and emoji_path.is_file():
@@ -692,7 +665,6 @@ async def get_emoji(role_id: str, emotion: str, filename: str):
 @router.get("/roles/{role_id}/emojis/{emotion}/random")
 async def get_random_emoji(role_id: str, emotion: str):
     """从后端表情包文件夹中随机选择一个表情包"""
-    import random
     
     emoji_dir = ROLES_DIR / role_id / "emojis" / emotion
     if not emoji_dir.exists():
@@ -714,7 +686,6 @@ async def get_random_emoji(role_id: str, emotion: str):
         "url": f"/api/emojis/{role_id}/{emotion}/{chosen.name}"
     }
 
-
 # ========== 用户表情（SQLite 映射） ==========
 
 @router.get("/user-emojis/categories")
@@ -725,7 +696,6 @@ async def list_user_emoji_categories():
         ).fetchall()
         categories = [str(r["name"]) for r in rows]
     return {"categories": categories}
-
 
 @router.post("/user-emojis/categories")
 async def create_user_emoji_category(payload: EmojiCategoryPayload):
@@ -738,10 +708,8 @@ async def create_user_emoji_category(payload: EmojiCategoryPayload):
     (USER_EMOJI_DIR / category).mkdir(parents=True, exist_ok=True)
     return {"success": True, "category": category}
 
-
 @router.delete("/user-emojis/categories/{category}")
 async def delete_user_emoji_category(category: str):
-    import shutil
 
     normalized = _normalize_category_name(category)
     with _get_user_emoji_connection() as conn:
@@ -761,7 +729,6 @@ async def delete_user_emoji_category(category: str):
         shutil.rmtree(category_dir)
 
     return {"success": True, "category": normalized}
-
 
 @router.get("/user-emojis")
 async def list_user_emojis(category: Optional[str] = None):
@@ -790,14 +757,12 @@ async def list_user_emojis(category: Optional[str] = None):
     ]
     return {"emojis": emojis}
 
-
 @router.post("/user-emojis/upload")
 async def upload_user_emoji(
     category: str = Form(...),
     tag: str = Form(...),
     file: UploadFile = File(...),
 ):
-    import shutil
 
     normalized = _normalize_category_name(category)
     tag_value = str(tag or "").strip()
@@ -843,10 +808,8 @@ async def upload_user_emoji(
         },
     }
 
-
 @router.get("/user-emojis/file/{emoji_id}")
 async def get_user_emoji_file(emoji_id: str):
-    from fastapi.responses import FileResponse
 
     with _get_user_emoji_connection() as conn:
         row = conn.execute(
@@ -860,7 +823,6 @@ async def get_user_emoji_file(emoji_id: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="表情文件不存在")
     return FileResponse(file_path)
-
 
 @router.delete("/user-emojis/{emoji_id}")
 async def delete_user_emoji(emoji_id: str):
@@ -879,7 +841,6 @@ async def delete_user_emoji(emoji_id: str):
         conn.execute("DELETE FROM user_emojis WHERE id = ?", (emoji_id,))
 
     return {"success": True}
-
 
 @router.post("/user-emojis/resolve-tag")
 async def resolve_user_emoji_tag(payload: ResolveUserEmojiTagPayload):
@@ -903,9 +864,6 @@ async def resolve_user_emoji_tag(payload: ResolveUserEmojiTagPayload):
 @router.post("/roles/{role_id}/avatar")
 async def upload_role_avatar(role_id: str):
     """上传角色头像"""
-    from fastapi import UploadFile, File
-    from fastapi.responses import JSONResponse
-    import shutil
     
     role = load_role(role_id)
     if not role:
@@ -917,9 +875,6 @@ async def upload_role_avatar(role_id: str):
 @router.post("/roles/{role_id}/avatar/upload")
 async def upload_role_avatar_file(role_id: str, request: Request, file: UploadFile = File(...)):
     """上传角色头像文件"""
-    from fastapi.responses import FileResponse
-    import shutil
-    import uuid
     
     role = load_role(role_id)
     if not role:
@@ -950,7 +905,6 @@ async def upload_role_avatar_file(role_id: str, request: Request, file: UploadFi
 @router.get("/roles/{role_id}/avatar/file")
 async def get_role_avatar_file(role_id: str):
     """获取角色头像文件"""
-    from fastapi.responses import FileResponse
     
     avatar_path = _get_role_avatar_path(role_id)
     if avatar_path is not None:
@@ -974,12 +928,10 @@ class ChatMessagesSync(BaseModel):
     """消息同步请求"""
     messages: List[ChatMessage]
 
-
 class ChatMessageUpdate(BaseModel):
     content: Optional[str] = None
     type: Optional[str] = None
     quote_content: Optional[str] = None
-
 
 def _load_role_chat_messages(role_id: str) -> List[Dict[str, Any]]:
     role_dir = get_role_dir(role_id)
@@ -992,7 +944,6 @@ def _load_role_chat_messages(role_id: str) -> List[Dict[str, Any]]:
         if isinstance(messages, list):
             return messages
         return []
-
 
 def _to_absolute_backend_url(url: str, backend_base_url: Optional[str]) -> str:
     raw = str(url or "").strip()
@@ -1021,7 +972,6 @@ def _to_absolute_backend_url(url: str, backend_base_url: Optional[str]) -> str:
         return f"{base}/{raw}"
     return raw
 
-
 def _to_relative_emoji_url(url: str) -> str:
     raw = str(url or "").strip()
     if not raw:
@@ -1041,7 +991,6 @@ def _to_relative_emoji_url(url: str) -> str:
         return out
 
     return raw
-
 
 def _normalize_sticker_content_for_storage(content: Any) -> Any:
     if not isinstance(content, str):
@@ -1082,7 +1031,6 @@ def _normalize_sticker_content_for_storage(content: Any) -> Any:
 
     return content
 
-
 def _normalize_chat_message_for_storage(message: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(message)
     normalized["content"] = _normalize_sticker_content_for_storage(
@@ -1097,7 +1045,6 @@ def _normalize_chat_message_for_storage(message: Dict[str, Any]) -> Dict[str, An
             normalized.get("quoted_preview_text"),
         )
     return normalized
-
 
 def _normalize_sticker_content_for_sync(content: Any, backend_base_url: Optional[str]) -> Any:
     if not isinstance(content, str):
@@ -1142,7 +1089,6 @@ def _normalize_sticker_content_for_sync(content: Any, backend_base_url: Optional
 
     return content
 
-
 def _normalize_chat_message_for_sync(message: Dict[str, Any], backend_base_url: Optional[str]) -> Dict[str, Any]:
     normalized = dict(message)
     normalized["content"] = _normalize_sticker_content_for_sync(
@@ -1160,7 +1106,6 @@ def _normalize_chat_message_for_sync(message: Dict[str, Any], backend_base_url: 
             backend_base_url,
         )
     return normalized
-
 
 def _build_chats_snapshot(backend_base_url: Optional[str] = None) -> Dict[str, Any]:
     chats: Dict[str, List[Dict[str, Any]]] = {}
@@ -1210,7 +1155,6 @@ async def get_chat_messages(role_id: str, request: Request, limit: int = 100, of
             }
     return {"role_id": role_id, "total": 0, "messages": []}
 
-
 @router.get("/chats/messages/snapshot")
 async def get_all_chats_snapshot(request: Request, client_md5: Optional[str] = None):
     """获取所有聊天记录快照；传入 client_md5 相同则仅返回无需同步"""
@@ -1257,7 +1201,6 @@ async def save_chat_message(role_id: str, message: ChatMessage):
         json.dump(data, f, ensure_ascii=False, indent=2)
     
     return {"success": True, "message_id": message.id}
-
 
 @router.put("/roles/{role_id}/chats/messages/{message_id}")
 async def update_chat_message(role_id: str, message_id: str, payload: ChatMessageUpdate):

@@ -29,6 +29,10 @@ def get_default_settings() -> Dict[str, Any]:
         "vision_api_key": "",
         "vision_model": "gpt-4o",
         "vision_mode": "standalone",
+        "embedding_enabled": True,
+        "embedding_api_url": "",
+        "embedding_api_key": "",
+        "embedding_model": "",
         "updated_at": None
     }
 
@@ -102,6 +106,29 @@ def get_vision_config() -> Dict[str, Any]:
         "model": settings.get("vision_model", "gpt-4o"),
         "mode": mode,
     }
+
+def get_embedding_config() -> Dict[str, Any]:
+    """获取嵌入向量配置"""
+    settings = load_settings()
+    enabled = bool(settings.get("embedding_enabled", True))
+    api_url = settings.get("embedding_api_url", "") or settings.get("ai_api_url", "")
+    api_key = settings.get("embedding_api_key", "") or settings.get("ai_api_key", "")
+    model = settings.get("embedding_model", "") or _default_embedding_model(api_url)
+    return {
+        "enabled": enabled,
+        "api_url": api_url,
+        "api_key": api_key,
+        "model": model,
+    }
+
+
+def _default_embedding_model(api_url: str) -> str:
+    if "deepseek" in api_url.lower():
+        return "deepseek-embedding"
+    if "siliconflow" in api_url.lower():
+        return "BAAI/bge-m3"
+    return "text-embedding-ada-002"
+
 
 def update_ai_config(api_url: Optional[str] = None, 
                      api_key: Optional[str] = None,

@@ -15,8 +15,10 @@ class SettingsService extends ChangeNotifier {
 
   String _normalizeFilePath(String value) {
     final trimmed = value.trim();
-    if (trimmed.startsWith('/api/avatars/')) {
-      return trimmed.replaceFirst('/api/avatars/', '/files/avatars/');
+    if (trimmed.isEmpty) return trimmed;
+    // 处理完整 URL 中包含 /api/avatars/ 的情况（旧版本遗留）
+    if (trimmed.contains('/api/avatars/')) {
+      return trimmed.replaceAll('/api/avatars/', '/files/avatars/');
     }
     return trimmed;
   }
@@ -56,6 +58,12 @@ class SettingsService extends ChangeNotifier {
   String _visionModel = 'gpt-4-vision-preview';
   String _visionMode = 'standalone';
 
+  // 向量记忆 API (embedding)
+  bool _embeddingEnabled = false;
+  String _embeddingApiUrl = '';
+  String _embeddingApiKey = '';
+  String _embeddingModel = 'text-embedding-3-small';
+
   // ========== 全局提示词 ==========
   String _basePrompt = '';
   String _groupPrompt = '';
@@ -90,6 +98,11 @@ class SettingsService extends ChangeNotifier {
   String get visionModel => _visionModel;
   String get visionMode => _visionMode;
 
+  bool get embeddingEnabled => _embeddingEnabled;
+  String get embeddingApiUrl => _embeddingApiUrl;
+  String get embeddingApiKey => _embeddingApiKey;
+  String get embeddingModel => _embeddingModel;
+
   String get basePrompt => _basePrompt;
   String get groupPrompt => _groupPrompt;
   String get memoryPrompt => _memoryPrompt;
@@ -98,6 +111,17 @@ class SettingsService extends ChangeNotifier {
   String get chatBackgroundUrl => _chatBackgroundUrl;
 
   String get backendUrl => _backendUrl;
+
+  /// 拼接完整的用户头像 URL
+  String get userAvatarFullUrl {
+    if (_userAvatarUrl.isEmpty) return '';
+    if (_userAvatarUrl.startsWith('http')) return _userAvatarUrl;
+    // 确保 backendUrl 不以 / 结尾，userAvatarUrl 以 / 开头
+    final base = _backendUrl.endsWith('/')
+        ? _backendUrl.substring(0, _backendUrl.length - 1)
+        : _backendUrl;
+    return '$base$_userAvatarUrl';
+  }
   String get backendAuthToken => _backendAuthToken;
   String get backendEncryptionSecret => _backendEncryptionSecret;
 
@@ -139,6 +163,13 @@ class SettingsService extends ChangeNotifier {
     _visionModel =
         StorageService.getString('vision_model') ?? 'gpt-4-vision-preview';
     _visionMode = StorageService.getString('vision_mode') ?? 'standalone';
+
+    // 向量记忆 API
+    _embeddingEnabled = StorageService.getBool('embedding_enabled') ?? false;
+    _embeddingApiUrl = StorageService.getString('embedding_api_url') ?? '';
+    _embeddingApiKey = StorageService.getString('embedding_api_key') ?? '';
+    _embeddingModel =
+        StorageService.getString('embedding_model') ?? 'text-embedding-3-small';
 
     // 全局提示词
     _basePrompt = StorageService.getString('base_prompt') ?? _defaultBasePrompt;
@@ -313,6 +344,24 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 更新向量记忆 API
+  Future<void> updateEmbeddingApi({
+    required bool enabled,
+    required String url,
+    required String key,
+    required String model,
+  }) async {
+    _embeddingEnabled = enabled;
+    _embeddingApiUrl = url;
+    _embeddingApiKey = key;
+    _embeddingModel = model;
+    await StorageService.setBool('embedding_enabled', enabled);
+    await StorageService.setString('embedding_api_url', url);
+    await StorageService.setString('embedding_api_key', key);
+    await StorageService.setString('embedding_model', model);
+    notifyListeners();
+  }
+
   /// 设置免打扰时间段
   Future<void> setQuietHours(int startHour, int endHour) async {
     await StorageService.setInt('quiet_start_hour', startHour);
@@ -460,10 +509,12 @@ class SettingsService extends ChangeNotifier {
 
   /// 更新后端服务器地址
   Future<void> updateBackendUrl(String url) async {
-    _backendUrl = url;
-    await StorageService.setString('backend_url', url);
+    // 去除尾部斜杠，避免拼接路径时出现双斜杠
+    final normalized = url.trim().replaceAll(RegExp(r'/+$'), '');
+    _backendUrl = normalized;
+    await StorageService.setString('backend_url', normalized);
     notifyListeners();
-    debugPrint('SettingsService: Backend URL updated to $url');
+    debugPrint('SettingsService: Backend URL updated to $normalized');
   }
 
   /// 更新后端鉴权与传输加密配置
@@ -509,6 +560,10 @@ class SettingsService extends ChangeNotifier {
           'vision_api_key': _visionApiKey,
           'vision_model': _visionModel,
           'vision_mode': _visionMode,
+          'embedding_enabled': _embeddingEnabled,
+          'embedding_api_url': _embeddingApiUrl,
+          'embedding_api_key': _embeddingApiKey,
+          'embedding_model': _embeddingModel,
           },
         },
       );
@@ -564,6 +619,14 @@ class SettingsService extends ChangeNotifier {
           (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
         final visionMode = visionModeRaw == 'pre_model' ? 'pre_model' : 'standalone';
 
+      final embeddingEnabled = server['embedding_enabled'] == true;
+      final embeddingUrl = (server['embedding_api_url']?.toString() ?? '').trim();
+      final embeddingKey = (server['embedding_api_key']?.toString() ?? '').trim();
+      final embeddingModel =
+        (server['embedding_model']?.toString() ?? _embeddingModel).trim().isEmpty
+        ? _embeddingModel
+        : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
+
       await updateChatApi(url: chatUrl, key: chatKey, model: chatModel);
       await updateIntentApi(
         enabled: intentEnabled,
@@ -577,6 +640,12 @@ class SettingsService extends ChangeNotifier {
         key: visionKey,
         model: visionModel,
         mode: visionMode,
+      );
+      await updateEmbeddingApi(
+        enabled: embeddingEnabled,
+        url: embeddingUrl,
+        key: embeddingKey,
+        model: embeddingModel,
       );
 
       debugPrint('SettingsService: Full settings synced from backend');
@@ -624,6 +693,13 @@ class SettingsService extends ChangeNotifier {
           (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
         final visionMode = visionModeRaw == 'pre_model' ? 'pre_model' : 'standalone';
 
+      final embeddingEnabled = server['embedding_enabled'] == true;
+      final embeddingUrl = (server['embedding_api_url']?.toString() ?? '').trim();
+      final embeddingModel =
+        (server['embedding_model']?.toString() ?? _embeddingModel).trim().isEmpty
+        ? _embeddingModel
+        : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
+
       await updateChatApi(url: chatUrl, key: _chatApiKey, model: chatModel);
       await updateIntentApi(
         enabled: intentEnabled,
@@ -637,6 +713,12 @@ class SettingsService extends ChangeNotifier {
         key: _visionApiKey,
         model: visionModel,
         mode: visionMode,
+      );
+      await updateEmbeddingApi(
+        enabled: embeddingEnabled,
+        url: embeddingUrl,
+        key: _embeddingApiKey,
+        model: embeddingModel,
       );
 
       debugPrint('SettingsService: Public settings synced from backend');

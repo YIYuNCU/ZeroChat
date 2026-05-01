@@ -17,6 +17,7 @@ class SecureWebSocketClient {
   static final SecureWebSocketClient instance = SecureWebSocketClient._();
 
   static const Duration _defaultRequestTimeout = Duration(seconds: 8);
+  static const int _maxRequestRetries = 2;
   static const Duration _heartbeatInterval = Duration(minutes: 2);
   static const Duration _connectivityReconnectDebounce = Duration(seconds: 2);
 
@@ -34,12 +35,17 @@ class SecureWebSocketClient {
   Completer<void>? _connectingCompleter;
   int _requestSeq = 0;
 
-  bool get isConnected => _socket != null;
+  bool get isConnected => _socket != null && _socket!.readyState == WebSocket.open;
   Stream<Map<String, dynamic>> get serverPushStream => _serverPushController.stream;
 
   Future<void> ensureConnected() async {
-    if (_socket != null) {
+    final existing = _socket;
+    if (existing != null && existing.readyState == WebSocket.open) {
       return;
+    }
+
+    if (existing != null && existing.readyState != WebSocket.open) {
+      _handleDisconnect('socket not open (state=${existing.readyState})');
     }
 
     if (_connectingCompleter != null) {
@@ -88,9 +94,42 @@ class SecureWebSocketClient {
     Map<String, dynamic> payload, {
     Duration timeout = _defaultRequestTimeout,
   }) async {
+    final requestId = _nextRequestId();
+    Object? lastError;
+
+    for (int attempt = 0; attempt <= _maxRequestRetries; attempt += 1) {
+      try {
+        return await _sendRequestOnce(
+          action,
+          payload,
+          requestId: requestId,
+          timeout: timeout,
+        );
+      } catch (e) {
+        lastError = e;
+        final shouldRetry = attempt < _maxRequestRetries && _shouldRetryRequestError(e);
+        if (!shouldRetry) {
+          rethrow;
+        }
+
+        debugPrint(
+          'SecureWebSocketClient: request retry for $action (attempt ${attempt + 2}/${_maxRequestRetries + 1}), error: $e',
+        );
+        await _reconnectForRetry();
+      }
+    }
+
+    throw lastError ?? Exception('WebSocket request failed: $action');
+  }
+
+  Future<Map<String, dynamic>> _sendRequestOnce(
+    String action,
+    Map<String, dynamic> payload, {
+    required String requestId,
+    required Duration timeout,
+  }) async {
     await ensureConnected();
 
-    final requestId = _nextRequestId();
     final completer = Completer<Map<String, dynamic>>();
     _pending[requestId] = completer;
 
@@ -109,7 +148,11 @@ class SecureWebSocketClient {
         duration: _resolveRequestWakeLockDuration(timeout),
         reason: 'request_$action',
       );
-      _socket?.add(jsonEncode(frame));
+      final socket = _socket;
+      if (socket == null) {
+        throw const SocketException('WebSocket disconnected before send');
+      }
+      socket.add(jsonEncode(frame));
     } catch (e) {
       _pending.remove(requestId);
       rethrow;
@@ -125,6 +168,39 @@ class SecureWebSocketClient {
         );
       },
     );
+  }
+
+  bool _shouldRetryRequestError(Object error) {
+    if (error is TimeoutException || error is SocketException || error is WebSocketException) {
+      return true;
+    }
+
+    final text = error.toString().toLowerCase();
+    return text.contains('socket') ||
+        text.contains('connect failed') ||
+        text.contains('disconnected') ||
+        text.contains('connection closed');
+  }
+
+  Future<void> _reconnectForRetry() async {
+    try {
+      await ensureConnected();
+      return;
+    } catch (_) {
+      // Fallback to local reset without sending close frame.
+    }
+
+    try {
+      _handleDisconnect('retry reconnect local reset');
+      await ensureConnected();
+    } catch (_) {
+      // Let next retry attempt trigger reconnect again.
+    }
+  }
+
+  Future<void> recoverConnectionWithoutClose({String reason = 'auto_recover'}) async {
+    _handleDisconnect('recover_without_close:$reason');
+    await ensureConnected();
   }
 
   Future<void> close() async {
@@ -338,7 +414,7 @@ class SecureWebSocketClient {
         'SecureWebSocketClient: connection check failed after connectivity change, reconnecting: $e',
       );
       try {
-        await close();
+        _handleDisconnect('connectivity_check_failed');
         await ensureConnected();
       } catch (e2) {
         debugPrint(

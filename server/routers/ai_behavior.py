@@ -2,6 +2,7 @@
 AI 行为统一入口
 处理所有 AI 事件：聊天、主动消息、定时任务、朋友圈
 """
+import asyncio
 import json
 import random
 import re
@@ -14,6 +15,7 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 
+from core.utils import is_tool_role_id
 from services.memory_service import trigger_memory_summary
 
 router = APIRouter()
@@ -22,11 +24,6 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
 VISION_UPLOADS_DIR = DATA_DIR / "vision"
-TOOL_ROLE_PREFIX = "1000000000"
-
-
-def _is_tool_role_id(role_id: str) -> bool:
-    return str(role_id or "").startswith(TOOL_ROLE_PREFIX)
 
 # ========== 数据模型 ==========
 
@@ -302,7 +299,7 @@ async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) ->
     支持的情绪: happy, sad, angry, suprised, love, confused, excited, tired
     """
     rand = random.random()
-    if rand >(1 - 0.75): # 75% 的概率不进行情绪检测，25% 的概率进行检测
+    if rand > 0.25:  # 75% 概率跳过情绪检测
         print(f"情绪检测随机跳过：{rand:.2f} > 0.25")
         return None
     from services.ai_service import call_ai_direct
@@ -376,7 +373,7 @@ async def handle_ai_event(event: AIEvent):
     role = load_role(event.role_id)
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
-    if _is_tool_role_id(event.role_id):
+    if is_tool_role_id(event.role_id):
         return AIResponse(success=False, action="ignore", error="工具角色不处理对话/朋友圈事件")
     # 根据事件类型分发
     if event.event_type == AIEventType.CHAT:
@@ -496,15 +493,28 @@ async def _run_memory_ai_pipeline(
     from services.memory_service import (
         get_context_messages,
         get_memory_context_string,
+        get_relevant_memories,
         append_short_term,
         trigger_memory_summary,
         _get_memory_length,
     )
+    from services.vector_memory import embed_and_store
 
     local_context = event_context or {}
-    backend_history = await get_context_messages(role_id, limit=_get_memory_length())
+    backend_history = await get_context_messages(role_id, limit=_get_memory_length(), user_message=user_message)
     client_history = _normalize_history_items(local_context.get("history"))
     history = backend_history if backend_history else client_history
+
+    vector_memories: List[Dict[str, Any]] = []
+    try:
+        vector_memories = await get_relevant_memories(
+            role_id,
+            user_message,
+            top_k=2,
+            min_score=0.8,
+        )
+    except Exception as e:
+        print(f"向量记忆检索失败：{e}")
 
     backend_memory_context = (get_memory_context_string(role_id) or "").strip()
     client_core_memory = _normalize_core_memory(local_context.get("core_memory"))
@@ -525,6 +535,7 @@ async def _run_memory_ai_pipeline(
         user_message=user_message,
         history=history,
         extra_context=extra_context,
+        vector_memories=vector_memories,
         origin=origin,
         sender=user_sender,
     )
@@ -542,10 +553,15 @@ async def _run_memory_ai_pipeline(
 
     ai_reply = _sanitize_reply_content(result.get("content") or "")
     if include_user_memory:
+        user_memory_content = str(user_message or "").strip()
+        if not user_memory_content:
+            user_memory_content = str(
+                result.get("user_content", {"content": user_message}).get("content", user_message)
+            )
         append_short_term(
             role_id,
             "user",
-            result.get("user_content", {"content": user_message}).get("content", user_message),
+            user_memory_content,
             task_id=task_id,
             request_id=normalized_request_id,
             json_memory=attached_json,
@@ -563,6 +579,14 @@ async def _run_memory_ai_pipeline(
             origin=origin,
             sender=role.get("name") or "assistant",
         )
+        if len(ai_reply.strip()) >= 30:
+            try:
+                asyncio.ensure_future(embed_and_store(
+                    role_id, ai_reply, role="assistant",
+                    timestamp=datetime.now().isoformat(), source="chat"
+                ))
+            except Exception:
+                pass
 
     new_core = None
     if trigger_summary_after_reply:
@@ -589,15 +613,8 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     user_message = event.content or ""
     event_context = event.context or {}
 
-    # 联网搜索（如果角色开启了搜索功能）
     search_context = ""
-    allow_search = role.get("allow_web_search", True)
-    # if allow_search:
-    #     from services.search_service import should_search, web_search, format_search_results
-    #     if should_search(user_message):
-    #         search_results = await web_search(user_message, max_results=5)
-    #         search_context = format_search_results(search_results)
-    enable_connection = role.get("enable_connection", False)  
+    enable_connection = role.get("enable_connection", False)
     if enable_connection:
         result = await sequential_memory_generation(role_id, "1000000000003", user_message)
     else:
@@ -759,7 +776,7 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
 
 async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
     """AI 发布朋友圈"""
-    if _is_tool_role_id(str(event.role_id or role.get("id", ""))):
+    if is_tool_role_id(str(event.role_id or role.get("id", ""))):
         return AIResponse(success=True, action="ignore", content=None)
 
     from services.ai_service import generate_moment_post
@@ -930,7 +947,7 @@ def _append_vision_memory(
     from services.memory_service import append_short_term
 
     rid = str(role_id or "").strip()
-    if not rid or _is_tool_role_id(rid):
+    if not rid or is_tool_role_id(rid):
         return
 
     prompt_text = (user_prompt or "").strip() or "请描述这张图片的内容"
@@ -1077,7 +1094,7 @@ async def chat_with_vision(request: VisionRequest):
         reply = ""
         chat_model = str(chat_cfg.get("model") or "gpt-3.5-turbo")
 
-        if role_id_text and not _is_tool_role_id(role_id_text):
+        if role_id_text and not is_tool_role_id(role_id_text):
             role_for_pipeline = load_role(role_id_text) or {"id": role_id_text, "name": "vision_chat"}
             role_for_pipeline["ai_model"] = role_for_pipeline.get("ai_model") or str(chat_cfg.get("model") or "gpt-3.5-turbo")
             role_for_pipeline["ai_api_url"] = role_for_pipeline.get("ai_api_url") or str(chat_cfg.get("api_url") or "")

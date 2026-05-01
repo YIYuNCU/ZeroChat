@@ -181,6 +181,34 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           const SizedBox(height: 10),
 
+          // 向量记忆（长期语义记忆）
+          _buildSection([
+            _buildItem(
+              title: '向量记忆',
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '${MemoryService.vectorMemoryCount} 条',
+                    style: const TextStyle(
+                      color: Color(0xFF888888),
+                      fontSize: 15,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Icon(
+                    Icons.arrow_forward_ios,
+                    size: 16,
+                    color: Color(0xFFCCCCCC),
+                  ),
+                ],
+              ),
+              onTap: _showVectorMemoryOptions,
+            ),
+          ]),
+
+          const SizedBox(height: 10),
+
           // 安静时间（全局设置）
           _buildSection([_buildQuietTimeItem()]),
 
@@ -921,6 +949,77 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
           ),
         ],
       ),
+    );
+  }
+
+  void _showVectorMemoryOptions() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '向量记忆',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'AI 在对话中自动生成的语义记忆，用于在长对话中维持对历史话题的理解。\n当前共 ${MemoryService.vectorMemoryCount} 条向量记忆。',
+                  style: const TextStyle(fontSize: 14, color: Color(0xFF888888)),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: MemoryService.vectorMemoryCount > 0
+                        ? () async {
+                            Navigator.pop(context);
+                            final confirm = await showDialog<bool>(
+                              context: context,
+                              builder: (ctx) => AlertDialog(
+                                title: const Text('清空向量记忆'),
+                                content: const Text('确定要清空所有向量记忆吗？这将删除 AI 自动生成的语义记忆。'),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(ctx, false),
+                                    child: const Text('取消'),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(ctx, true),
+                                    child: const Text('确认', style: TextStyle(color: Colors.red)),
+                                  ),
+                                ],
+                              ),
+                            );
+                            if (confirm == true) {
+                              await MemoryService.clearVectorMemory();
+                              if (mounted) setState(() {});
+                            }
+                          }
+                        : null,
+                    icon: const Icon(Icons.delete_outline, size: 20),
+                    label: const Text('清空所有向量记忆'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red,
+                      side: const BorderSide(color: Colors.red),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

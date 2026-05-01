@@ -54,6 +54,14 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   List<String> _visionModels = [];
   bool _isLoadingVisionModels = false;
 
+  // 向量记忆 API
+  bool _embeddingEnabled = false;
+  late TextEditingController _embeddingUrlController;
+  late TextEditingController _embeddingKeyController;
+  late TextEditingController _embeddingModelController;
+  List<String> _embeddingModels = [];
+  bool _isLoadingEmbeddingModels = false;
+
   @override
   void initState() {
     super.initState();
@@ -84,6 +92,11 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     _visionKeyController = TextEditingController(text: settings.visionApiKey);
     _visionModelController = TextEditingController(text: settings.visionModel);
     _visionMode = settings.visionMode;
+
+    _embeddingEnabled = settings.embeddingEnabled;
+    _embeddingUrlController = TextEditingController(text: settings.embeddingApiUrl);
+    _embeddingKeyController = TextEditingController(text: settings.embeddingApiKey);
+    _embeddingModelController = TextEditingController(text: settings.embeddingModel);
   }
 
   @override
@@ -100,6 +113,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     _visionUrlController.dispose();
     _visionKeyController.dispose();
     _visionModelController.dispose();
+    _embeddingUrlController.dispose();
+    _embeddingKeyController.dispose();
+    _embeddingModelController.dispose();
     super.dispose();
   }
 
@@ -268,6 +284,33 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
           ]),
 
           const SizedBox(height: 20),
+
+          // 向量记忆 API
+          _buildSectionTitle('向量记忆 API (Embedding)'),
+          _buildSection([
+            _buildSwitchItem('启用向量记忆', _embeddingEnabled, (v) {
+              setState(() => _embeddingEnabled = v);
+            }),
+            if (_embeddingEnabled) ...[
+              _buildDivider(),
+              _buildTextField(
+                'API URL',
+                _embeddingUrlController,
+                'https://api.openai.com/v1',
+              ),
+              _buildDivider(),
+              _buildTextField(
+                'API Key',
+                _embeddingKeyController,
+                'sk-xxx',
+                obscure: true,
+              ),
+              _buildDivider(),
+              _buildEmbeddingModelFetchButton(),
+              _buildDivider(),
+              _buildEmbeddingModelSelector(),
+            ],
+          ]),
 
           const SizedBox(height: 30),
         ],
@@ -607,6 +650,11 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       _visionKeyController.text = settings.visionApiKey;
       _visionModelController.text = settings.visionModel;
       _visionMode = settings.visionMode;
+
+      _embeddingEnabled = settings.embeddingEnabled;
+      _embeddingUrlController.text = settings.embeddingApiUrl;
+      _embeddingKeyController.text = settings.embeddingApiKey;
+      _embeddingModelController.text = settings.embeddingModel;
     });
   }
 
@@ -867,6 +915,90 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   }
 
   /// 意图识别模型选择器
+  /// 向量记忆模型获取按钮
+  Widget _buildEmbeddingModelFetchButton() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('模型列表', style: TextStyle(fontSize: 16)),
+          ),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _isLoadingEmbeddingModels ? null : _fetchEmbeddingModels,
+              icon: _isLoadingEmbeddingModels
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.download, size: 18),
+              label: Text(_isLoadingEmbeddingModels ? '获取中...' : '获取模型列表'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF07C160),
+                side: const BorderSide(color: Color(0xFF07C160)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 向量记忆模型选择器
+  Widget _buildEmbeddingModelSelector() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('模型', style: TextStyle(fontSize: 16)),
+          ),
+          Expanded(
+            child: _embeddingModels.isEmpty
+                ? TextField(
+                    controller: _embeddingModelController,
+                    decoration: const InputDecoration(
+                      hintText: 'text-embedding-3-small',
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                    style: const TextStyle(fontSize: 16),
+                  )
+                : DropdownButtonFormField<String>(
+                    value: _embeddingModels.contains(_embeddingModelController.text)
+                        ? _embeddingModelController.text
+                        : null,
+                    decoration: const InputDecoration(
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                    hint: const Text('选择模型'),
+                    items: _embeddingModels.map((model) {
+                      return DropdownMenuItem(
+                        value: model,
+                        child: Text(
+                          model,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                      );
+                    }).toList(),
+                    onChanged: (value) {
+                      if (value != null) {
+                        _embeddingModelController.text = value;
+                      }
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildIntentModelSelector() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -1040,6 +1172,68 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     }
   }
 
+  /// 获取向量记忆模型列表
+  Future<void> _fetchEmbeddingModels() async {
+    final url = _embeddingUrlController.text.trim();
+    final key = _embeddingKeyController.text.trim();
+
+    if (url.isEmpty || key.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL 和 API Key')));
+      return;
+    }
+
+    setState(() => _isLoadingEmbeddingModels = true);
+
+    try {
+      var modelsUrl = url;
+      if (!modelsUrl.endsWith('/')) modelsUrl += '/';
+      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
+      modelsUrl += 'models';
+
+      final response = await SecureBackendClient.getRaw(
+        modelsUrl,
+        headers: {
+          'Authorization': 'Bearer $key',
+          'Content-Type': 'application/json',
+        },
+        includeAuth: false,
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final models =
+            (data['data'] as List).map((m) => m['id'].toString()).toList()
+              ..sort();
+
+        setState(() {
+          _embeddingModels = models;
+          if (models.isNotEmpty && !_embeddingModels.contains(_embeddingModelController.text)) {
+            _embeddingModelController.text = models.first;
+          }
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
+        }
+      } else {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Fetch embedding models error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
+      }
+    } finally {
+      setState(() => _isLoadingEmbeddingModels = false);
+    }
+  }
+
   Future<void> _saveSettings() async {
     await _saveSettingsLocalOnly();
 
@@ -1098,6 +1292,14 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       key: _visionKeyController.text.trim(),
       model: _visionModelController.text.trim(),
       mode: _visionMode,
+    );
+
+    // 保存向量记忆 API
+    await settings.updateEmbeddingApi(
+      enabled: _embeddingEnabled,
+      url: _embeddingUrlController.text.trim(),
+      key: _embeddingKeyController.text.trim(),
+      model: _embeddingModelController.text.trim(),
     );
   }
 }

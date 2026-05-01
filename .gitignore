@@ -225,3 +225,6 @@ client/build/
 *.properties
 *.lock
 *.bin
+.dart_tool/
+.claude/
+CLAUDE.md
