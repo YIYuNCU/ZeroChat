@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../models/onebot_config.dart';
 import '../models/role.dart';
 
 /// 角色参数设置页面
@@ -25,12 +26,14 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _periodLengthController;
   late TextEditingController _lastPeriodStartController;
   late String _gender;
-  late double _temperature;
-  late double _topP;
-  late double _frequencyPenalty;
-  late double _presencePenalty;
   late int _maxContextRounds;
   late bool _allowWebSearch;
+  late bool _onebotEnabled;
+  late TextEditingController _onebotSecretController;
+  late TextEditingController _onebotSelfIdController;
+  late TextEditingController _onebotMainUserIdController;
+  late TextEditingController _onebotAllowedUsersController;
+  late TextEditingController _onebotAllowedGroupsController;
 
   @override
   void initState() {
@@ -56,12 +59,28 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           '${DateTime.now().year}-${DateTime.now().month.toString().padLeft(2, '0')}-${DateTime.now().day.toString().padLeft(2, '0')}',
     );
     _gender = widget.role.gender;
-    _temperature = widget.role.temperature;
-    _topP = widget.role.topP;
-    _frequencyPenalty = widget.role.frequencyPenalty;
-    _presencePenalty = widget.role.presencePenalty;
     _maxContextRounds = widget.role.maxContextRounds;
     _allowWebSearch = widget.role.allowWebSearch;
+    _onebotEnabled = widget.role.onebotConfig.enabled;
+    _onebotSecretController = TextEditingController(
+      text: widget.role.onebotConfig.secret,
+    );
+    _onebotSelfIdController = TextEditingController(
+      text: widget.role.onebotConfig.selfId > 0
+          ? widget.role.onebotConfig.selfId.toString()
+          : '',
+    );
+    _onebotMainUserIdController = TextEditingController(
+      text: widget.role.onebotConfig.mainUserId > 0
+          ? widget.role.onebotConfig.mainUserId.toString()
+          : '',
+    );
+    _onebotAllowedUsersController = TextEditingController(
+      text: widget.role.onebotConfig.allowedUsers.join(','),
+    );
+    _onebotAllowedGroupsController = TextEditingController(
+      text: widget.role.onebotConfig.allowedGroups.join(','),
+    );
   }
 
   @override
@@ -76,6 +95,11 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _cycleLengthController.dispose();
     _periodLengthController.dispose();
     _lastPeriodStartController.dispose();
+    _onebotSecretController.dispose();
+    _onebotSelfIdController.dispose();
+    _onebotMainUserIdController.dispose();
+    _onebotAllowedUsersController.dispose();
+    _onebotAllowedGroupsController.dispose();
     super.dispose();
   }
 
@@ -230,50 +254,6 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
 
           const SizedBox(height: 10),
 
-          // AI 参数
-          _buildSection(
-            title: 'AI 参数',
-            children: [
-              _buildSliderItem(
-                label: 'Temperature',
-                value: _temperature,
-                min: 0.0,
-                max: 2.0,
-                description: '控制回复的随机性。低值更确定，高值更创意。',
-                onChanged: (v) => setState(() => _temperature = v),
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildSliderItem(
-                label: 'Top P',
-                value: _topP,
-                min: 0.0,
-                max: 1.0,
-                description: '核采样参数。1.0 使用所有可能的词。',
-                onChanged: (v) => setState(() => _topP = v),
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildSliderItem(
-                label: 'Frequency Penalty',
-                value: _frequencyPenalty,
-                min: -2.0,
-                max: 2.0,
-                description: '降低重复词语的概率。正值减少重复。',
-                onChanged: (v) => setState(() => _frequencyPenalty = v),
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildSliderItem(
-                label: 'Presence Penalty',
-                value: _presencePenalty,
-                min: -2.0,
-                max: 2.0,
-                description: '鼓励谈论新话题。正值增加多样性。',
-                onChanged: (v) => setState(() => _presencePenalty = v),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 10),
-
           // 上下文设置
           _buildSection(
             title: '上下文设置',
@@ -367,6 +347,131 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
 
           const SizedBox(height: 10),
 
+          // OneBot 接口
+          _buildSection(
+            title: 'OneBot V11 接口',
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('启用 OneBot 接口', style: TextStyle(fontSize: 16)),
+                        SizedBox(height: 4),
+                        Text(
+                          '接收 QQ 机器人框架消息',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF888888),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Switch(
+                      value: _onebotEnabled,
+                      activeColor: const Color(0xFF07C160),
+                      onChanged: (v) => setState(() => _onebotEnabled = v),
+                    ),
+                  ],
+                ),
+              ),
+              if (_onebotEnabled) ...[
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: 'Secret',
+                  controller: _onebotSecretController,
+                  hintText: '鉴权密钥',
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '机器人QQ号',
+                  controller: _onebotSelfIdController,
+                  hintText: '机器人自身QQ号，用于判断@',
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9]')),
+                  ],
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '主QQ号',
+                  controller: _onebotMainUserIdController,
+                  hintText: '与默认前端用户视为同一人',
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9]')),
+                  ],
+                ),
+                const Divider(height: 1, indent: 16),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        width: 80,
+                        child: Text('Endpoint', style: TextStyle(fontSize: 16)),
+                      ),
+                      Expanded(
+                        child: GestureDetector(
+                          onTap: () {
+                            final url =
+                                '/onebot/ws/${widget.role.id}';
+                            Clipboard.setData(ClipboardData(text: url));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('已复制 WebSocket 路径'),
+                                duration: Duration(seconds: 1),
+                              ),
+                            );
+                          },
+                          child: Text(
+                            '/onebot/ws/${widget.role.id}',
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: Color(0xFF07C160),
+                            ),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '用户白名单',
+                  controller: _onebotAllowedUsersController,
+                  hintText: 'QQ号，逗号分隔，为空则不处理私聊',
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9,]')),
+                  ],
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '群聊白名单',
+                  controller: _onebotAllowedGroupsController,
+                  hintText: '群号，逗号分隔，为空则不处理群聊',
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9,]')),
+                  ],
+                ),
+              ],
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
           // 重置按钮
           _buildSection(
             children: [
@@ -450,58 +555,18 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     );
   }
 
-  Widget _buildSliderItem({
-    required String label,
-    required double value,
-    required double min,
-    required double max,
-    required String description,
-    required ValueChanged<double> onChanged,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(label, style: const TextStyle(fontSize: 16)),
-              Text(
-                value.toStringAsFixed(2),
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                  color: Color(0xFF07C160),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            description,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
-          ),
-          Slider(
-            value: value,
-            min: min,
-            max: max,
-            activeColor: const Color(0xFF07C160),
-            onChanged: onChanged,
-          ),
-        ],
-      ),
-    );
-  }
-
   void _resetToDefault() {
     setState(() {
-      _temperature = 0.7;
-      _topP = 1.0;
-      _frequencyPenalty = 0.0;
-      _presencePenalty = 0.0;
       _maxContextRounds = 10;
     });
+  }
+
+  List<int> _parseIntList(String text) {
+    return text
+        .split(',')
+        .map((s) => int.tryParse(s.trim()) ?? 0)
+        .where((v) => v > 0)
+        .toList();
   }
 
   void _saveRole() {
@@ -543,12 +608,20 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         'period_length': parsedPeriodLength,
         'last_period_start': parsedLastPeriodStart,
       },
-      temperature: _temperature,
-      topP: _topP,
-      frequencyPenalty: _frequencyPenalty,
-      presencePenalty: _presencePenalty,
+      temperature: widget.role.temperature,
+      topP: widget.role.topP,
+      frequencyPenalty: widget.role.frequencyPenalty,
+      presencePenalty: widget.role.presencePenalty,
       maxContextRounds: _maxContextRounds,
       allowWebSearch: _allowWebSearch,
+      onebotConfig: OneBotConfig(
+        enabled: _onebotEnabled,
+        secret: _onebotSecretController.text.trim(),
+        selfId: int.tryParse(_onebotSelfIdController.text.trim()) ?? 0,
+        mainUserId: int.tryParse(_onebotMainUserIdController.text.trim()) ?? 0,
+        allowedUsers: _parseIntList(_onebotAllowedUsersController.text),
+        allowedGroups: _parseIntList(_onebotAllowedGroupsController.text),
+      ),
     );
     Navigator.pop(context, updatedRole);
   }

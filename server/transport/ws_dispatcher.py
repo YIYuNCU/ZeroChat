@@ -334,7 +334,13 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
     if existing:
         for key, value in role_model.model_dump(exclude_none=True).items():
             if key != "id" and value is not None:
-                existing[key] = value
+                # onebot_config 合并而非覆盖，保留已有的字段
+                if key == "onebot_config" and isinstance(value, dict) and isinstance(existing.get("onebot_config"), dict):
+                    merged = dict(existing["onebot_config"])
+                    merged.update({k: v for k, v in value.items() if v is not None})
+                    existing[key] = merged
+                else:
+                    existing[key] = value
         roles.save_role(role_model.id, existing)
         role_data = existing
     else:
@@ -378,6 +384,11 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                     "quiet_hours_end": 7,
                     "next_trigger_time": None,
                 }
+            ),
+            "onebot_config": (
+                role_model.onebot_config.model_dump()
+                if role_model.onebot_config
+                else {"enabled": False, "secret": ""}
             ),
             "tags": role_model.tags or [],
             "gender": role_model.gender or "men",

@@ -99,6 +99,17 @@ class MenstruationCycle(BaseModel):
     period_length: int = 6
     last_period_start: str = "2026-01-24"
 
+class OneBotConfig(BaseModel):
+    """OneBot V11 接口配置"""
+    enabled: bool = False
+    secret: str = ""
+    self_id: int = 0
+    main_user_id: int = 0
+    allowed_users: List[int] = []
+    allowed_groups: List[int] = []
+    disabled_conversations: List[str] = []
+    blocked_users: Dict[str, List[str]] = {}
+
 class RoleCreate(BaseModel):
     """创建角色"""
     id: str
@@ -129,7 +140,10 @@ class RoleCreate(BaseModel):
     
     # 主动消息配置
     proactive_config: Optional[ProactiveConfig] = None
-    
+
+    # OneBot V11 接口配置
+    onebot_config: Optional[OneBotConfig] = None
+
     # 扩展元数据
     tags: Optional[List[str]] = []
     metadata: Optional[Dict[str, Any]] = {}
@@ -145,6 +159,7 @@ class RoleUpdate(BaseModel):
     core_memory: Optional[List[str]] = None
     personality: Optional[PersonalityTraits] = None
     proactive_config: Optional[ProactiveConfig] = None
+    onebot_config: Optional[OneBotConfig] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
     ai_model: Optional[str] = None
@@ -320,6 +335,9 @@ async def create_role(role: RoleCreate, request: Request):
             "enabled": False, "min_interval_minutes": 30, "max_interval_minutes": 120,
             "trigger_prompt": "", "quiet_hours_start": 23, "quiet_hours_end": 7,
             "next_trigger_time": None
+        },
+        "onebot_config": role.onebot_config.model_dump() if role.onebot_config else {
+            "enabled": False, "secret": ""
         },
         "tags": role.tags or [],
         "gender": role.gender or "men",

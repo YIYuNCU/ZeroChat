@@ -3,6 +3,7 @@
 管理角色的短期记忆和核心记忆
 """
 import asyncio
+import logging
 import json
 import random
 import sqlite3
@@ -14,6 +15,7 @@ import uuid
 from core.utils import is_tool_role_id
 from services.vector_memory import VectorMemoryStore, embed_and_store, _extract_semantic_text
 
+logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 DEFAULT_MEMORY_ORIGIN = "zerochat"
@@ -73,6 +75,38 @@ def _ensure_short_term_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE short_term ADD COLUMN request_id TEXT")
     if "json_memory" not in existing_cols:
         conn.execute("ALTER TABLE short_term ADD COLUMN json_memory TEXT")
+    if "origin" not in existing_cols:
+        conn.execute("ALTER TABLE short_term ADD COLUMN origin TEXT")
+        # 从 content JSON 中回填已有数据的 origin
+        try:
+            rows = conn.execute("SELECT id, content FROM short_term").fetchall()
+            for row in rows:
+                try:
+                    parsed = json.loads(str(row[1] or ""))
+                    if isinstance(parsed, dict) and parsed.get("origin"):
+                        conn.execute("UPDATE short_term SET origin = ? WHERE id = ?", (parsed["origin"], row[0]))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if "sender" not in existing_cols:
+        conn.execute("ALTER TABLE short_term ADD COLUMN sender TEXT")
+        try:
+            rows = conn.execute("SELECT id, role, content FROM short_term WHERE sender IS NULL").fetchall()
+            for row in rows:
+                try:
+                    parsed = json.loads(str(row[2] or ""))
+                    sender_val = parsed.get("sender") if isinstance(parsed, dict) else None
+                    conn.execute("UPDATE short_term SET sender = ? WHERE id = ?", (sender_val or row[1] or "assistant", row[0]))
+                except Exception:
+                    conn.execute("UPDATE short_term SET sender = ? WHERE id = ?", (row[1] or "assistant", row[0]))
+        except Exception:
+            pass
+    if "sender_id" not in existing_cols:
+        conn.execute("ALTER TABLE short_term ADD COLUMN sender_id TEXT")
+        conn.execute("UPDATE short_term SET sender_id = '' WHERE sender_id IS NULL")
+    if "group_id" not in existing_cols:
+        conn.execute("ALTER TABLE short_term ADD COLUMN group_id TEXT")
 
     if _table_has_autoincrement(conn, "short_term"):
         conn.execute(
@@ -84,14 +118,19 @@ def _ensure_short_term_schema(conn: sqlite3.Connection):
                 timestamp TEXT,
                 task_id TEXT,
                 request_id TEXT,
-                json_memory TEXT
+                json_memory TEXT,
+                origin TEXT,
+                sender TEXT,
+                sender_id TEXT,
+                group_id TEXT
             )
             """
         )
         conn.execute(
             """
-            INSERT INTO short_term_new (id, role, content, timestamp, task_id, request_id, json_memory)
-            SELECT id, role, content, timestamp, task_id, request_id, json_memory
+            INSERT INTO short_term_new (id, role, content, timestamp, task_id, request_id, json_memory, origin, sender, sender_id, group_id)
+            SELECT id, role, content, timestamp, task_id, request_id, json_memory,
+                   COALESCE(origin, ''), COALESCE(sender, role), COALESCE(sender_id, ''), COALESCE(group_id, '')
             FROM short_term
             ORDER BY id ASC
             """
@@ -497,7 +536,7 @@ def load_memory(role_id: str) -> Dict:
 
         rows = conn.execute(
             """
-            SELECT id, role, content, timestamp, task_id, request_id, json_memory
+            SELECT id, role, content, timestamp, task_id, request_id, json_memory, origin, sender, sender_id, group_id
             FROM short_term
             ORDER BY id ASC
             """
@@ -510,13 +549,17 @@ def load_memory(role_id: str) -> Dict:
                     content=row[2],
                     role=row[1] or "assistant",
                     timestamp=row[3],
-                    origin=DEFAULT_MEMORY_ORIGIN,
-                    sender=row[1] or "assistant",
+                    origin=row[7] or DEFAULT_MEMORY_ORIGIN,
+                    sender=row[8] or row[1] or "assistant",
                 ),
                 "timestamp": row[3],
                 "task_id": row[4],
                 "request_id": row[5],
                 "json_memory": row[6],
+                "origin": row[7] or DEFAULT_MEMORY_ORIGIN,
+                "sender": row[8] or row[1] or "assistant",
+                "sender_id": row[9] or "",
+                "group_id": row[10] or "",
             }
             for row in rows
         ]
@@ -563,12 +606,16 @@ def save_memory(role_id: str, memory: Dict):
             if isinstance(item, dict):
                 role = item.get("role") or "assistant"
                 timestamp = item.get("timestamp") or datetime.now().isoformat()
+                item_origin = item.get("origin") or item.get("source") or DEFAULT_MEMORY_ORIGIN
+                item_sender = item.get("sender") or role
+                item_sender_id = item.get("sender_id") or ""
+                item_group_id = item.get("group_id") or ""
                 content = ensure_structured_memory_message(
                     content=item.get("content", ""),
                     role=role,
                     timestamp=timestamp,
-                    origin=item.get("origin") or item.get("source") or DEFAULT_MEMORY_ORIGIN,
-                    sender=item.get("sender") or role,
+                    origin=item_origin,
+                    sender=item_sender,
                 )
                 task_id = item.get("task_id")
                 request_id = item.get("request_id") or item.get("req_id")
@@ -576,22 +623,26 @@ def save_memory(role_id: str, memory: Dict):
             else:
                 role = "assistant"
                 timestamp = datetime.now().isoformat()
+                item_origin = DEFAULT_MEMORY_ORIGIN
+                item_sender = role
+                item_sender_id = ""
+                item_group_id = ""
                 content = ensure_structured_memory_message(
                     content=str(item),
                     role=role,
                     timestamp=timestamp,
-                    origin=DEFAULT_MEMORY_ORIGIN,
-                    sender=role,
+                    origin=item_origin,
+                    sender=item_sender,
                 )
                 task_id = None
                 request_id = None
                 json_memory = None
             conn.execute(
                 """
-                INSERT INTO short_term (role, content, timestamp, task_id, request_id, json_memory)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO short_term (role, content, timestamp, task_id, request_id, json_memory, origin, sender, sender_id, group_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (role, content, timestamp, task_id, request_id, json_memory)
+                (role, content, timestamp, task_id, request_id, json_memory, item_origin, item_sender, item_sender_id, item_group_id)
             )
         # memory.json 由前端维护，后端不主动覆盖。
 
@@ -605,6 +656,9 @@ def append_short_term(
     json_memory: Optional[str] = None,
     origin: Optional[str] = None,
     sender: Optional[str] = None,
+    sender_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+    embed: bool = True,
 ):
     """
     追加短期记忆，使用滑动窗口机制
@@ -627,6 +681,10 @@ def append_short_term(
     normalized_json_memory = str(json_memory).strip() if json_memory is not None else None
     if normalized_json_memory == "":
         normalized_json_memory = None
+    normalized_origin = str(origin or DEFAULT_MEMORY_ORIGIN).strip() or DEFAULT_MEMORY_ORIGIN
+    normalized_sender = str(sender or role).strip() or role
+    normalized_sender_id = str(sender_id or "").strip()
+    normalized_group_id = str(group_id or "").strip() or None
     created_at = datetime.now().isoformat()
     if role == "assistant":
         normalized_content = content
@@ -635,15 +693,15 @@ def append_short_term(
             content=content,
             role=role,
             timestamp=created_at,
-            origin=origin or DEFAULT_MEMORY_ORIGIN,
-            sender=sender or role,
+            origin=normalized_origin,
+            sender=normalized_sender,
         )
 
     with _get_connection(role_id) as conn:
         conn.execute(
             """
-            INSERT INTO short_term (role, content, timestamp, task_id, request_id, json_memory)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO short_term (role, content, timestamp, task_id, request_id, json_memory, origin, sender, sender_id, group_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 role,
@@ -652,6 +710,10 @@ def append_short_term(
                 normalized_task_id,
                 normalized_request_id,
                 normalized_json_memory,
+                normalized_origin,
+                normalized_sender,
+                normalized_sender_id,
+                normalized_group_id,
             )
         )
 
@@ -665,7 +727,7 @@ def append_short_term(
         # memory.json 由前端维护，后端仅保证 request_id 在 DB 记录中可用。
 
     # 对用户消息异步生成向量嵌入，存入向量记忆库
-    if role == "user" and len(content.strip()) >= 10:
+    if embed and role == "user" and len(content.strip()) >= 10:
         try:
             asyncio.ensure_future(embed_and_store(
                 role_id, normalized_content, role="user",
@@ -722,6 +784,7 @@ async def get_context_messages(
     role_id: str,
     limit: int = 20,
     user_message: Optional[str] = None,
+    conversation_key: Optional[str] = None,
 ) -> List[Dict]:
     """
     获取对话上下文消息
@@ -730,6 +793,11 @@ async def get_context_messages(
         role_id: 角色 ID
         limit: 限制条数（兼容参数，实际使用 _get_memory_length()）
         user_message: 当前用户消息（保留参数以兼容旧调用）
+        conversation_key: 记忆隔离标识
+            - None / "default_user" / "main_qq": zerochat + 主QQ(onebot中sender=user)
+            - "group:{group_id}": 同一群聊共享记忆
+            - "private:{sender_id}": 同一私聊共享记忆
+            - "all": 不过滤
 
     Returns:
         [{"role": "user/assistant", "content": "..."}]
@@ -740,23 +808,42 @@ async def get_context_messages(
     if is_tool_role_id(role_id):
         return []
 
+    # 构建过滤条件
+    where_clause = ""
+    where_params: list = []
+    if conversation_key and conversation_key.startswith("group:"):
+        group_id_val = conversation_key[6:]
+        where_clause = "WHERE (origin = 'zerochat') OR (origin = 'onebot_group' AND group_id = ?)"
+        where_params = [group_id_val]
+    elif conversation_key and conversation_key.startswith("private:"):
+        sender_id_val = conversation_key[8:]
+        where_clause = "WHERE (origin = 'zerochat') OR (origin = 'onebot_private' AND sender_id = ?)"
+        where_params = [sender_id_val]
+    elif conversation_key != "all":
+        # default_user / main_qq / None: 默认前端 + 主QQ + 主动消息
+        where_clause = "WHERE origin IN ('zerochat', 'proactive') OR (origin LIKE 'onebot%' AND sender = 'user')"
+
     need_trigger_summary = False
     block_start = 0
+    # meta key 按 conversation_key 隔离，避免多渠道交替触发总结
+    meta_block_key = f"last_context_block_start:{conversation_key or 'default'}"
 
     with _get_connection(role_id) as conn:
-        total = conn.execute("SELECT COUNT(*) FROM short_term").fetchone()[0]
+        count_sql = f"SELECT COUNT(*) FROM short_term {where_clause}"
+        total = conn.execute(count_sql, where_params).fetchone()[0]
+
         if total == 0:
             return []
 
         block_start = ((total - 1) // effective_limit) * effective_limit
-        last_block_value = _get_meta(conn, "last_context_block_start", "-1")
+        last_block_value = _get_meta(conn, meta_block_key, "-1")
         try:
             last_block = int(last_block_value)
         except (TypeError, ValueError):
             last_block = -1
 
-        if last_block != block_start:
-            _set_meta(conn, "last_context_block_start", str(block_start))
+        if last_block != block_start and (conversation_key == None or conversation_key == "default_user"):
+            _set_meta(conn, meta_block_key, str(block_start))
             need_trigger_summary = True
 
     if need_trigger_summary:
@@ -765,10 +852,8 @@ async def get_context_messages(
             print(f"触发对话总结失败，无法获取新的上下文消息")
 
     with _get_connection(role_id) as conn:
-        rows = conn.execute(
-            "SELECT role, content, timestamp FROM short_term ORDER BY id ASC LIMIT ? OFFSET ?",
-            (effective_limit, block_start)
-        ).fetchall()
+        query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?"
+        rows = conn.execute(query_sql, where_params + [effective_limit, block_start]).fetchall()
 
     context = [
         {
@@ -777,8 +862,8 @@ async def get_context_messages(
                 content=row[1],
                 role=row[0] or "assistant",
                 timestamp=row[2],
-                origin=DEFAULT_MEMORY_ORIGIN,
-                sender=row[0] or "assistant",
+                origin=row[3] or DEFAULT_MEMORY_ORIGIN,
+                sender=row[4] or row[0] or "assistant",
             ),
         }
         for row in rows
@@ -1017,6 +1102,28 @@ def clear_short_term(role_id: str):
         conn.execute("DELETE FROM short_term")
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端不主动覆盖。
+
+def clear_short_term_by_conversation(role_id: str, conversation_key: str):
+    """按会话 key 清除短期记忆（group:{id} 或 private:{sender_id}）"""
+    if is_tool_role_id(role_id):
+        return
+    with _get_connection(role_id) as conn:
+        if conversation_key.startswith("group:"):
+            group_id = conversation_key[6:]
+            conn.execute(
+                "DELETE FROM short_term WHERE group_id = ?",
+                (group_id,),
+            )
+        elif conversation_key.startswith("private:"):
+            sender_id = conversation_key[8:]
+            conn.execute(
+                "DELETE FROM short_term WHERE origin = 'onebot_private' AND sender_id = ?",
+                (sender_id,),
+            )
+        else:
+            return
+        _set_meta(conn, "updated_at", datetime.now().isoformat())
+        logger.info(f"已清除记忆: role={role_id}, conversation_key={conversation_key}")
 
 def clear_vector_memory(role_id: str):
     """清空向量记忆库"""

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import '../models/onebot_config.dart';
 import '../models/role.dart';
 import 'storage_service.dart';
 import 'memory_service.dart';
@@ -238,6 +239,11 @@ class RoleService {
               presencePenalty: 0.0,
               maxContextRounds: 10,
               coreMemory: coreMemory,
+              onebotConfig: json['onebot_config'] != null
+                  ? OneBotConfig.fromJson(
+                      json['onebot_config'] as Map<String, dynamic>,
+                    )
+                  : null,
             );
 
             // 更新或添加角色（保留本地专有字段）
@@ -265,6 +271,7 @@ class RoleService {
                 gender: backendRole.gender,
                 menstruationCycle: backendRole.menstruationCycle,
                 temperature: backendRole.temperature,
+                onebotConfig: backendRole.onebotConfig,
               );
             } else {
               _roles.add(backendRole);
@@ -305,6 +312,7 @@ class RoleService {
             'gender': role.gender,
             'menstruation_cycle': role.menstruationCycle,
             'temperature': role.temperature,
+            'onebot_config': role.onebotConfig.toJson(),
           },
       });
       return true;

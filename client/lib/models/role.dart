@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'onebot_config.dart';
 import 'proactive_config.dart';
 import 'sticker.dart';
 
@@ -43,6 +44,9 @@ class Role {
   // 表情包配置（角色独立）
   final StickerConfig stickerConfig;
 
+  // OneBot V11 接口配置（角色独立）
+  final OneBotConfig onebotConfig;
+
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -71,6 +75,7 @@ class Role {
     this.summaryEveryNRounds = 20,
     ProactiveConfig? proactiveConfig,
     StickerConfig? stickerConfig,
+    OneBotConfig? onebotConfig,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) : coreMemory = coreMemory ?? [],
@@ -83,6 +88,7 @@ class Role {
            },
        proactiveConfig = proactiveConfig ?? const ProactiveConfig(),
        stickerConfig = stickerConfig ?? const StickerConfig(),
+       onebotConfig = onebotConfig ?? const OneBotConfig(),
        createdAt = createdAt ?? DateTime.now(),
        updatedAt = updatedAt ?? DateTime.now();
 
@@ -123,6 +129,7 @@ class Role {
     int? summaryEveryNRounds,
     ProactiveConfig? proactiveConfig,
     StickerConfig? stickerConfig,
+    OneBotConfig? onebotConfig,
     DateTime? updatedAt,
   }) {
     return Role(
@@ -150,6 +157,7 @@ class Role {
       summaryEveryNRounds: summaryEveryNRounds ?? this.summaryEveryNRounds,
       proactiveConfig: proactiveConfig ?? this.proactiveConfig,
       stickerConfig: stickerConfig ?? this.stickerConfig,
+      onebotConfig: onebotConfig ?? this.onebotConfig,
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
     );
@@ -234,6 +242,11 @@ class Role {
               json['sticker_config'] as Map<String, dynamic>,
             )
           : const StickerConfig(),
+      onebotConfig: json['onebot_config'] != null
+          ? OneBotConfig.fromJson(
+              json['onebot_config'] as Map<String, dynamic>,
+            )
+          : const OneBotConfig(),
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'] as String)
           : DateTime.now(),
@@ -269,6 +282,7 @@ class Role {
       'summary_every_n_rounds': summaryEveryNRounds,
       'proactive_config': proactiveConfig.toJson(),
       'sticker_config': stickerConfig.toJson(),
+      'onebot_config': onebotConfig.toJson(),
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
     };

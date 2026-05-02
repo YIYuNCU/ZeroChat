@@ -58,6 +58,7 @@ def load_config():
         "vision_mode": "standalone",
         "auth_token": "ZEROCHAT_FIXED_TOKEN_2026",
         "encryption_secret": "ZEROCHAT_TRANSFER_SECRET_2026",
+        "onebot_enabled": True,
     }
     if config_file.exists():
         with open(config_file, "r", encoding="utf-8") as f:
@@ -72,7 +73,7 @@ CONFIG = load_config()
 
 from core.lifecycle import create_lifespan
 from core.middleware import RequestLoggingMiddleware, SecurityMiddleware
-from routers import ai_behavior, chat, moments, roles, settings, tasks
+from routers import ai_behavior, chat, moments, onebot, roles, settings, tasks
 from services import scheduler_service
 from transport.file_routes import create_files_router
 from transport.push_hub import configure_push_hub
@@ -119,6 +120,7 @@ app.include_router(moments.router, prefix="/api", tags=["Moments"])
 app.include_router(tasks.router, prefix="/api", tags=["Tasks"])
 app.include_router(ai_behavior.router, prefix="/api", tags=["AI Behavior"])
 app.include_router(settings.router, prefix="/api", tags=["Settings"])
+app.include_router(onebot.router, prefix="/api", tags=["OneBot"])
 
 # 注册文件路由
 app.include_router(create_files_router(CONFIG))
@@ -143,6 +145,9 @@ async def get_favicon():
     return FileResponse(str(ROOT_DIR / "favicon.ico"), media_type="image/x-icon")
 
 app.websocket("/ws/secure")(create_secure_websocket_endpoint(CONFIG, logger))
+
+from routers.onebot import onebot_ws_endpoint
+app.websocket("/onebot/ws/{role_id}")(onebot_ws_endpoint)
 
 
 if __name__ == "__main__":

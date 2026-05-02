@@ -485,6 +485,8 @@ async def _run_memory_ai_pipeline(
     attached_json: Optional[str] = None,
     origin: str = "zerochat",
     user_sender: str = "user",
+    sender_id: str = "",
+    group_id: str = "",
     include_user_memory: bool = True,
     include_assistant_memory: bool = True,
     trigger_summary_after_reply: bool = True,
@@ -501,7 +503,22 @@ async def _run_memory_ai_pipeline(
     from services.vector_memory import embed_and_store
 
     local_context = event_context or {}
-    backend_history = await get_context_messages(role_id, limit=_get_memory_length(), user_message=user_message)
+
+    # 记忆隔离：根据 origin/sender_id/group_id 决定加载哪些记忆
+    # 群聊/私聊优先，确保主用户在群内的消息也存入群记忆
+    if origin == "onebot_group" and group_id:
+        conversation_key = f"group:{group_id}"
+    elif origin == "onebot_private" and sender_id:
+        conversation_key = f"private:{sender_id}"
+    elif origin == "zerochat" or (origin.startswith("onebot") and user_sender == "user"):
+        conversation_key = "default_user"
+    else:
+        conversation_key = "all"
+
+    backend_history = await get_context_messages(
+        role_id, limit=_get_memory_length(), user_message=user_message,
+        conversation_key=conversation_key,
+    )
     client_history = _normalize_history_items(local_context.get("history"))
     history = backend_history if backend_history else client_history
 
@@ -529,6 +546,7 @@ async def _run_memory_ai_pipeline(
     extra_context = "\n\n".join(combined_parts) if combined_parts else None
 
     normalized_request_id = str(request_id or local_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
+    is_main_user = (user_sender == "user")
 
     result = await generate_with_role(
         role_data=role,
@@ -567,6 +585,9 @@ async def _run_memory_ai_pipeline(
             json_memory=attached_json,
             origin=origin,
             sender=user_sender,
+            sender_id=sender_id,
+            group_id=group_id,
+            embed=is_main_user,
         )
     if include_assistant_memory:
         append_short_term(
@@ -578,8 +599,11 @@ async def _run_memory_ai_pipeline(
             json_memory=attached_json,
             origin=origin,
             sender=role.get("name") or "assistant",
+            sender_id=sender_id,
+            group_id=group_id,
+            embed=is_main_user,
         )
-        if len(ai_reply.strip()) >= 30:
+        if is_main_user and len(ai_reply.strip()) >= 30:
             try:
                 asyncio.ensure_future(embed_and_store(
                     role_id, ai_reply, role="assistant",
@@ -663,6 +687,8 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         attached_json=attached_json or None,
         origin=str(event_context.get("origin") or "zerochat").strip() or "zerochat",
         user_sender=str(event_context.get("sender") or "user").strip() or "user",
+        sender_id=str(event_context.get("sender_id") or "").strip(),
+        group_id=str(event_context.get("onebot_group_id") or event_context.get("group_id") or "").strip(),
         include_user_memory=True,
         include_assistant_memory=True,
         trigger_summary_after_reply=True,
@@ -711,7 +737,7 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
         role_id=role_id,
         user_message=trigger_prompt,
         event_context=event.context or {},
-        origin="proactive",
+        origin="zerochat",
         user_sender="system",
         include_user_memory=False,
         include_assistant_memory=True,

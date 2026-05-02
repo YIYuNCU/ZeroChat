@@ -26,6 +26,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         if request.method.upper() == "OPTIONS":
             return await call_next(request)
 
+        # OneBot 路径使用独立鉴权，跳过加密/解密
+        if path.startswith("/api/onebot/"):
+            return await call_next(request)
+
         auth_token = self.config.get("auth_token") or DEFAULT_AUTH_TOKEN
         encryption_secret = self.config.get("encryption_secret") or DEFAULT_ENCRYPTION_SECRET
 
