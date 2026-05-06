@@ -18,7 +18,7 @@ class ApiService {
   static String _model = 'gpt-3.5-turbo';
 
   /// 最大上下文轮数（每轮包含用户消息和AI回复）
-  static int maxContextRounds = 10;
+  static int maxContextRounds = 60;
   static const int _visionChunkSize = 64 * 1024;
   static const int _visionChunkMaxRetry = 3;
   static bool _directBypassAuthorized = false;
@@ -51,7 +51,7 @@ class ApiService {
     required String baseUrl,
     required String apiKey,
     String model = 'gpt-3.5-turbo',
-    int maxRounds = 10,
+    int maxRounds = 60,
   }) {
     _baseUrl = baseUrl;
     _apiKey = apiKey;

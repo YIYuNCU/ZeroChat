@@ -169,7 +169,7 @@ class RoleService {
     double topP = 1.0,
     double frequencyPenalty = 0.0,
     double presencePenalty = 0.0,
-    int maxContextRounds = 10,
+    int maxContextRounds = 60,
   }) async {
     final role = Role(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -237,7 +237,7 @@ class RoleService {
               topP: 1.0,
               frequencyPenalty: 0.0,
               presencePenalty: 0.0,
-              maxContextRounds: 10,
+              maxContextRounds: 60,
               coreMemory: coreMemory,
               onebotConfig: json['onebot_config'] != null
                   ? OneBotConfig.fromJson(

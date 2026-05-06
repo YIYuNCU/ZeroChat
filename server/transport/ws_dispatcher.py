@@ -405,7 +405,7 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
             "max_context_rounds": (
                 role_model.max_context_rounds
                 if role_model.max_context_rounds is not None
-                else 10
+                else 60
             ),
             "allow_web_search": (
                 role_model.allow_web_search

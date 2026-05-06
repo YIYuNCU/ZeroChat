@@ -293,7 +293,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                           ),
                         ),
                         IconButton(
-                          onPressed: _maxContextRounds < 50
+                          onPressed: _maxContextRounds < 60
                               ? () => setState(() => _maxContextRounds++)
                               : null,
                           icon: const Icon(Icons.add_circle_outline),
@@ -557,7 +557,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
 
   void _resetToDefault() {
     setState(() {
-      _maxContextRounds = 10;
+      _maxContextRounds = 60;
     });
   }
 
