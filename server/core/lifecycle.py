@@ -1,8 +1,11 @@
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
 from services import scheduler_service
+from services.ai_service import aclose_http_client
+from services.memory_service import close_all_connections as close_db_connections
 from transport.push_hub import publish_server_push
 
 
@@ -161,6 +164,8 @@ def create_lifespan(data_dir: Path, config_dir: Path, runtime_dir: Path, logger)
         yield
 
         scheduler_service.stop_scheduler()
+        await aclose_http_client()
+        close_db_connections()
         logger.info("ZeroChat Server 已关闭")
 
     return lifespan

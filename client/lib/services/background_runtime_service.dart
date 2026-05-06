@@ -164,6 +164,29 @@ class BackgroundRuntimeService {
     }
 
     _service.invoke(inForeground ? _eventAppForeground : _eventAppBackground);
+
+    // 回到前台时验证主进程 WebSocket 连接
+    if (inForeground) {
+      unawaited(_verifyForegroundConnection());
+    }
+  }
+
+  static Future<void> _verifyForegroundConnection() async {
+    try {
+      if (!SecureWebSocketClient.instance.isConnected) {
+        debugPrint('BackgroundRuntimeService: foreground check - reconnecting WebSocket');
+        await SecureWebSocketClient.instance.ensureConnected();
+      } else {
+        // 快速健康检查确认连接有效
+        await SecureWebSocketClient.instance.request(
+          'health',
+          const <String, dynamic>{},
+          timeout: Duration(seconds: 4),
+        );
+      }
+    } catch (e) {
+      debugPrint('BackgroundRuntimeService: foreground connection verify failed: $e');
+    }
   }
 
   static void registerPendingRequest({
@@ -517,9 +540,9 @@ class BackgroundRuntimeService {
             latestSeen = timestamp;
           }
 
-          // 只处理后端任务触发写入的消息，避免与正常聊天通知重复
-          final isTaskMessage = messageId.contains('_task_');
-          if (!isTaskMessage) {
+          // 只处理后端任务/主动触发写入的消息，避免与正常聊天通知重复
+          final isBackgroundMessage = messageId.contains('_task_') || messageId.contains('_proactive');
+          if (!isBackgroundMessage) {
             continue;
           }
           if (senderId == 'me' || content.isEmpty) {

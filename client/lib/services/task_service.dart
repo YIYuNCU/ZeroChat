@@ -171,38 +171,43 @@ class TaskService {
     required DateTime triggerTime,
     String? aiPrompt,
   }) async {
-    final data = await SecureWebSocketClient.instance.request('tasks_create', {
-      'chat_id': chatId,
-      'role_id': roleId,
-      'message': message,
-      'ai_prompt': aiPrompt ?? '',
-      'trigger_time': triggerTime.toIso8601String(),
-      'repeat': null,
-    });
+    // 尝试同步到后端，失败时仅本地保存
+    String? backendId;
+    try {
+      final data = await SecureWebSocketClient.instance.request('tasks_create', {
+        'chat_id': chatId,
+        'role_id': roleId,
+        'message': message,
+        'ai_prompt': aiPrompt ?? '',
+        'trigger_time': triggerTime.toIso8601String(),
+        'repeat': null,
+      });
+      backendId = data['id']?.toString();
+    } catch (e) {
+      debugPrint('TaskService: Backend create failed, saving locally: $e');
+    }
+
     final task = ScheduledTask(
-      id: data['id']?.toString() ?? DateTime.now().millisecondsSinceEpoch.toString(),
-      chatId: data['chat_id']?.toString() ?? chatId,
-      roleId: data['role_id']?.toString() ?? roleId,
-      message: data['message']?.toString() ?? message,
-      aiPrompt: data['ai_prompt']?.toString(),
-      triggerTime:
-          DateTime.tryParse(data['trigger_time']?.toString() ?? '') ??
-          triggerTime,
+      id: backendId ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      chatId: chatId,
+      roleId: roleId,
+      message: message,
+      aiPrompt: aiPrompt,
+      triggerTime: triggerTime,
       type: TaskType.reminder,
-      isCompleted: data['enabled'] == false,
+      isCompleted: false,
     );
 
     _tasks.removeWhere((t) => t.id == task.id);
     _tasks.add(task);
     await _saveTasks();
 
-    // 创建任务后确保后台保活服务可用，以便持续检查后端任务触发结果
     await BackgroundRuntimeService.applyEnabled(
       SettingsService.instance.backgroundRuntimeEnabled,
     );
 
     debugPrint(
-      'TaskService: Reminder created on backend for ${task.triggerTime.toIso8601String()}',
+      'TaskService: Reminder created${backendId != null ? ' on backend' : ' locally'} for ${task.triggerTime.toIso8601String()}',
     );
     return task;
   }

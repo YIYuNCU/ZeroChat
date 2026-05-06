@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import '../models/chat_info.dart';
+import 'notification_service.dart';
 import 'storage_service.dart';
 
 /// 聊天列表服务
@@ -80,6 +83,10 @@ class ChatListService extends ChangeNotifier {
     return newChat;
   }
 
+  void _syncBadgeAfterChange() {
+    unawaited(NotificationService.instance.syncBadge(totalUnreadCount));
+  }
+
   /// 更新聊天（新消息到达时）
   void updateChat({
     required String chatId,
@@ -98,6 +105,7 @@ class ChatListService extends ChangeNotifier {
     );
     _saveChatList();
     notifyListeners();
+    if (incrementUnread) _syncBadgeAfterChange();
   }
 
   /// 清除未读数
@@ -110,6 +118,7 @@ class ChatListService extends ChangeNotifier {
       _chatList[index] = chat.copyWith(unreadCount: 0);
       _saveChatList();
       notifyListeners();
+      _syncBadgeAfterChange();
     }
   }
 
@@ -124,6 +133,7 @@ class ChatListService extends ChangeNotifier {
     );
     _saveChatList();
     notifyListeners();
+    _syncBadgeAfterChange();
   }
 
   /// 增加未读数
@@ -135,6 +145,7 @@ class ChatListService extends ChangeNotifier {
     _chatList[index] = chat.copyWith(unreadCount: chat.unreadCount + count);
     _saveChatList();
     notifyListeners();
+    _syncBadgeAfterChange();
   }
 
   /// 置顶/取消置顶

@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import logging
+import random
 import re
 import time
 from pathlib import Path
@@ -267,12 +268,6 @@ def _check_whitelist(
             return "allowed_groups 为空，跳过群聊"
         if transformed["group_id"] not in allowed_groups:
             return f"group_id {transformed['group_id']} 不在白名单中"
-        # 优先使用配置的 self_id，回退到事件中的 self_id
-        config_self_id = onebot_config.get("self_id") or onebot_config.get("selfId")
-        effective_self_id = config_self_id or event.self_id
-        if not _is_at_bot(event.message, effective_self_id):
-            return "群消息未 @机器人"
-
     return None
 
 
@@ -369,6 +364,12 @@ _HELP_TEXT = (
     "/disallow @用户 - 将用户移出白名单\n"
     "/block @用户 - 屏蔽当前场景指定用户\n"
     "/unblock @用户 - 取消屏蔽\n"
+    "/blocklist - 查看被屏蔽用户列表\n"
+    "/random - 查看随机回复配置\n"
+    "/random set <概率> <次数> - 设置随机回复概率和连续回复次数\n"
+    "/proactive - 查看主动回复模式状态\n"
+    "/proactive on/off - 开启/关闭主动回复模式（调试用）\n"
+    "/proactive interval <小时> - 设置主动回复间隔时间（支持小数）\n"
     "/help - 显示此帮助"
 )
 
@@ -412,6 +413,70 @@ def _check_disabled_or_blocked(
             return f"用户 {user_id_str} 在会话 {conv_key} 中被屏蔽"
 
     return None
+
+
+def _get_scene_config(onebot_config: Dict, conv_key: str) -> Dict:
+    """获取指定场景的主动回复配置（不存在时创建默认值）"""
+    scenes = onebot_config.setdefault("proactive_config", {})
+    if conv_key not in scenes:
+        scenes[conv_key] = {
+            "enabled": False,
+            "interval": 3.0,
+            "last_time": 0,
+            "remaining": 0,
+            "rate": 0.05,
+            "burst": 10,
+        }
+    return scenes[conv_key]
+
+
+def _check_random_reply(onebot_config: Dict, role_id: str, current_time: float, conv_key: str) -> bool:
+    """检查是否应触发随机回复（群聊无 @ 时使用）。返回 True 表示本次应回复。"""
+    cfg = _get_scene_config(onebot_config, conv_key)
+    interval = float(cfg.get("interval", 3)) * 3600
+    last_time = float(cfg.get("last_time", 0))
+
+    if current_time - last_time < interval:
+        return False
+
+    if cfg.get("enabled", False):
+        cfg["last_time"] = current_time
+        _persist_onebot_config(role_id, onebot_config)
+        return True
+
+    rate = float(cfg.get("rate", 0.05))
+    burst = int(cfg.get("burst", 10))
+    remaining = int(cfg.get("remaining", 0))
+
+    if remaining > 0:
+        cfg["remaining"] = remaining - 1
+        cfg["last_time"] = current_time
+        _persist_onebot_config(role_id, onebot_config)
+        return True
+
+    if random.random() < rate:
+        cfg["remaining"] = burst - 1
+        cfg["last_time"] = current_time
+        _persist_onebot_config(role_id, onebot_config)
+        logger.info(f"随机回复触发: role={role_id}, conv={conv_key}, rate={rate}, burst={burst}")
+        return True
+
+    return False
+
+
+def _build_blocklist_text(onebot_config: Dict) -> str:
+    """构建被屏蔽人列表文本"""
+    blocked = onebot_config.get("blocked_users") or {}
+    if not blocked:
+        return "暂无被屏蔽的用户"
+    lines = ["被屏蔽用户列表："]
+    for uid, scopes in blocked.items():
+        if not scopes:
+            lines.append(f"  {uid}（全局屏蔽）")
+        else:
+            scopes_str = ", ".join(scopes)
+            lines.append(f"  {uid}（{scopes_str}）")
+    return "\n".join(lines)
 
 
 async def _handle_command(
@@ -573,6 +638,63 @@ async def _handle_command(
                 else:
                     reply = f"用户 {uid} 不在白名单中"
 
+    elif cmd == "/random":
+        sub = arg.split()
+        if sub and sub[0] == "set" and len(sub) >= 3:
+            try:
+                new_rate = float(sub[1])
+                new_burst = int(sub[2])
+                if not (0 <= new_rate <= 1):
+                    reply = "随机概率必须在 0~1 之间"
+                elif new_burst < 1:
+                    reply = "连续回复次数必须 >= 1"
+                else:
+                    cfg = _get_scene_config(onebot_config, conv_key)
+                    cfg["rate"] = new_rate
+                    cfg["burst"] = new_burst
+                    _persist_onebot_config(role_id, onebot_config)
+                    reply = f"已设置 {conv_key} 随机回复概率={new_rate}，连续回复次数={new_burst}"
+            except (ValueError, TypeError):
+                reply = "格式错误，正确格式：/random set <概率> <次数>"
+        else:
+            cfg = _get_scene_config(onebot_config, conv_key)
+            reply = (
+                f"随机回复配置（{conv_key}）：\n"
+                f"  触发概率：{cfg['rate']}\n"
+                f"  连续回复次数：{cfg['burst']}\n"
+                f"  剩余免费回复：{cfg['remaining']}\n"
+                f"  回复间隔：{cfg['interval']}小时"
+            )
+
+    elif cmd == "/proactive":
+        sub = arg.split()
+        if sub and sub[0] == "interval" and len(sub) >= 2:
+            try:
+                new_interval = float(sub[1])
+                if new_interval < 0:
+                    reply = "间隔时间不能为负数"
+                else:
+                    cfg = _get_scene_config(onebot_config, conv_key)
+                    cfg["interval"] = new_interval
+                    _persist_onebot_config(role_id, onebot_config)
+                    reply = f"已设置 {conv_key} 主动回复间隔为 {new_interval} 小时"
+            except (ValueError, TypeError):
+                reply = "格式错误，正确格式：/proactive interval <小时>"
+        elif sub and sub[0] in ("on", "off"):
+            cfg = _get_scene_config(onebot_config, conv_key)
+            cfg["enabled"] = (sub[0] == "on")
+            _persist_onebot_config(role_id, onebot_config)
+            reply = f"已{'开启' if sub[0] == 'on' else '关闭'} {conv_key} 的主动回复模式"
+        else:
+            cfg = _get_scene_config(onebot_config, conv_key)
+            enabled = cfg.get("enabled", False)
+            reply = (
+                f"主动回复模式（{conv_key}）：{'已开启' if enabled else '已关闭'}\n"
+                f"  回复间隔：{cfg['interval']}小时\n"
+                f"  提示：/proactive on 开启，/proactive off 关闭，"
+                f"/proactive interval <小时> 设置间隔"
+            )
+
     if reply is not None:
         await _send_reply(conn, transformed, reply, raw=True)
     return reply
@@ -720,6 +842,62 @@ async def _handle_command_http(
                 _persist_onebot_config(role_id, onebot_config)
                 return f"已将用户 {uid} 移出白名单"
             return f"用户 {uid} 不在白名单中"
+
+    if cmd == "/random":
+        sub = arg.split()
+        if sub and sub[0] == "set" and len(sub) >= 3:
+            try:
+                new_rate = float(sub[1])
+                new_burst = int(sub[2])
+                if not (0 <= new_rate <= 1):
+                    return "随机概率必须在 0~1 之间"
+                if new_burst < 1:
+                    return "连续回复次数必须 >= 1"
+                cfg = _get_scene_config(onebot_config, conv_key)
+                cfg["rate"] = new_rate
+                cfg["burst"] = new_burst
+                _persist_onebot_config(role_id, onebot_config)
+                return f"已设置 {conv_key} 随机回复概率={new_rate}，连续回复次数={new_burst}"
+            except (ValueError, TypeError):
+                return "格式错误，正确格式：/random set <概率> <次数>"
+        cfg = _get_scene_config(onebot_config, conv_key)
+        return (
+            f"随机回复配置（{conv_key}）：\n"
+            f"  触发概率：{cfg['rate']}\n"
+            f"  连续回复次数：{cfg['burst']}\n"
+            f"  剩余免费回复：{cfg['remaining']}\n"
+            f"  回复间隔：{cfg['interval']}小时"
+        )
+
+    if cmd == "/proactive":
+        sub = arg.split()
+        if sub and sub[0] == "interval" and len(sub) >= 2:
+            try:
+                new_interval = float(sub[1])
+                if new_interval < 0:
+                    return "间隔时间不能为负数"
+                cfg = _get_scene_config(onebot_config, conv_key)
+                cfg["interval"] = new_interval
+                _persist_onebot_config(role_id, onebot_config)
+                return f"已设置 {conv_key} 主动回复间隔为 {new_interval} 小时"
+            except (ValueError, TypeError):
+                return "格式错误，正确格式：/proactive interval <小时>"
+        if sub and sub[0] in ("on", "off"):
+            cfg = _get_scene_config(onebot_config, conv_key)
+            cfg["enabled"] = (sub[0] == "on")
+            _persist_onebot_config(role_id, onebot_config)
+            return f"已{'开启' if sub[0] == 'on' else '关闭'} {conv_key} 的主动回复模式"
+        cfg = _get_scene_config(onebot_config, conv_key)
+        enabled = cfg.get("enabled", False)
+        return (
+            f"主动回复模式（{conv_key}）：{'已开启' if enabled else '已关闭'}\n"
+            f"  回复间隔：{cfg['interval']}小时\n"
+            f"  提示：/proactive on 开启，/proactive off 关闭，"
+            f"/proactive interval <小时> 设置间隔"
+        )
+
+    if cmd == "/blocklist":
+        return _build_blocklist_text(onebot_config)
 
     return None
 
@@ -889,8 +1067,18 @@ async def _handle_ws_frame(
             config_self_id = onebot_config.get("self_id") or onebot_config.get("selfId")
             effective_self_id = config_self_id or event.self_id
             if not _is_at_bot(event.message, effective_self_id):
-                logger.debug(f"OneBot 群消息未 @机器人: role={role_id}, sender={transformed['sender']}")
-                return
+                conv_key = _build_conversation_key(transformed)
+                # 不在白名单的群聊不检查自动回复
+                if transformed["origin"] == "onebot_group":
+                    allowed_groups = onebot_config.get("allowed_groups") or []
+                    if transformed["group_id"] not in allowed_groups:
+                        logger.debug(f"OneBot 群聊不在白名单，跳过随机回复: group={transformed['group_id']}")
+                        return
+                if _check_random_reply(onebot_config, role_id, time.time(), conv_key):
+                    logger.debug(f"OneBot 随机回复放行: role={role_id}, sender={transformed['sender']}")
+                else:
+                    logger.debug(f"OneBot 群消息未 @机器人: role={role_id}, sender={transformed['sender']}")
+                    return
 
     # 白名单过滤（主用户不受白名单限制，否则无法在未授权群聊执行 /allow 等指令）
     if transformed["sender"] != "user":
@@ -1002,7 +1190,11 @@ async def handle_onebot_event(
             config_self_id = onebot_config.get("self_id") or onebot_config.get("selfId")
             effective_self_id = config_self_id or event.self_id
             if not _is_at_bot(event.message, effective_self_id):
-                return {"status": "ignored", "reason": "not @bot"}
+                conv_key = _build_conversation_key(transformed)
+                if _check_random_reply(onebot_config, role_id, time.time(), conv_key):
+                    logger.debug(f"OneBot HTTP 随机回复放行: role={role_id}")
+                else:
+                    return {"status": "ignored", "reason": "not @bot"}
 
     # 白名单过滤（主用户不受白名单限制）
     if transformed["sender"] != "user":

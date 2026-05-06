@@ -3,14 +3,28 @@
 管理全局配置（API URL、KEY、模型等）
 """
 import json
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
 
+# 内存缓存
+_CACHE: Dict[str, Any] = {}
+_CACHE_TIME: float = 0
+_CACHE_TTL: float = 5.0  # 缓存有效期（秒）
+
+
+def _invalidate_cache():
+    global _CACHE, _CACHE_TIME
+    _CACHE = {}
+    _CACHE_TIME = 0
+
+
 def get_settings_file() -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     return CONFIG_DIR / "settings.json"
+
 
 def get_default_settings() -> Dict[str, Any]:
     """获取默认设置"""
@@ -33,44 +47,55 @@ def get_default_settings() -> Dict[str, Any]:
         "embedding_api_url": "",
         "embedding_api_key": "",
         "embedding_model": "",
-        "updated_at": None
+        "updated_at": None,
     }
 
+
 def load_settings() -> Dict[str, Any]:
-    """加载设置"""
+    """加载设置（带内存缓存）"""
+    global _CACHE, _CACHE_TIME
+    now = time.time()
+    if _CACHE and (now - _CACHE_TIME) < _CACHE_TTL:
+        return _CACHE
+
     settings_file = get_settings_file()
     default = get_default_settings()
-    
+
     if settings_file.exists():
         try:
             with open(settings_file, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-                return {**default, **saved}
+                _CACHE = {**default, **saved}
+                _CACHE_TIME = now
+                return _CACHE
         except Exception:
             pass
-    
-    return default
+
+    _CACHE = dict(default)
+    _CACHE_TIME = now
+    return _CACHE
+
 
 def save_settings(settings: Dict[str, Any]) -> bool:
-    """保存设置"""
+    """保存设置（使内存缓存失效）"""
     try:
         settings_file = get_settings_file()
-        
-        # 合并现有设置
+
         current = load_settings()
         current.update(settings)
-        
-        # 添加更新时间
+
         from datetime import datetime
         current["updated_at"] = datetime.now().isoformat()
-        
+
         with open(settings_file, "w", encoding="utf-8") as f:
             json.dump(current, f, indent=2, ensure_ascii=False)
-        
+
+        _invalidate_cache()
         return True
     except Exception as e:
         print(f"Error saving settings: {e}")
         return False
+
 
 def get_ai_config() -> Dict[str, str]:
     """获取 AI API 配置"""
@@ -78,7 +103,7 @@ def get_ai_config() -> Dict[str, str]:
     return {
         "api_url": settings.get("ai_api_url", ""),
         "api_key": settings.get("ai_api_key", ""),
-        "model": settings.get("ai_model", "gpt-3.5-turbo")
+        "model": settings.get("ai_model", "gpt-3.5-turbo"),
     }
 
 
@@ -107,6 +132,7 @@ def get_vision_config() -> Dict[str, Any]:
         "mode": mode,
     }
 
+
 def get_embedding_config() -> Dict[str, Any]:
     """获取嵌入向量配置"""
     settings = load_settings()
@@ -130,7 +156,7 @@ def _default_embedding_model(api_url: str) -> str:
     return "text-embedding-ada-002"
 
 
-def update_ai_config(api_url: Optional[str] = None, 
+def update_ai_config(api_url: Optional[str] = None,
                      api_key: Optional[str] = None,
                      model: Optional[str] = None) -> bool:
     """更新 AI API 配置"""
@@ -141,7 +167,7 @@ def update_ai_config(api_url: Optional[str] = None,
         updates["ai_api_key"] = api_key
     if model is not None:
         updates["ai_model"] = model
-    
+
     if updates:
         return save_settings(updates)
     return True

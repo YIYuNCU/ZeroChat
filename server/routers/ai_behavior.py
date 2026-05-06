@@ -68,7 +68,39 @@ class IntentDetectResponse(BaseModel):
 
 # ========== 辅助函数 ==========
 
+# ========== 角色缓存 ==========
+_ROLE_CACHE: Dict[str, tuple] = {}  # role_id -> (data, timestamp)
+_ROLE_CACHE_TTL = 2.0  # 缓存有效期（秒）
+
+
+def invalidate_role_cache(role_id: Optional[str] = None):
+    """使角色缓存失效"""
+    if role_id:
+        _ROLE_CACHE.pop(role_id, None)
+    else:
+        _ROLE_CACHE.clear()
+
+
 def load_role(role_id: str) -> Optional[Dict]:
+    cached = _ROLE_CACHE.get(role_id)
+    if cached:
+        from time import time
+        data, ts = cached
+        if (time() - ts) < _ROLE_CACHE_TTL:
+            return data
+
+    profile_file = ROLES_DIR / role_id / "profile.json"
+    if profile_file.exists():
+        with open(profile_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            from time import time
+            _ROLE_CACHE[role_id] = (data, time())
+            return data
+    return None
+
+
+def _load_role_no_cache(role_id: str) -> Optional[Dict]:
+    """强制从磁盘读取（绕过缓存）"""
     profile_file = ROLES_DIR / role_id / "profile.json"
     if profile_file.exists():
         with open(profile_file, "r", encoding="utf-8") as f:
@@ -504,6 +536,8 @@ async def _run_memory_ai_pipeline(
 
     local_context = event_context or {}
     is_main_user = (user_sender == "user")
+    role_max_context_rounds = role.get("max_context_rounds") if isinstance(role, dict) else None
+    role_allow_web_search = role.get("allow_web_search", True) if isinstance(role, dict) else True
 
     # 记忆隔离策略：
     # - 主用户: 全渠道记忆通用，onebot_private = zerochat
@@ -524,18 +558,18 @@ async def _run_memory_ai_pipeline(
         conversation_key = "all"
 
     backend_history = await get_context_messages(
-        role_id, limit=_get_memory_length(), user_message=user_message,
-        conversation_key=conversation_key,
+        role_id, limit=_get_memory_length(role_max_context_rounds), user_message=user_message,
+        conversation_key=conversation_key, max_context_rounds=role_max_context_rounds,
     )
 
     # 主用户群聊：混合 10% 全渠道记忆 + 90% 群聊记忆
     if is_main_user and conversation_key and conversation_key.startswith("group:"):
         try:
             main_history = await get_context_messages(
-                role_id, limit=_get_memory_length(), conversation_key="default_user",
-                skip_summary=True,
+                role_id, limit=_get_memory_length(role_max_context_rounds), conversation_key="default_user",
+                skip_summary=True, max_context_rounds=role_max_context_rounds,
             )
-            memory_length = _get_memory_length()
+            memory_length = _get_memory_length(role_max_context_rounds)
             main_count = max(1, int(memory_length * 0.1))
             main_part = main_history[-main_count:] if main_history and len(main_history) >= main_count else (main_history or [])
 
@@ -860,7 +894,8 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
 
     from services.ai_service import generate_moment_post
     from services.memory_service import get_memory_context_string,get_context_messages,_get_memory_length
-    history = await get_context_messages(event.role_id, limit=_get_memory_length())
+    role_max_ctx = role.get("max_context_rounds") if isinstance(role, dict) else None
+    history = await get_context_messages(event.role_id, limit=_get_memory_length(role_max_ctx), skip_summary=True, max_context_rounds=role_max_ctx)
     
     result = await generate_moment_post(role_data=role, history=history)
     

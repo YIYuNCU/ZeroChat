@@ -313,6 +313,8 @@ class RoleService {
             'menstruation_cycle': role.menstruationCycle,
             'temperature': role.temperature,
             'onebot_config': role.onebotConfig.toJson(),
+            'max_context_rounds': role.maxContextRounds,
+            'allow_web_search': role.allowWebSearch,
           },
       });
       return true;

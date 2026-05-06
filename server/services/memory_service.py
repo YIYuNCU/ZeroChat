@@ -30,6 +30,38 @@ def get_memory_json(role_id: str) -> Path:
     role_dir.mkdir(parents=True, exist_ok=True)
     return role_dir / "memory.json"
 
+# 连接池缓存 + WAL 模式
+_CONNECTION_POOL: Dict[str, sqlite3.Connection] = {}
+_POOL_LOCK = None
+try:
+    import threading
+    _POOL_LOCK = threading.Lock()
+except ImportError:
+    pass
+
+_EXECUTOR = None
+def _get_executor():
+    global _EXECUTOR
+    if _EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _EXECUTOR = ThreadPoolExecutor(max_workers=4)
+    return _EXECUTOR
+
+async def _run_db(role_id: str, fn, *args, **kwargs):
+    """在后台线程中执行数据库操作"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_get_executor(), fn, *args, **kwargs)
+
+def close_all_connections():
+    """关闭所有缓存的数据库连接（服务关闭时调用）"""
+    global _CONNECTION_POOL
+    for conn in _CONNECTION_POOL.values():
+        try:
+            conn.close()
+        except Exception:
+            pass
+    _CONNECTION_POOL.clear()
+
 def _init_db(conn: sqlite3.Connection):
     conn.execute(
         """
@@ -162,7 +194,14 @@ def _core_memory_to_list(value: Any) -> List[str]:
         return []
     return [line.strip() for line in text.splitlines() if line.strip()]
 
-def _get_memory_length() -> int:
+def _get_memory_length(max_context_rounds: Optional[int] = None) -> int:
+    """获取上下文轮数（每轮=1条用户消息+1条AI回复=2条消息）
+
+    Args:
+        max_context_rounds: 角色配置的最大上下文轮数，None 时使用默认值
+    """
+    if max_context_rounds is not None and max_context_rounds > 0:
+        return max_context_rounds * 2
     return 120
 
 
@@ -504,9 +543,27 @@ def _maybe_migrate_from_json(role_id: str, conn: sqlite3.Connection):
 
 def _get_connection(role_id: str) -> sqlite3.Connection:
     db_path = get_memory_db(role_id)
-    conn = sqlite3.connect(db_path)
+    # 检查缓存连接
+    cached = _CONNECTION_POOL.get(role_id)
+    if cached is not None:
+        try:
+            cached.execute("SELECT 1")
+            return cached
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            _CONNECTION_POOL.pop(role_id, None)
+
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     _init_db(conn)
     _maybe_migrate_from_json(role_id, conn)
+
+    if _POOL_LOCK:
+        with _POOL_LOCK:
+            _CONNECTION_POOL[role_id] = conn
+    else:
+        _CONNECTION_POOL[role_id] = conn
     return conn
 
 def load_memory(role_id: str) -> Dict:
@@ -815,6 +872,7 @@ async def get_context_messages(
     user_message: Optional[str] = None,
     conversation_key: Optional[str] = None,
     skip_summary: bool = False,
+    max_context_rounds: Optional[int] = None,
 ) -> List[Dict]:
     """
     获取对话上下文消息
@@ -824,6 +882,7 @@ async def get_context_messages(
         limit: 限制条数（兼容参数，实际使用 _get_memory_length()）
         user_message: 当前用户消息（保留参数以兼容旧调用）
         conversation_key: 记忆隔离标识
+        max_context_rounds: 角色配置的上文轮数，None 时使用默认值
             - None / "default_user" / "main_qq": zerochat + 主QQ(onebot中sender=user)
             - "group:{group_id}": 同一群聊共享记忆
             - "private:{sender_id}": 同一私聊共享记忆
@@ -833,7 +892,7 @@ async def get_context_messages(
     Returns:
         [{"role": "user/assistant", "content": "..."}]
     """
-    effective_limit = _get_memory_length()
+    effective_limit = _get_memory_length(max_context_rounds)
     if effective_limit <= 0:
         return []
     if is_tool_role_id(role_id):

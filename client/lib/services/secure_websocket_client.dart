@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 
+import 'notification_service.dart';
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
 import 'wake_lock_service.dart';
@@ -16,16 +17,22 @@ class SecureWebSocketClient {
 
   static final SecureWebSocketClient instance = SecureWebSocketClient._();
 
-  static const Duration _defaultRequestTimeout = Duration(seconds: 8);
-  static const int _maxRequestRetries = 2;
-  static const Duration _heartbeatInterval = Duration(minutes: 2);
-  static const Duration _connectivityReconnectDebounce = Duration(seconds: 2);
+  static const Duration _defaultRequestTimeout = Duration(seconds: 15);
+  static const int _maxRequestRetries = 3;
+  static const Duration _heartbeatInterval = Duration(seconds: 25);
+  static const Duration _connectivityReconnectDebounce = Duration(seconds: 3);
+  static const Duration _baseReconnectDelay = Duration(seconds: 2);
+  static const Duration _maxReconnectDelay = Duration(seconds: 60);
+  static const int _maxReconnectBackoffCount = 8;
 
   WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
   Timer? _heartbeatTimer;
   StreamSubscription<dynamic>? _connectivitySubscription;
   Timer? _connectivityReconnectTimer;
+
+  int _reconnectBackoffCount = 0;
+  Timer? _reconnectTimer;
 
   final Map<String, Completer<Map<String, dynamic>>> _pending =
       <String, Completer<Map<String, dynamic>>>{};
@@ -41,6 +48,7 @@ class SecureWebSocketClient {
   Future<void> ensureConnected() async {
     final existing = _socket;
     if (existing != null && existing.readyState == WebSocket.open) {
+      _resetBackoff();
       return;
     }
 
@@ -51,6 +59,13 @@ class SecureWebSocketClient {
     if (_connectingCompleter != null) {
       await _connectingCompleter!.future;
       return;
+    }
+
+    // Exponential backoff delay before attempting connection
+    final delay = _computeReconnectDelay();
+    if (delay > Duration.zero) {
+      debugPrint('SecureWebSocketClient: backoff waiting ${delay.inSeconds}s before reconnect');
+      await Future.delayed(delay);
     }
 
     final completer = Completer<void>();
@@ -66,6 +81,7 @@ class SecureWebSocketClient {
         headers: {'X-Auth-Token': SettingsService.instance.backendAuthToken},
       ).timeout(_defaultRequestTimeout);
 
+      _resetBackoff();
       _socket = socket;
       _subscription = socket.listen(
         _handleIncoming,
@@ -81,6 +97,7 @@ class SecureWebSocketClient {
       _startHeartbeat();
       completer.complete();
     } catch (e) {
+      _bumpBackoff();
       _handleDisconnect('connect failed: $e');
       completer.completeError(e);
       rethrow;
@@ -206,6 +223,9 @@ class SecureWebSocketClient {
   Future<void> close() async {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
 
     await _subscription?.cancel();
     _subscription = null;
@@ -433,6 +453,53 @@ class SecureWebSocketClient {
 
     _socket = null;
     _failAllPending(reason);
+
+    _scheduleReconnect(reason);
+  }
+
+  void _scheduleReconnect(String reason) {
+    _reconnectTimer?.cancel();
+    final delay = _computeReconnectDelay();
+    debugPrint(
+      'SecureWebSocketClient: scheduling reconnect in ${delay.inSeconds}s (reason: $reason)',
+    );
+    _reconnectTimer = Timer(delay, () {
+      _reconnectTimer = null;
+      unawaited(ensureConnected().catchError((_) {}));
+    });
+  }
+
+  Duration _computeReconnectDelay() {
+    if (_reconnectBackoffCount <= 0) return Duration.zero;
+    final clamped = _reconnectBackoffCount.clamp(0, _maxReconnectBackoffCount);
+    // 2^clamped seconds with jitter (±25%)
+    final base = (_baseReconnectDelay.inMilliseconds << clamped).toDouble();
+    final jitter = 0.75 + 0.5 * (DateTime.now().millisecondsSinceEpoch % 100) / 100.0;
+    final delay = (base * jitter).clamp(
+      _baseReconnectDelay.inMilliseconds.toDouble(),
+      _maxReconnectDelay.inMilliseconds.toDouble(),
+    );
+    return Duration(milliseconds: delay.round());
+  }
+
+  void _resetBackoff() {
+    final wasDisconnected = _reconnectBackoffCount > 0;
+    _reconnectBackoffCount = 0;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    if (wasDisconnected) {
+      unawaited(NotificationService.instance.clearConnectionLostNotification());
+    }
+  }
+
+  void _bumpBackoff() {
+    if (_reconnectBackoffCount < _maxReconnectBackoffCount) {
+      _reconnectBackoffCount += 1;
+    }
+    // 退避达到 3 次以上时通知用户连接已断开
+    if (_reconnectBackoffCount >= 3) {
+      unawaited(NotificationService.instance.showConnectionLostNotification());
+    }
   }
 
   void _failAllPending(String reason) {

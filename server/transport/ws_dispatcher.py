@@ -402,6 +402,16 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                 }
             ),
             "metadata": role_model.metadata or {},
+            "max_context_rounds": (
+                role_model.max_context_rounds
+                if role_model.max_context_rounds is not None
+                else 10
+            ),
+            "allow_web_search": (
+                role_model.allow_web_search
+                if role_model.allow_web_search is not None
+                else True
+            ),
             "created_at": datetime.now().isoformat(),
         }
         roles.save_role(role_model.id, role_data)

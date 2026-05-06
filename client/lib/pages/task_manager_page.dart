@@ -18,6 +18,7 @@ class TaskManagerPage extends StatefulWidget {
 
 class _TaskManagerPageState extends State<TaskManagerPage> {
   List<ScheduledTask> _tasks = [];
+  bool _isAdding = false;
 
   @override
   void initState() {
@@ -139,7 +140,7 @@ class _TaskManagerPageState extends State<TaskManagerPage> {
 
     showDialog(
       context: context,
-      builder: (context) => StatefulBuilder(
+      builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           title: const Text('添加定时任务'),
           content: SingleChildScrollView(
@@ -227,31 +228,65 @@ class _TaskManagerPageState extends State<TaskManagerPage> {
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: _isAdding ? null : () => Navigator.pop(context),
               child: const Text('取消'),
             ),
             ElevatedButton(
-              onPressed: () async {
-                final message = messageController.text.trim();
-                if (message.isEmpty) return;
+              onPressed: _isAdding
+                  ? null
+                  : () async {
+                      final message = messageController.text.trim();
+                      if (message.isEmpty) return;
 
-                await TaskService.addReminder(
-                  chatId: widget.roleId,
-                  roleId: widget.roleId,
-                  message: message,
-                  triggerTime: selectedTime,
-                );
+                      // 验证触发时间不能是过去
+                      if (selectedTime.isBefore(DateTime.now())) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('触发时间不能是过去的时间')),
+                          );
+                        }
+                        return;
+                      }
 
-                if (context.mounted) {
-                  Navigator.pop(context);
-                  _loadTasks();
-                }
-              },
+                      setState(() => _isAdding = true);
+                      try {
+                        await TaskService.addReminder(
+                          chatId: widget.roleId,
+                          roleId: widget.roleId,
+                          message: message,
+                          triggerTime: selectedTime,
+                        );
+
+                        if (context.mounted) {
+                          Navigator.pop(dialogContext);
+                          _loadTasks();
+                        }
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('添加失败：$e')),
+                          );
+                        }
+                      } finally {
+                        if (context.mounted) {
+                          setState(() => _isAdding = false);
+                        }
+                      }
+                    },
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF07C160),
                 foregroundColor: Colors.white,
               ),
-              child: const Text('添加'),
+              child: _isAdding
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Text('添加'),
             ),
           ],
         ),

@@ -13,6 +13,7 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
 
   bool _initialized = false;
+  int _lastBadgeCount = 0;
 
   /// 当前是否在聊天页面（避免重复通知）
   String? _currentChatId;
@@ -52,6 +53,13 @@ class NotificationService {
     _currentChatId = chatId;
   }
 
+  /// 同步角标（从外部未读数更新）
+  Future<void> syncBadge(int totalUnread) async {
+    if (totalUnread == _lastBadgeCount) return;
+    _lastBadgeCount = totalUnread;
+    await setBadgeCount(totalUnread);
+  }
+
   /// 显示消息通知
   Future<void> showMessageNotification({
     required String chatId,
@@ -66,7 +74,7 @@ class NotificationService {
     }
 
     try {
-      // Android 通知详情
+      // Android 通知详情（带分组）
       final androidDetails = AndroidNotificationDetails(
         'zerochat_messages',
         '消息通知',
@@ -75,6 +83,7 @@ class NotificationService {
         priority: Priority.high,
         showWhen: true,
         category: AndroidNotificationCategory.message,
+        groupKey: 'zerochat_chat_$chatId',
         styleInformation: BigTextStyleInformation(
           message,
           contentTitle: senderName,
@@ -83,10 +92,11 @@ class NotificationService {
       );
 
       // iOS 通知详情
-      const iosDetails = DarwinNotificationDetails(
+      final iosDetails = DarwinNotificationDetails(
         presentAlert: true,
         presentBadge: true,
         presentSound: true,
+        threadIdentifier: 'zerochat_chat_$chatId',
       );
 
       final details = NotificationDetails(
@@ -107,6 +117,47 @@ class NotificationService {
     } catch (e) {
       debugPrint('NotificationService: Error showing notification: $e');
     }
+  }
+
+  /// 显示连接断开通知
+  Future<void> showConnectionLostNotification() async {
+    try {
+      const androidDetails = AndroidNotificationDetails(
+        'zerochat_connection',
+        '连接状态',
+        channelDescription: 'ZeroChat 连接状态通知',
+        importance: Importance.low,
+        priority: Priority.defaultPriority,
+        showWhen: true,
+        ongoing: false,
+        autoCancel: true,
+      );
+
+      const iosDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: false,
+        presentSound: false,
+      );
+
+      final details = NotificationDetails(
+        android: androidDetails,
+        iOS: iosDetails,
+      );
+
+      await _notifications.show(
+        -1, // 固定 ID 用于连接状态
+        '连接已断开',
+        'ZeroChat 与服务器的连接已断开，正在尝试重连...',
+        details,
+      );
+    } catch (e) {
+      debugPrint('NotificationService: Error showing connection notification: $e');
+    }
+  }
+
+  /// 清除连接断开通知
+  Future<void> clearConnectionLostNotification() async {
+    await _notifications.cancel(-1);
   }
 
   /// 使用指定数量更新角标

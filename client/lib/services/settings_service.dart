@@ -74,7 +74,7 @@ class SettingsService extends ChangeNotifier {
 
   // ========== 后台运行 ==========
   bool _backgroundRuntimeEnabled = true;
-  int _backgroundPollIntervalSeconds = 45;
+  int _backgroundPollIntervalSeconds = 30;
   int _backgroundWatchdogIntervalSeconds = 30;
 
   // ========== Getters ==========

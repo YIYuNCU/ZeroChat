@@ -144,6 +144,10 @@ class RoleCreate(BaseModel):
     # OneBot V11 接口配置
     onebot_config: Optional[OneBotConfig] = None
 
+    # 上下文设置
+    max_context_rounds: Optional[int] = None
+    allow_web_search: Optional[bool] = None
+
     # 扩展元数据
     tags: Optional[List[str]] = []
     metadata: Optional[Dict[str, Any]] = {}
@@ -168,6 +172,8 @@ class RoleUpdate(BaseModel):
     ai_temperature: Optional[float] = None
     gender: Optional[str] = None
     menstruation_cycle: Optional[MenstruationCycle] = None
+    max_context_rounds: Optional[int] = None
+    allow_web_search: Optional[bool] = None
 
 class MemoryUpdate(BaseModel):
     """记忆更新"""
@@ -260,6 +266,12 @@ def save_role(role_id: str, data: Dict):
     data["updated_at"] = datetime.now().isoformat()
     with open(profile_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    # 使 ai_behavior 中的角色缓存失效
+    try:
+        from routers.ai_behavior import invalidate_role_cache
+        invalidate_role_cache(role_id)
+    except ImportError:
+        pass
 
 def normalize_role_avatar_url(role: Dict[str, Any], request: Request) -> Dict[str, Any]:
     role_copy = dict(role)
@@ -385,6 +397,11 @@ async def delete_role(role_id: str):
     role_dir = ROLES_DIR / role_id
     if role_dir.exists():
         shutil.rmtree(role_dir)
+    try:
+        from routers.ai_behavior import invalidate_role_cache
+        invalidate_role_cache(role_id)
+    except ImportError:
+        pass
     return {"success": True}
 
 # ========== 记忆管理 ==========
