@@ -503,14 +503,22 @@ async def _run_memory_ai_pipeline(
     from services.vector_memory import embed_and_store
 
     local_context = event_context or {}
+    is_main_user = (user_sender == "user")
 
-    # 记忆隔离：根据 origin/sender_id/group_id 决定加载哪些记忆
-    # 群聊/私聊优先，确保主用户在群内的消息也存入群记忆
-    if origin == "onebot_group" and group_id:
+    # 记忆隔离策略：
+    # - 主用户: 全渠道记忆通用，onebot_private = zerochat
+    # - 主用户在群聊: 10% 全渠道记忆 + 90% 群聊记忆（按时间排序）
+    # - 其他用户: 每个渠道独立记忆上下文
+    if is_main_user and origin.startswith("onebot"):
+        if origin == "onebot_group" and group_id:
+            conversation_key = f"group:{group_id}"
+        else:
+            conversation_key = "default_user"
+    elif origin == "onebot_group" and group_id:
         conversation_key = f"group:{group_id}"
     elif origin == "onebot_private" and sender_id:
         conversation_key = f"private:{sender_id}"
-    elif origin == "zerochat" or (origin.startswith("onebot") and user_sender == "user"):
+    elif origin == "zerochat":
         conversation_key = "default_user"
     else:
         conversation_key = "all"
@@ -519,8 +527,41 @@ async def _run_memory_ai_pipeline(
         role_id, limit=_get_memory_length(), user_message=user_message,
         conversation_key=conversation_key,
     )
-    client_history = _normalize_history_items(local_context.get("history"))
-    history = backend_history if backend_history else client_history
+
+    # 主用户群聊：混合 10% 全渠道记忆 + 90% 群聊记忆
+    if is_main_user and conversation_key and conversation_key.startswith("group:"):
+        try:
+            main_history = await get_context_messages(
+                role_id, limit=_get_memory_length(), conversation_key="default_user",
+                skip_summary=True,
+            )
+            memory_length = _get_memory_length()
+            main_count = max(1, int(memory_length * 0.1))
+            main_part = main_history[-main_count:] if main_history and len(main_history) >= main_count else (main_history or [])
+
+            def _get_msg_time(item):
+                try:
+                    return json.loads(item["content"]).get("time", "")
+                except Exception:
+                    return ""
+
+            # 去重合并后按时间排序
+            all_items = list(backend_history)
+            seen = {(item["role"], item["content"]) for item in backend_history}
+            for item in main_part:
+                key = (item["role"], item["content"])
+                if key not in seen:
+                    seen.add(key)
+                    all_items.append(item)
+
+            all_items.sort(key=_get_msg_time)
+            history = all_items[-memory_length:]
+        except Exception as e:
+            print(f"混合记忆上下文构建失败：{e}")
+            history = backend_history if backend_history else _normalize_history_items(local_context.get("history"))
+    else:
+        client_history = _normalize_history_items(local_context.get("history"))
+        history = backend_history if backend_history else client_history
 
     vector_memories: List[Dict[str, Any]] = []
     try:
@@ -546,7 +587,6 @@ async def _run_memory_ai_pipeline(
     extra_context = "\n\n".join(combined_parts) if combined_parts else None
 
     normalized_request_id = str(request_id or local_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
-    is_main_user = (user_sender == "user")
 
     result = await generate_with_role(
         role_data=role,
@@ -558,6 +598,8 @@ async def _run_memory_ai_pipeline(
         sender=user_sender,
     )
 
+    vector_memories_count = len(vector_memories)
+
     if not result.get("success"):
         return {
             "success": False,
@@ -567,6 +609,7 @@ async def _run_memory_ai_pipeline(
             "history": history,
             "extra_context": extra_context,
             "new_core": None,
+            "vector_memory_count": vector_memories_count,
         }
 
     ai_reply = _sanitize_reply_content(result.get("content") or "")
@@ -603,7 +646,7 @@ async def _run_memory_ai_pipeline(
             group_id=group_id,
             embed=is_main_user,
         )
-        if is_main_user and len(ai_reply.strip()) >= 30:
+        if is_main_user and len(ai_reply.strip()) >= 30 and not is_tool_role_id(role_id):
             try:
                 asyncio.ensure_future(embed_and_store(
                     role_id, ai_reply, role="assistant",
@@ -624,6 +667,7 @@ async def _run_memory_ai_pipeline(
         "history": history,
         "extra_context": extra_context,
         "new_core": new_core,
+        "vector_memory_count": vector_memories_count,
     }
 
 async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
@@ -640,7 +684,15 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     search_context = ""
     enable_connection = role.get("enable_connection", False)
     if enable_connection:
-        result = await sequential_memory_generation(role_id, "1000000000003", user_message)
+        seq_origin = str(event_context.get("origin") or "zerochat").strip() or "zerochat"
+        seq_sender_id = str(event_context.get("sender_id") or "").strip()
+        seq_group_id = str(event_context.get("onebot_group_id") or event_context.get("group_id") or "").strip()
+        result = await sequential_memory_generation(
+            role_id, "1000000000003", user_message,
+            conv_origin=seq_origin,
+            conv_group_id=seq_group_id,
+            conv_sender_id=seq_sender_id,
+        )
     else:
         result = "noneed"
     if result != "noneed" and result is not None:
@@ -701,7 +753,8 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     history = pipeline_result.get("history") or []
     new_core = pipeline_result.get("new_core")
 
-    print(f"AI 事件触发：角色 {role.get('name')} 收到消息，历史消息数：{len(history)}, 额外上下文长度：{len(extra_context) if extra_context else 0}")
+    vector_memory_count = pipeline_result.get("vector_memory_count", 0)
+    print(f"AI 事件触发：角色 {role.get('name')} 收到消息，历史消息数：{len(history)}, 额外上下文长度：{len(extra_context) if extra_context else 0}, 向量记忆数：{vector_memory_count}")
     if new_core != "noneed" and new_core is not None:
         print(f"记忆总结触发：角色 {role.get('name')} 生成了新的核心记忆{new_core}")
     elif new_core is None:

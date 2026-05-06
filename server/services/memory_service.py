@@ -727,7 +727,9 @@ def append_short_term(
         # memory.json 由前端维护，后端仅保证 request_id 在 DB 记录中可用。
 
     # 对用户消息异步生成向量嵌入，存入向量记忆库
-    if embed and role == "user" and len(content.strip()) >= 10:
+    # 工具角色不生成向量嵌入
+    if embed and role == "user" and len(content.strip()) >= 10 \
+            and not is_tool_role_id(role_id):
         try:
             asyncio.ensure_future(embed_and_store(
                 role_id, normalized_content, role="user",
@@ -736,25 +738,48 @@ def append_short_term(
         except Exception:
             pass
 
-async def trigger_chat_summary(worker_id:str,role_id: str) -> Optional[str]:
+async def trigger_chat_summary(
+    worker_id: str,
+    role_id: str,
+    conv_origin: str = "system",
+    conv_group_id: Optional[str] = None,
+    conv_sender_id: Optional[str] = None,
+) -> Optional[str]:
     """
     触发记忆总结（内部调用，不暴露给前端）
-    
+
+    Args:
+        conv_origin: 渠道 origin，用于将总结记录存储到对应渠道上下文中
+        conv_group_id: 群聊 ID（onebot_group 时使用）
+        conv_sender_id: 发送者 ID（onebot_private 时使用）
+
     Returns:
         新的核心记忆内容，或 None（如果不需要总结）
     """
     # 导入 AI 服务
     from services.ai_service import call_ai_direct
     try:
-        role_memory = load_memory(role_id)
-        short_term = role_memory.get("short_term", [])
+        # 根据渠道过滤短期记忆，避免跨频道污染总结输入
+        effective_limit = _get_memory_length()
+        if conv_origin == "onebot_group" and conv_group_id:
+            summary_where = "WHERE origin = 'onebot_group' AND group_id = ?"
+            summary_params = [conv_group_id]
+        elif conv_origin == "onebot_private" and conv_sender_id:
+            summary_where = "WHERE origin = 'onebot_private' AND sender_id = ?"
+            summary_params = [conv_sender_id]
+        else:
+            summary_where = "WHERE origin IN ('zerochat', 'proactive', 'system') OR (origin LIKE 'onebot%' AND sender = 'user')"
+            summary_params = []
 
-        # 构建总结提示
-        conversation = "\n".join([
-            str(m.get("content", ""))
-            for m in short_term[-_get_memory_length():]
-        ])
-        
+        with _get_connection(role_id) as conn:
+            count = conn.execute(f"SELECT COUNT(*) FROM short_term {summary_where}", summary_params).fetchone()[0]
+            offset = max(0, count - effective_limit)
+            rows = conn.execute(
+                f"SELECT content FROM short_term {summary_where} ORDER BY id ASC LIMIT ? OFFSET ?",
+                summary_params + [effective_limit, offset]
+            ).fetchall()
+        conversation = "\n".join([str(row[0] or "") for row in rows])
+
         prompt = f"最近对话：{conversation}"
         from routers.roles import load_role
         worker_data = load_role(worker_id)
@@ -769,8 +794,12 @@ async def trigger_chat_summary(worker_id:str,role_id: str) -> Optional[str]:
         result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1))
         if result["success"] and result["content"]:
             new_memory = result["content"].strip()
-            append_short_term(role_id, "user", "system:触发记忆总结", origin="system", sender="system")
-            append_short_term(role_id, "assistant", f"记忆总结结果：{new_memory}", origin="system", sender="memory_summary")
+            append_short_term(role_id, "user", "system:触发记忆总结",
+                              origin=conv_origin, sender="system",
+                              group_id=conv_group_id, sender_id=conv_sender_id)
+            append_short_term(role_id, "assistant", f"记忆总结结果：{new_memory}",
+                              origin=conv_origin, sender="memory_summary",
+                              group_id=conv_group_id, sender_id=conv_sender_id)
             return new_memory
         else:
             print(f"记忆总结失败：{result}")
@@ -785,6 +814,7 @@ async def get_context_messages(
     limit: int = 20,
     user_message: Optional[str] = None,
     conversation_key: Optional[str] = None,
+    skip_summary: bool = False,
 ) -> List[Dict]:
     """
     获取对话上下文消息
@@ -798,6 +828,7 @@ async def get_context_messages(
             - "group:{group_id}": 同一群聊共享记忆
             - "private:{sender_id}": 同一私聊共享记忆
             - "all": 不过滤
+        skip_summary: 跳过触发对话总结（混合上下文时使用，避免重复触发）
 
     Returns:
         [{"role": "user/assistant", "content": "..."}]
@@ -813,20 +844,20 @@ async def get_context_messages(
     where_params: list = []
     if conversation_key and conversation_key.startswith("group:"):
         group_id_val = conversation_key[6:]
-        where_clause = "WHERE (origin = 'zerochat') OR (origin = 'onebot_group' AND group_id = ?)"
+        where_clause = "WHERE (origin = 'onebot_group' AND group_id = ?)"
         where_params = [group_id_val]
     elif conversation_key and conversation_key.startswith("private:"):
         sender_id_val = conversation_key[8:]
-        where_clause = "WHERE (origin = 'zerochat') OR (origin = 'onebot_private' AND sender_id = ?)"
+        where_clause = "WHERE (origin = 'onebot_private' AND sender_id = ?)"
         where_params = [sender_id_val]
     elif conversation_key != "all":
-        # default_user / main_qq / None: 默认前端 + 主QQ + 主动消息
-        where_clause = "WHERE origin IN ('zerochat', 'proactive') OR (origin LIKE 'onebot%' AND sender = 'user')"
+        # default_user: 全渠道主用户记忆 + 零前端 + 系统
+        where_clause = "WHERE origin IN ('zerochat', 'proactive', 'system') OR (origin LIKE 'onebot%' AND sender = 'user')"
 
+    overlap = max(1, int(effective_limit * 0.1))
+    slide = effective_limit - overlap
+    virtual_start_key = f"virtual_block_start:{conversation_key or 'default'}"
     need_trigger_summary = False
-    block_start = 0
-    # meta key 按 conversation_key 隔离，避免多渠道交替触发总结
-    meta_block_key = f"last_context_block_start:{conversation_key or 'default'}"
 
     with _get_connection(role_id) as conn:
         count_sql = f"SELECT COUNT(*) FROM short_term {where_clause}"
@@ -835,25 +866,38 @@ async def get_context_messages(
         if total == 0:
             return []
 
-        block_start = ((total - 1) // effective_limit) * effective_limit
-        last_block_value = _get_meta(conn, meta_block_key, "-1")
-        try:
-            last_block = int(last_block_value)
-        except (TypeError, ValueError):
-            last_block = -1
+        virtual_start = int(_get_meta(conn, virtual_start_key, "0"))
 
-        if last_block != block_start and (conversation_key == None or conversation_key == "default_user"):
-            _set_meta(conn, meta_block_key, str(block_start))
+        if not skip_summary and total - virtual_start >= effective_limit:
+            virtual_start += slide
+            if total - virtual_start >= effective_limit:
+                virtual_start = total - effective_limit + overlap
+            _set_meta(conn, virtual_start_key, str(virtual_start))
             need_trigger_summary = True
 
     if need_trigger_summary:
-        content = await trigger_chat_summary(worker_id="1000000000002", role_id=role_id)
+        conv_origin = "system"
+        conv_group_id = None
+        conv_sender_id = None
+        if conversation_key and conversation_key.startswith("group:"):
+            conv_origin = "onebot_group"
+            conv_group_id = conversation_key[6:]
+        elif conversation_key and conversation_key.startswith("private:"):
+            conv_origin = "onebot_private"
+            conv_sender_id = conversation_key[8:]
+        content = await trigger_chat_summary(
+            worker_id="1000000000002", role_id=role_id,
+            conv_origin=conv_origin,
+            conv_group_id=conv_group_id,
+            conv_sender_id=conv_sender_id,
+        )
         if not content:
-            print(f"触发对话总结失败，无法获取新的上下文消息")
+            logger.error(f"触发对话总结失败，无法获取新的上下文消息")
 
+    query_offset = virtual_start
     with _get_connection(role_id) as conn:
         query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?"
-        rows = conn.execute(query_sql, where_params + [effective_limit, block_start]).fetchall()
+        rows = conn.execute(query_sql, where_params + [effective_limit, query_offset]).fetchall()
 
     context = [
         {
@@ -978,9 +1022,21 @@ def should_summarize(role_id: str) -> bool:
     
     return count >= _get_memory_length()
 
-async def sequential_memory_generation(role_id:str,worker_id:str,now_content:str) -> Optional[str]:
+async def sequential_memory_generation(
+    role_id: str,
+    worker_id: str,
+    now_content: str,
+    conv_origin: Optional[str] = None,
+    conv_group_id: Optional[str] = None,
+    conv_sender_id: Optional[str] = None,
+) -> Optional[str]:
     """
     生成衔接记忆，用于在长时间不聊天后模拟中间的场景变化，保持对话连续性
+
+    Args:
+        conv_origin: 渠道 origin，用于过滤短期记忆输入
+        conv_group_id: 群聊 ID
+        conv_sender_id: 发送者 ID
     """
     try:
         if not should_generate_sequential_memory(role_id):
@@ -992,13 +1048,33 @@ async def sequential_memory_generation(role_id:str,worker_id:str,now_content:str
     from services.ai_service import call_ai_direct
     from routers.roles import load_role
     try:
-        memory = load_memory(role_id)
+        # 根据渠道过滤短期记忆，避免跨频道污染
+        if conv_origin == "onebot_group" and conv_group_id:
+            seq_where = "WHERE origin = 'onebot_group' AND group_id = ?"
+            seq_params = [conv_group_id]
+        elif conv_origin == "onebot_private" and conv_sender_id:
+            seq_where = "WHERE origin = 'onebot_private' AND sender_id = ?"
+            seq_params = [conv_sender_id]
+        elif conv_origin is not None:
+            # 指定了渠道但非 onebot 场景 — 使用 default_user 范围
+            seq_where = "WHERE origin IN ('zerochat', 'proactive', 'system') OR (origin LIKE 'onebot%' AND sender = 'user')"
+            seq_params = []
+        else:
+            # 未指定渠道（兼容旧调用），不过滤
+            seq_where = ""
+            seq_params = []
+
+        effective_limit = _get_memory_length()
+        with _get_connection(role_id) as conn:
+            count = conn.execute(f"SELECT COUNT(*) FROM short_term {seq_where}", seq_params).fetchone()[0]
+            offset = max(0, count - effective_limit)
+            rows = conn.execute(
+                f"SELECT content FROM short_term {seq_where} ORDER BY id ASC LIMIT ? OFFSET ?",
+                seq_params + [effective_limit, offset]
+            ).fetchall()
+        conversation = "\n".join([str(row[0] or "") for row in rows])
+
         worker = load_role(worker_id)
-        short_term = memory.get("short_term", [])
-        conversation = "\n".join([
-            str(m.get("content", ""))
-            for m in short_term[-_get_memory_length():]
-        ])
         prompt = f"""历史对话内容：{conversation}\n当前对话内容：{now_content}\n当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         system_prompt = worker.get("system_prompt", "")
         messages = []
@@ -1015,14 +1091,15 @@ async def sequential_memory_generation(role_id:str,worker_id:str,now_content:str
             new_memory = result["content"].strip()
             append_short_term(role_id, "user", "system:触发衔接记忆生成", origin="system", sender="system")
             append_short_term(role_id, "assistant", f"衔接记忆内容：{new_memory}", origin="system", sender="sequential_memory")
-            # 将衔接记忆存入向量记忆库
-            try:
-                asyncio.ensure_future(embed_and_store(
-                    role_id, new_memory, role="assistant",
-                    source="sequential", min_text_length=5
-                ))
-            except Exception:
-                pass
+            # 将衔接记忆存入向量记忆库（工具角色跳过）
+            if not is_tool_role_id(role_id):
+                try:
+                    asyncio.ensure_future(embed_and_store(
+                        role_id, new_memory, role="assistant",
+                        source="sequential", min_text_length=5
+                    ))
+                except Exception:
+                    pass
             return new_memory
         else:
             print(f"衔接记忆生成失败：{result}")
@@ -1077,14 +1154,15 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
         if result["success"] and result["content"]:
             new_core = result["content"].strip()
             update_core_memory(role_need_change, new_core)
-            # 将核心记忆存入向量记忆库
-            try:
-                asyncio.ensure_future(embed_and_store(
-                    role_id, new_core, role="assistant",
-                    source="core_summary", min_text_length=5
-                ))
-            except Exception:
-                pass
+            # 将核心记忆存入向量记忆库（工具角色跳过）
+            if not is_tool_role_id(role_id):
+                try:
+                    asyncio.ensure_future(embed_and_store(
+                        role_id, new_core, role="assistant",
+                        source="core_summary", min_text_length=5
+                    ))
+                except Exception:
+                    pass
             return new_core
         else:
             print(f"记忆总结失败：{result}")

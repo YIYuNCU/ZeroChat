@@ -21,7 +21,6 @@ class OneBotConnection:
         self.role_id = role_id
         self.self_id = self_id
         self._pending_echoes: Dict[str, asyncio.Future] = {}
-        self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def send_action(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """发送 API 调用并等待 echo 响应"""
@@ -52,38 +51,6 @@ class OneBotConnection:
         if future and not future.done():
             future.set_result(data)
 
-    async def start_heartbeat(self, interval: float = 20.0):
-        """启动心跳任务"""
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            return
-        self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop(interval))
-
-    async def stop_heartbeat(self):
-        """停止心跳任务"""
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._heartbeat_task = None
-
-    async def _heartbeat_loop(self, interval: float):
-        """连接保活循环，定期发送 WebSocket ping 帧"""
-        from starlette.websockets import WebSocketState
-        while True:
-            try:
-                await asyncio.sleep(interval)
-                if self.websocket.client_state != WebSocketState.CONNECTED:
-                    break
-                await self.websocket.send_text(json.dumps({"type": "ping"}))
-                logger.debug(f"OneBot WS 保活 ping: role={self.role_id}")
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"OneBot WS 保活失败: role={self.role_id}, error={e}")
-                break
-
 
 class OneBotConnectionManager:
     """管理所有 OneBot WebSocket 连接"""
@@ -95,22 +62,18 @@ class OneBotConnectionManager:
         """注册新连接（替换同角色的旧连接）"""
         old = self._connections.pop(role_id, None)
         if old:
-            await old.stop_heartbeat()
             try:
                 await old.websocket.close()
             except Exception:
                 pass
         conn = OneBotConnection(websocket, role_id, self_id)
         self._connections[role_id] = conn
-        await conn.start_heartbeat(interval=20.0)
         logger.info(f"OneBot WS 连接建立: role={role_id}, self_id={self_id}")
         return conn
 
     def disconnect(self, role_id: str):
-        """移除连接（心跳随连接生命周期自动停止）"""
-        conn = self._connections.pop(role_id, None)
-        if conn:
-            asyncio.ensure_future(conn.stop_heartbeat())
+        """移除连接"""
+        self._connections.pop(role_id, None)
         logger.info(f"OneBot WS 连接断开: role={role_id}")
 
     def get_connection(self, role_id: str) -> Optional[OneBotConnection]:

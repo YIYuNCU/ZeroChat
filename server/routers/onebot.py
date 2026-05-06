@@ -313,17 +313,34 @@ async def _process_and_reply(
     return ""
 
 
+def _strip_action_descriptions(text: str) -> str:
+    """去除 AI 回复中残留的动作/心理/状态描写（兜底过滤）"""
+    text = re.sub(r'<[^>]+>', '', text)       # <脸红>
+    text = re.sub(r'【[^】]+】', '', text)      # 【小声说】
+    text = re.sub(r'/[^/]+/', '', text)        # /害羞地低下头/
+    text = re.sub(r'\*[^*]+\*', '', text)      # *叹气*
+    # 清理多余空白和残留标点
+    text = re.sub(r'[，、，]+$', '', text.strip())
+    return text.strip()
+
+
 async def _send_reply(
     conn,
     transformed: Dict[str, Any],
     reply_text: str,
+    raw: bool = False,
 ):
     """通过 WebSocket 连接发送回复到 QQ"""
     if not reply_text.strip():
         return
 
-    # 去除可能残留的情绪标签 [emoji_category]
-    clean_reply = re.sub(r'\s*\[[\w一-鿿]+\]\s*$', '', reply_text).strip()
+    if raw:
+        clean_reply = reply_text.strip()
+    else:
+        # 兜底过滤：去除动作描写等非对话内容
+        clean_reply = _strip_action_descriptions(reply_text)
+        # 去除可能残留的情绪标签 [emoji_category]
+        clean_reply = re.sub(r'\s*\[[\w一-鿿]+\]\s*$', '', clean_reply).strip()
     if not clean_reply:
         return
 
@@ -346,6 +363,10 @@ _HELP_TEXT = (
     "/clear - 清除当前会话记忆\n"
     "/on - 开启当前会话消息处理\n"
     "/off - 关闭当前会话消息处理\n"
+    "/allow - 将当前群聊加入白名单（群聊中使用）\n"
+    "/allow @用户 - 将用户加入白名单\n"
+    "/disallow - 将当前群聊移出白名单（群聊中使用）\n"
+    "/disallow @用户 - 将用户移出白名单\n"
     "/block @用户 - 屏蔽当前场景指定用户\n"
     "/unblock @用户 - 取消屏蔽\n"
     "/help - 显示此帮助"
@@ -454,18 +475,31 @@ async def _handle_command(
         else:
             blocked = onebot_config.get("blocked_users") or {}
             if cmd == "/block":
-                scopes = blocked.get(target_id, [])
-                if conv_key not in scopes:
-                    scopes.append(conv_key)
-                    blocked[target_id] = scopes
+                scopes = blocked.get(target_id)
+                if scopes is None:
+                    blocked[target_id] = [conv_key]
                     onebot_config["blocked_users"] = blocked
                     _persist_onebot_config(role_id, onebot_config)
                     reply = f"已在 {conv_key} 屏蔽用户 {target_id}"
-                else:
+                elif not scopes:
+                    reply = f"用户 {target_id} 已被全局屏蔽"
+                elif conv_key in scopes:
                     reply = f"用户 {target_id} 已在 {conv_key} 被屏蔽"
+                else:
+                    scopes.append(conv_key)
+                    onebot_config["blocked_users"] = blocked
+                    _persist_onebot_config(role_id, onebot_config)
+                    reply = f"已在 {conv_key} 屏蔽用户 {target_id}"
             else:  # /unblock
-                scopes = blocked.get(target_id, [])
-                if conv_key in scopes:
+                scopes = blocked.get(target_id)
+                if scopes is None:
+                    reply = f"用户 {target_id} 未被屏蔽"
+                elif not scopes:
+                    del blocked[target_id]
+                    onebot_config["blocked_users"] = blocked
+                    _persist_onebot_config(role_id, onebot_config)
+                    reply = f"已取消对用户 {target_id} 的全局屏蔽"
+                elif conv_key in scopes:
                     scopes.remove(conv_key)
                     if not scopes:
                         del blocked[target_id]
@@ -477,8 +511,70 @@ async def _handle_command(
                 else:
                     reply = f"用户 {target_id} 未在 {conv_key} 被屏蔽"
 
+    elif cmd == "/allow":
+        if not arg and transformed.get("origin") == "onebot_group" and transformed.get("group_id"):
+            allowed = onebot_config.get("allowed_groups") or []
+            gid = transformed["group_id"]
+            if gid not in allowed:
+                allowed.append(gid)
+                onebot_config["allowed_groups"] = allowed
+                _persist_onebot_config(role_id, onebot_config)
+                reply = f"已将群 {gid} 加入白名单"
+            else:
+                reply = f"群 {gid} 已在白名单中"
+        else:
+            target_id = ""
+            m = re.search(r'@(\d+)', arg)
+            if m:
+                target_id = m.group(1)
+            elif arg.isdigit():
+                target_id = arg
+            if not target_id:
+                reply = "请指定要操作的用户，格式：/allow @用户（群聊中直接使用 /allow 可将当前群加入白名单）"
+            else:
+                uid = int(target_id)
+                allowed = onebot_config.get("allowed_users") or []
+                if uid not in allowed:
+                    allowed.append(uid)
+                    onebot_config["allowed_users"] = allowed
+                    _persist_onebot_config(role_id, onebot_config)
+                    reply = f"已将用户 {uid} 加入白名单"
+                else:
+                    reply = f"用户 {uid} 已在白名单中"
+
+    elif cmd == "/disallow":
+        if not arg and transformed.get("origin") == "onebot_group" and transformed.get("group_id"):
+            allowed = onebot_config.get("allowed_groups") or []
+            gid = transformed["group_id"]
+            if gid in allowed:
+                allowed.remove(gid)
+                onebot_config["allowed_groups"] = allowed
+                _persist_onebot_config(role_id, onebot_config)
+                reply = f"已将群 {gid} 移出白名单"
+            else:
+                reply = f"群 {gid} 不在白名单中"
+        else:
+            target_id = ""
+            m = re.search(r'@(\d+)', arg)
+            if m:
+                target_id = m.group(1)
+            elif arg.isdigit():
+                target_id = arg
+            if not target_id:
+                reply = "请指定要操作的用户，格式：/disallow @用户（群聊中直接使用 /disallow 可将当前群移出白名单）"
+            else:
+                uid = int(target_id)
+                allowed = onebot_config.get("allowed_users") or []
+                if uid in allowed:
+                    allowed.remove(uid)
+                    onebot_config["allowed_users"] = allowed
+                    _persist_onebot_config(role_id, onebot_config)
+                    reply = f"已将用户 {uid} 移出白名单"
+                else:
+                    reply = f"用户 {uid} 不在白名单中"
+
     if reply is not None:
-        await _send_reply(conn, transformed, reply)
+        await _send_reply(conn, transformed, reply, raw=True)
     return reply
 
 
@@ -535,16 +631,29 @@ async def _handle_command_http(
             return "请指定要操作的用户，格式：/block @用户"
         blocked = onebot_config.get("blocked_users") or {}
         if cmd == "/block":
-            scopes = blocked.get(target_id, [])
-            if conv_key not in scopes:
-                scopes.append(conv_key)
-                blocked[target_id] = scopes
+            scopes = blocked.get(target_id)
+            if scopes is None:
+                blocked[target_id] = [conv_key]
                 onebot_config["blocked_users"] = blocked
                 _persist_onebot_config(role_id, onebot_config)
                 return f"已在 {conv_key} 屏蔽用户 {target_id}"
-            return f"用户 {target_id} 已在 {conv_key} 被屏蔽"
+            if not scopes:
+                return f"用户 {target_id} 已被全局屏蔽"
+            if conv_key in scopes:
+                return f"用户 {target_id} 已在 {conv_key} 被屏蔽"
+            scopes.append(conv_key)
+            onebot_config["blocked_users"] = blocked
+            _persist_onebot_config(role_id, onebot_config)
+            return f"已在 {conv_key} 屏蔽用户 {target_id}"
         else:  # /unblock
-            scopes = blocked.get(target_id, [])
+            scopes = blocked.get(target_id)
+            if scopes is None:
+                return f"用户 {target_id} 未被屏蔽"
+            if not scopes:
+                del blocked[target_id]
+                onebot_config["blocked_users"] = blocked
+                _persist_onebot_config(role_id, onebot_config)
+                return f"已取消对用户 {target_id} 的全局屏蔽"
             if conv_key in scopes:
                 scopes.remove(conv_key)
                 if not scopes:
@@ -555,6 +664,62 @@ async def _handle_command_http(
                 _persist_onebot_config(role_id, onebot_config)
                 return f"已在 {conv_key} 取消屏蔽用户 {target_id}"
             return f"用户 {target_id} 未在 {conv_key} 被屏蔽"
+
+    if cmd == "/allow":
+        if not arg and transformed.get("origin") == "onebot_group" and transformed.get("group_id"):
+            allowed = onebot_config.get("allowed_groups") or []
+            gid = transformed["group_id"]
+            if gid not in allowed:
+                allowed.append(gid)
+                onebot_config["allowed_groups"] = allowed
+                _persist_onebot_config(role_id, onebot_config)
+                return f"已将群 {gid} 加入白名单"
+            return f"群 {gid} 已在白名单中"
+        else:
+            target_id = ""
+            m = re.search(r'@(\d+)', arg)
+            if m:
+                target_id = m.group(1)
+            elif arg.isdigit():
+                target_id = arg
+            if not target_id:
+                return "请指定要操作的用户，格式：/allow @用户（群聊中直接使用 /allow 可将当前群加入白名单）"
+            uid = int(target_id)
+            allowed = onebot_config.get("allowed_users") or []
+            if uid not in allowed:
+                allowed.append(uid)
+                onebot_config["allowed_users"] = allowed
+                _persist_onebot_config(role_id, onebot_config)
+                return f"已将用户 {uid} 加入白名单"
+            return f"用户 {uid} 已在白名单中"
+
+    if cmd == "/disallow":
+        if not arg and transformed.get("origin") == "onebot_group" and transformed.get("group_id"):
+            allowed = onebot_config.get("allowed_groups") or []
+            gid = transformed["group_id"]
+            if gid in allowed:
+                allowed.remove(gid)
+                onebot_config["allowed_groups"] = allowed
+                _persist_onebot_config(role_id, onebot_config)
+                return f"已将群 {gid} 移出白名单"
+            return f"群 {gid} 不在白名单中"
+        else:
+            target_id = ""
+            m = re.search(r'@(\d+)', arg)
+            if m:
+                target_id = m.group(1)
+            elif arg.isdigit():
+                target_id = arg
+            if not target_id:
+                return "请指定要操作的用户，格式：/disallow @用户（群聊中直接使用 /disallow 可将当前群移出白名单）"
+            uid = int(target_id)
+            allowed = onebot_config.get("allowed_users") or []
+            if uid in allowed:
+                allowed.remove(uid)
+                onebot_config["allowed_users"] = allowed
+                _persist_onebot_config(role_id, onebot_config)
+                return f"已将用户 {uid} 移出白名单"
+            return f"用户 {uid} 不在白名单中"
 
     return None
 
@@ -708,13 +873,7 @@ async def _handle_ws_frame(
     if transformed is None:
         return
 
-    # 白名单过滤
-    reject_reason = _check_whitelist(transformed, event, onebot_config)
-    if reject_reason:
-        logger.debug(f"OneBot 消息过滤: {reject_reason}")
-        return
-
-    # 主QQ号判断：如果发送者是主QQ号，sender 设为 "user"
+    # 主QQ号判断：先识别发送者身份（需要在白名单过滤之前）
     try:
         main_user_id = int(onebot_config.get("main_user_id", 0) or 0)
     except (TypeError, ValueError):
@@ -722,11 +881,29 @@ async def _handle_ws_frame(
     if main_user_id and transformed["user_id"] == main_user_id:
         transformed["sender"] = "user"
 
-    # 系统指令拦截（仅主用户，跳过 AI 处理）
+    # 群聊 @ 检测：所有用户（包括主用户）都需要 @机器人才会处理
+    # 但主用户的 / 指令不需要 @（否则无法执行管理指令）
+    if transformed["origin"] == "onebot_group":
+        is_command = transformed["sender"] == "user" and transformed["content"].startswith("/")
+        if not is_command:
+            config_self_id = onebot_config.get("self_id") or onebot_config.get("selfId")
+            effective_self_id = config_self_id or event.self_id
+            if not _is_at_bot(event.message, effective_self_id):
+                logger.debug(f"OneBot 群消息未 @机器人: role={role_id}, sender={transformed['sender']}")
+                return
+
+    # 白名单过滤（主用户不受白名单限制，否则无法在未授权群聊执行 /allow 等指令）
+    if transformed["sender"] != "user":
+        reject_reason = _check_whitelist(transformed, event, onebot_config)
+        if reject_reason:
+            logger.debug(f"OneBot 消息过滤: {reject_reason}")
+            return
+
+    # 系统指令拦截（仅主用户的识别命令跳过聚合，直接执行）
     if transformed["sender"] == "user" and transformed["content"].startswith("/"):
         cmd_result = await _handle_command(conn, role_id, onebot_config, transformed)
         if cmd_result is not None:
-            return  # 指令已处理
+            return  # 指令已处理，不进入聚合
 
     # 会话关闭 / 用户屏蔽检查
     block_reason = _check_disabled_or_blocked(transformed, onebot_config)
@@ -810,17 +987,28 @@ async def handle_onebot_event(
     if transformed is None:
         return {"status": "ignored", "reason": "not a message event or empty content"}
 
-    reject_reason = _check_whitelist(transformed, event, onebot_config)
-    if reject_reason:
-        return {"status": "ignored", "reason": reject_reason}
-
-    # 主QQ号判断：如果发送者是主QQ号，sender 设为 "user"
+    # 主QQ号判断：先识别发送者身份（需要在白名单过滤之前）
     try:
         main_user_id = int(onebot_config.get("main_user_id", 0) or 0)
     except (TypeError, ValueError):
         main_user_id = 0
     if main_user_id and transformed["user_id"] == main_user_id:
         transformed["sender"] = "user"
+
+    # 群聊 @ 检测：所有用户（包括主用户）都需要 @机器人才会处理
+    if transformed["origin"] == "onebot_group":
+        is_command = transformed["sender"] == "user" and transformed["content"].startswith("/")
+        if not is_command:
+            config_self_id = onebot_config.get("self_id") or onebot_config.get("selfId")
+            effective_self_id = config_self_id or event.self_id
+            if not _is_at_bot(event.message, effective_self_id):
+                return {"status": "ignored", "reason": "not @bot"}
+
+    # 白名单过滤（主用户不受白名单限制）
+    if transformed["sender"] != "user":
+        reject_reason = _check_whitelist(transformed, event, onebot_config)
+        if reject_reason:
+            return {"status": "ignored", "reason": reject_reason}
 
     # 系统指令拦截（仅主用户）
     if transformed["sender"] == "user" and transformed["content"].startswith("/"):
@@ -846,6 +1034,7 @@ async def handle_onebot_event(
     # AI 处理
     try:
         reply_text = await _process_and_reply(role_id, transformed, event.message_id)
+        reply_text = _strip_action_descriptions(reply_text)
     except Exception as e:
         logger.error(f"OneBot AI 处理失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
