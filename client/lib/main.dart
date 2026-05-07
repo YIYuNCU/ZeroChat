@@ -32,37 +32,9 @@ import 'core/moments_scheduler.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // ========== 请求权限 ==========
-  await _requestPermissions();
-
-  // ========== 初始化服务 ==========
+  // ========== 最小初始化（仅本地存储，无网络请求） ==========
   await StorageService.init();
   await SettingsService.init();
-
-  // 配置意图识别服务
-  IntentService.configure(
-    apiUrl: SettingsService.instance.intentApiUrl,
-    apiKey: SettingsService.instance.intentApiKey,
-    model: SettingsService.instance.intentModel,
-    useAi: SettingsService.instance.intentEnabled,
-  );
-
-  await RoleService.init();
-  await MemoryService.init();
-  await TaskService.init();
-  await ChatListService.init();
-  await FavoriteService.init();
-  await MomentsService.init();
-  await ImageService.init();
-  await NotificationService.instance.init();
-  await BackgroundRuntimeService.init(
-    enabled: SettingsService.instance.backgroundRuntimeEnabled,
-  );
-  unawaited(SecureWebSocketClient.instance.ensureConnected());
-  RealtimeSyncService.init();
-  await ChatController.init();
-  await ProactiveMessageScheduler.instance.init();
-  await MomentsScheduler.instance.init();
 
   // 设置状态栏样式
   SystemChrome.setSystemUIOverlayStyle(
@@ -74,8 +46,85 @@ void main() async {
 
   runApp(const ZeroChatApp());
 
-  // ========== 后端同步（后台执行，不阻塞启动） ==========
+  // ========== 权限请求（不阻塞启动） ==========
+  unawaited(_requestPermissions().then((_) {
+    debugPrint('✅ Permissions requested');
+  }));
+
+  // ========== 后台初始化（不阻塞首帧渲染） ==========
+  unawaited(_initServicesInBackground());
+}
+
+Future<void> _initServicesInBackground() async {
+  // 让首帧先渲染
+  await Future<void>.delayed(const Duration(milliseconds: 50));
+
+  // 配置意图识别服务
+  IntentService.configure(
+    apiUrl: SettingsService.instance.intentApiUrl,
+    apiKey: SettingsService.instance.intentApiKey,
+    model: SettingsService.instance.intentModel,
+    useAi: SettingsService.instance.intentEnabled,
+  );
+
+  // ===== 本地服务（无网络请求，并行执行） =====
+  await Future.wait([
+    RoleService.init(),
+    ChatListService.init(),
+    FavoriteService.init(),
+    MomentsService.init(),
+    ImageService.init(),
+    NotificationService.instance.init(),
+    ChatController.init(),
+  ]);
+  debugPrint('✅ Local services initialized');
+
+  // ===== Memory/Task 本地部分（先加载缓存再发起网络同步） =====
+  // _loadCoreMemory / _loadTasks 是本地 I/O，先完成让 UI 可用
+  // 网络同步部分在后台静默执行
+  await Future.wait([
+    MemoryService.loadLocalOnly(),
+    TaskService.loadLocalOnly(),
+  ]);
+  debugPrint('✅ Memory/task cache loaded');
+
+  // ===== 后台服务 =====
+  await BackgroundRuntimeService.init(
+    enabled: SettingsService.instance.backgroundRuntimeEnabled,
+  );
+  RealtimeSyncService.init();
+  await ProactiveMessageScheduler.instance.init();
+  await MomentsScheduler.instance.init();
+  unawaited(SecureWebSocketClient.instance.ensureConnected());
+
+  // ===== 网络同步（静默后台，不阻塞任何 UI） =====
   unawaited(_syncWithBackendInBackground());
+
+  // ===== 网络服务同步（延迟执行，避免启动时集中请求） =====
+  unawaited(_syncNetworkServices());
+}
+
+Future<void> _syncNetworkServices() async {
+  // 延迟 2 秒，等核心 UI 和 WebSocket 就绪
+  await Future<void>.delayed(const Duration(seconds: 2));
+  bool anyFailed = false;
+  try {
+    await MemoryService.refreshCoreMemoryFromBackend();
+    debugPrint('✅ MemoryService backend sync complete');
+  } catch (e) {
+    debugPrint('⚠️ MemoryService backend sync failed: $e');
+    anyFailed = true;
+  }
+  try {
+    await TaskService.fetchFromBackend();
+    debugPrint('✅ TaskService backend sync complete');
+  } catch (e) {
+    debugPrint('⚠️ TaskService backend sync failed: $e');
+    anyFailed = true;
+  }
+  if (anyFailed && backendSyncNotifier.value != BackendSyncStatus.fail) {
+    backendSyncNotifier.value = BackendSyncStatus.fail;
+  }
 }
 
 Future<void> _syncWithBackendInBackground() async {
@@ -97,11 +146,17 @@ Future<void> _syncRolesFromBackendOnly() async {
 }
 
 /// 后端同步状态
+enum BackendSyncStatus { initial, syncing, success, fail }
+
+final ValueNotifier<BackendSyncStatus> backendSyncNotifier =
+    ValueNotifier(BackendSyncStatus.initial);
+
 bool _backendAvailable = false;
 bool get isBackendAvailable => _backendAvailable;
 
 /// 启动时同步后端数据
 Future<void> _syncWithBackend() async {
+  backendSyncNotifier.value = BackendSyncStatus.syncing;
   final backendUrl = SettingsService.instance.backendUrl;
   debugPrint('🔗 Backend URL: $backendUrl');
 
@@ -111,24 +166,31 @@ Future<void> _syncWithBackend() async {
   if (!isAvailable) {
     debugPrint('⚠️ Backend unavailable at: $backendUrl');
     debugPrint('⚠️ 提示：请在 API 设置页面检查服务器地址是否正确');
+    backendSyncNotifier.value = BackendSyncStatus.fail;
     return;
   }
 
   debugPrint('✅ Backend available, syncing data...');
 
-  // 启动阶段仅同步公开设置，不默认拉取密钥
-  await SettingsService.instance.syncPublicSettingsFromBackend();
+  try {
+    // 启动阶段仅同步公开设置，不默认拉取密钥
+    await SettingsService.instance.syncPublicSettingsFromBackend();
 
-  // 同步角色数据
-  await RoleService.fetchFromBackend();
+    // 同步角色数据
+    await RoleService.fetchFromBackend();
 
-  // 同步朋友圈数据
-  await MomentsService.instance.fetchFromBackend();
+    // 同步朋友圈数据
+    await MomentsService.instance.fetchFromBackend();
 
-  // 同步任务数据
-  await TaskService.fetchFromBackend();
+    // 同步任务数据
+    await TaskService.fetchFromBackend();
 
-  debugPrint('✅ Backend sync complete');
+    debugPrint('✅ Backend sync complete');
+    backendSyncNotifier.value = BackendSyncStatus.success;
+  } catch (e) {
+    debugPrint('⚠️ Backend sync failed: $e');
+    backendSyncNotifier.value = BackendSyncStatus.fail;
+  }
 }
 
 /// 请求运行时权限
@@ -233,6 +295,7 @@ class MainPage extends StatefulWidget {
 class _MainPageState extends State<MainPage> {
   int _currentIndex = 0;
   final GlobalKey<ContactsPageState> _contactsKey = GlobalKey();
+  bool _bannerDismissed = false;
 
   List<Widget> get _pages => [
     const ChatListPage(),
@@ -249,14 +312,26 @@ class _MainPageState extends State<MainPage> {
       appBar: AppBar(
         title: Text(_titles[_currentIndex]),
         actions: [
-          // 只保留 + 按钮，去掉搜索
           IconButton(
             onPressed: () => _handleAddAction(context),
             icon: const Icon(Icons.add_circle_outline, size: 24),
           ),
         ],
       ),
-      body: IndexedStack(index: _currentIndex, children: _pages),
+      body: Column(
+        children: [
+          ValueListenableBuilder<BackendSyncStatus>(
+            valueListenable: backendSyncNotifier,
+            builder: (context, status, _) {
+              if (status == BackendSyncStatus.fail && !_bannerDismissed) {
+                return _buildSyncFailBanner();
+              }
+              return const SizedBox.shrink();
+            },
+          ),
+          Expanded(child: IndexedStack(index: _currentIndex, children: _pages)),
+        ],
+      ),
       bottomNavigationBar: AppBottomTabBar(
         currentIndex: _currentIndex,
         onTap: (index) {
@@ -264,6 +339,41 @@ class _MainPageState extends State<MainPage> {
             _currentIndex = index;
           });
         },
+      ),
+    );
+  }
+
+  Widget _buildSyncFailBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      color: const Color(0xFFFFF3E0),
+      child: Row(
+        children: [
+          const Icon(Icons.wifi_off, size: 14, color: Color(0xFFE65100)),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              '网络不稳定，部分数据未同步',
+              style: const TextStyle(fontSize: 12, color: Color(0xFFE65100)),
+            ),
+          ),
+          GestureDetector(
+            onTap: () {
+              backendSyncNotifier.value = BackendSyncStatus.syncing;
+              unawaited(_syncWithBackendInBackground());
+            },
+            child: const Text(
+              '重试',
+              style: TextStyle(fontSize: 12, color: Color(0xFF07C160)),
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () => setState(() => _bannerDismissed = true),
+            child: const Icon(Icons.close, size: 14, color: Color(0xFFAAAAAA)),
+          ),
+        ],
       ),
     );
   }

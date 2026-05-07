@@ -261,23 +261,25 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
               Padding(
                 padding: const EdgeInsets.all(16),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('最大上下文轮数', style: TextStyle(fontSize: 16)),
-                        SizedBox(height: 4),
-                        Text(
-                          '每轮包含一条用户消息和一条AI回复',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF888888),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('最大上下文轮数', style: TextStyle(fontSize: 16)),
+                          SizedBox(height: 4),
+                          Text(
+                            '每轮包含一条用户消息和一条AI回复',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF888888),
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                     Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
                           onPressed: _maxContextRounds > 1
@@ -285,17 +287,28 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                               : null,
                           icon: const Icon(Icons.remove_circle_outline),
                         ),
-                        Text(
-                          '$_maxContextRounds',
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w500,
+                        GestureDetector(
+                          onTap: _showEditContextRoundsDialog,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF5F5F5),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              '$_maxContextRounds',
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
                           ),
                         ),
                         IconButton(
-                          onPressed: _maxContextRounds < 60
-                              ? () => setState(() => _maxContextRounds++)
-                              : null,
+                          onPressed: () => setState(() => _maxContextRounds++),
                           icon: const Icon(Icons.add_circle_outline),
                         ),
                       ],
@@ -559,6 +572,42 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     setState(() {
       _maxContextRounds = 60;
     });
+  }
+
+  void _showEditContextRoundsDialog() {
+    final controller = TextEditingController(text: '$_maxContextRounds');
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('最大上下文轮数'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(
+            hintText: '输入轮数（每轮=用户+AI各一条）',
+            border: OutlineInputBorder(),
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              final value = int.tryParse(controller.text.trim());
+              if (value != null && value > 0) {
+                setState(() => _maxContextRounds = value);
+              }
+              Navigator.pop(context);
+            },
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
   }
 
   List<int> _parseIntList(String text) {

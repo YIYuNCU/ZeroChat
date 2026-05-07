@@ -29,6 +29,14 @@ class MemoryService {
     );
   }
 
+  /// 仅加载本地缓存（无网络请求），用于启动加速
+  static Future<void> loadLocalOnly() async {
+    await _loadCoreMemory();
+    debugPrint(
+      'MemoryService local cache loaded: ${_coreMemory.length} core memories',
+    );
+  }
+
   // ========== 核心记忆持久化 ==========
 
   /// 加载核心记忆

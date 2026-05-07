@@ -88,6 +88,13 @@ class TaskService {
     debugPrint('TaskService initialized with ${_tasks.length} tasks');
   }
 
+  /// 仅加载本地缓存（无网络请求），用于启动加速
+  static Future<void> loadLocalOnly() async {
+    await _loadTasks();
+    await _loadQuietTime();
+    debugPrint('TaskService local cache loaded: ${_tasks.length} tasks');
+  }
+
   // ========== 安静时间管理 ==========
 
   static Future<void> _loadQuietTime() async {

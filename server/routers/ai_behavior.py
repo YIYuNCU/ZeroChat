@@ -847,6 +847,9 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
 
 async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
     """处理定时任务触发"""
+    from services.memory_service import (
+        _if_in_menstruation, _get_menstruation_cycle_info
+    )
 
     role_id = event.role_id
     task_prompt = event.content or ""
@@ -855,19 +858,36 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
     request_id = str(task_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
     attached_json = str(task_context.get("attached_json") or "").strip() or None
 
+    extra_parts: List[str] = []
+    backend_moments_context = _build_moments_chat_context(role_id)
+    if backend_moments_context:
+        extra_parts.append(backend_moments_context)
+    in_menstruation, menstruation_day = _if_in_menstruation(role_id)
+    cycle_info = _get_menstruation_cycle_info(role_id)
+    if in_menstruation is True and menstruation_day is not None:
+        extra_parts.append(f"\n生理期数据：你当前处于生理期第{menstruation_day}天，预计持续时间{cycle_info['period_length']}天，请考虑这一点对你的情绪和状态的影响。\n")
+    elif in_menstruation is False and menstruation_day is not None:
+        extra_parts.append(f"\n生理期数据：你当前不处于生理期，预计还有{menstruation_day}天来生理期。\n")
+    attached_json = role.get("attached_json_content", "")
+    if not attached_json:
+        attached_json = str(task_context.get("attached_json") or "").strip()
+    if attached_json:
+        extra_parts.append(f"[外挂记录]\n{attached_json}")
+
     pipeline_result = await _run_memory_ai_pipeline(
         role=role,
         role_id=role_id,
         user_message=task_prompt,
         event_context=task_context,
+        extra_parts=extra_parts if extra_parts else None,
         task_id=task_id,
         request_id=request_id,
-        attached_json=attached_json,
-        origin=str(task_context.get("origin") or "task").strip() or "task",
-        user_sender=str(task_context.get("sender") or "scheduler").strip() or "scheduler",
-        include_user_memory=False,
+        attached_json=attached_json or None,
+        origin=str(task_context.get("origin") or "zerochat").strip() or "zerochat",
+        user_sender=str(task_context.get("sender") or "system").strip() or "system",
+        include_user_memory=True,
         include_assistant_memory=True,
-        trigger_summary_after_reply=False,
+        trigger_summary_after_reply=True,
     )
     if not pipeline_result.get("success"):
         return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
