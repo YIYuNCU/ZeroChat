@@ -854,15 +854,31 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
         padding: const EdgeInsets.symmetric(vertical: 8),
         child: Center(
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.only(left: 16, right: 4, top: 6, bottom: 6),
             decoration: BoxDecoration(
               color: const Color(0xFFFFEEEE),
               borderRadius: BorderRadius.circular(4),
               border: Border.all(color: const Color(0xFFFFCCCC)),
             ),
-            child: Text(
-              message.content,
-              style: const TextStyle(color: Color(0xFFFF4444), fontSize: 13),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    message.content,
+                    style: const TextStyle(color: Color(0xFFFF4444), fontSize: 13),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                InkWell(
+                  onTap: () => _deleteMessage(message),
+                  borderRadius: BorderRadius.circular(12),
+                  child: const Padding(
+                    padding: EdgeInsets.all(4),
+                    child: Icon(Icons.close, size: 14, color: Color(0xFFFF8888)),
+                  ),
+                ),
+              ],
             ),
           ),
         ),

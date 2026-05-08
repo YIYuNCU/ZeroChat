@@ -187,7 +187,7 @@ async def _trigger_task(task: Dict):
         await _event_callback({
             "role_id": task.get("role_id"),
             "event_type": "task",
-            "content": task.get("ai_prompt", task.get("message", "")),
+            "content": task.get("ai_prompt") or task.get("message", ""),
             "context": {
                 "task_id": task.get("id"),
                 "chat_id": task.get("chat_id"),

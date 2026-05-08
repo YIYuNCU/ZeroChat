@@ -1007,10 +1007,16 @@ class ChatController extends ChangeNotifier {
 
     // 仅通过 WebSocket 通信，无直连回退
     debugPrint('ChatController: WebSocket chat failed: ${submitResponse.error}');
+    // 避免连续重复的错误消息：如果最后一条消息已经是错误，不再重复添加
+    final lastMsg = MessageStore.instance.getLastMessage(chatId);
+    if (lastMsg != null && lastMsg.senderId == 'error') {
+      debugPrint('ChatController: skipping duplicate error message for $chatId');
+      return null;
+    }
     final errorMessage = createMessage(
       senderId: 'error',
       receiverId: 'me',
-      content: '消息发送失败：后端WebSocket不可用',
+      content: '消息发送失败：网络连接中断，请检查后端服务是否运行',
     );
     await MessageStore.instance.addMessage(chatId, errorMessage);
     return null;
