@@ -227,4 +227,7 @@ client/build/
 *.bin
 .dart_tool/
 .claude/
+client/.vscode/tasks.json
+client/android/local.properties
 CLAUDE.md
+AGENTS.md
