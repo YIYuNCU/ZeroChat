@@ -1,0 +1,126 @@
+"""
+Vision / 图片识别共享工具模块
+提供 OneBot 与 WebSocket 前端共用的图片识别处理逻辑
+"""
+import base64
+import logging
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+from services.memory_service import append_short_term
+from core.utils import is_tool_role_id
+
+logger = logging.getLogger(__name__)
+
+
+def guess_image_mime(data: bytes) -> Optional[str]:
+    """从文件头推测图片 MIME 类型"""
+    if data[:3] == b'\xff\xd8\xff':
+        return "image/jpeg"
+    if data[:4] == b'\x89PNG':
+        return "image/png"
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        return "image/gif"
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return "image/webp"
+    return None
+
+
+def normalize_chat_completions_endpoint(api_url: str) -> str:
+    """规范化 API URL 到 /chat/completions 路径"""
+    value = str(api_url or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if value.endswith("/chat/completions"):
+        return value
+    if value.endswith("/v1"):
+        return f"{value}/chat/completions"
+    if "/v1/" in value:
+        return f"{value.rstrip('/')}/chat/completions"
+    return f"{value}/v1/chat/completions"
+
+
+def resolve_vision_config() -> Dict[str, str]:
+    """统一解析 Vision 配置，回退到全局 AI 配置"""
+    from services import settings_service
+
+    vision_cfg = settings_service.get_vision_config()
+    global_ai = settings_service.get_ai_config()
+
+    return {
+        "api_url": str(vision_cfg.get("api_url") or "").strip() or str(global_ai.get("api_url") or "").strip(),
+        "api_key": str(vision_cfg.get("api_key") or "").strip() or str(global_ai.get("api_key") or "").strip(),
+        "model": str(vision_cfg.get("model") or "").strip() or str(global_ai.get("model") or "gpt-4o").strip(),
+        "mode": str(vision_cfg.get("mode") or "standalone").strip().lower(),
+    }
+
+
+def build_vision_messages(
+    image_data_url: str,
+    prompt: str,
+    system_prompt: str = "",
+) -> List[Dict[str, Any]]:
+    """构造多模态 Vision API 请求消息数组"""
+    messages: List[Dict[str, Any]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": image_data_url}},
+            {"type": "text", "text": prompt},
+        ],
+    })
+    return messages
+
+
+async def call_vision_api(
+    api_url: str,
+    api_key: str,
+    body: Dict[str, Any],
+) -> Optional[str]:
+    """调用 OpenAI 兼容的 Vision API，返回图片描述文本。失败返回 None"""
+    endpoint = normalize_chat_completions_endpoint(api_url)
+    if not endpoint or not api_key:
+        return None
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(endpoint, json=body, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return content.strip() if content else None
+    except Exception as e:
+        logger.warning(f"Vision API 调用失败: {e}")
+        return None
+
+
+def append_vision_memory(
+    role_id: Optional[str],
+    user_prompt: str,
+    final_reply: str,
+    mode: str,
+    image_understanding: Optional[str] = None,
+) -> None:
+    """将识图过程关键信息写入短期记忆"""
+    rid = str(role_id or "").strip()
+    if not rid or is_tool_role_id(rid):
+        return
+
+    prompt_text = (user_prompt or "").strip() or "请描述这张图片的内容"
+
+    understanding = str(image_understanding or "").strip()
+    if understanding:
+        append_short_term(rid, "user", f"[图片识别结果/{mode}] {understanding}")
+    else:
+        append_short_term(rid, "user", f"[图片识别请求] {prompt_text}")
+        append_short_term(rid, "assistant", f"[图片识别结果/{mode}] {(final_reply or '').strip()}")
+
+    reply_text = (final_reply or "").strip()
+    if reply_text and (not understanding or reply_text != understanding):
+        append_short_term(rid, "assistant", f"[图片识别回复] {reply_text}")

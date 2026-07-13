@@ -5,10 +5,10 @@ from datetime import datetime
 from fastapi import WebSocket, WebSocketDisconnect
 
 from services.security_service import (
-    DEFAULT_AUTH_TOKEN,
-    DEFAULT_ENCRYPTION_SECRET,
     decrypt_payload,
     encrypt_payload,
+    get_auth_token,
+    get_encryption_secret,
 )
 from transport.push_hub import register_client, unregister_client
 from transport.ws_dispatcher import handle_ws_action
@@ -51,11 +51,11 @@ def _is_closed_send_error(exc: Exception) -> bool:
 
 
 def create_secure_websocket_endpoint(config: dict, logger):
+    auth_token = get_auth_token(config)
+    encryption_secret = get_encryption_secret(config)
+
     async def secure_websocket_endpoint(websocket: WebSocket):
         await websocket.accept()
-
-        auth_token = config.get("auth_token") or DEFAULT_AUTH_TOKEN
-        encryption_secret = config.get("encryption_secret") or DEFAULT_ENCRYPTION_SECRET
 
         token_from_header = websocket.headers.get("X-Auth-Token", "")
         incoming_token = token_from_header

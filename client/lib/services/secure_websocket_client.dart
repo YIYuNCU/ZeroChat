@@ -18,10 +18,11 @@ class SecureWebSocketClient {
   static final SecureWebSocketClient instance = SecureWebSocketClient._();
 
   static const Duration _defaultRequestTimeout = Duration(seconds: 15);
+  static const Duration _connectTimeout = Duration(seconds: 20);
   static const int _maxRequestRetries = 3;
   static const Duration _heartbeatInterval = Duration(seconds: 25);
   static const Duration _connectivityReconnectDebounce = Duration(seconds: 3);
-  static const Duration _baseReconnectDelay = Duration(seconds: 2);
+  static const Duration _baseReconnectDelay = Duration(seconds: 1);
   static const Duration _maxReconnectDelay = Duration(seconds: 60);
   static const int _maxReconnectBackoffCount = 8;
 
@@ -32,6 +33,7 @@ class SecureWebSocketClient {
   Timer? _connectivityReconnectTimer;
 
   int _reconnectBackoffCount = 0;
+  int _heartbeatFailCount = 0;
   Timer? _reconnectTimer;
 
   final Map<String, Completer<Map<String, dynamic>>> _pending =
@@ -41,6 +43,10 @@ class SecureWebSocketClient {
 
   Completer<void>? _connectingCompleter;
   int _requestSeq = 0;
+
+  /// Called after a successful reconnection (not first connect).
+  /// Used by ChatController to recover missed pushes.
+  void Function()? onReconnected;
 
   bool get isConnected => _socket != null && _socket!.readyState == WebSocket.open;
   Stream<Map<String, dynamic>> get serverPushStream => _serverPushController.stream;
@@ -57,8 +63,12 @@ class SecureWebSocketClient {
     }
 
     if (_connectingCompleter != null) {
-      await _connectingCompleter!.future;
-      return;
+      try {
+        await _connectingCompleter!.future;
+        return;
+      } catch (_) {
+        // 首个连接失败，降级继续尝试新连接
+      }
     }
 
     // Exponential backoff delay before attempting connection
@@ -79,8 +89,9 @@ class SecureWebSocketClient {
       final socket = await WebSocket.connect(
         wsUri.toString(),
         headers: {'X-Auth-Token': SettingsService.instance.backendAuthToken},
-      ).timeout(_defaultRequestTimeout);
+      ).timeout(_connectTimeout);
 
+      final wasReconnection = _reconnectBackoffCount > 0;
       _resetBackoff();
       _socket = socket;
       _subscription = socket.listen(
@@ -96,6 +107,9 @@ class SecureWebSocketClient {
 
       _startHeartbeat();
       completer.complete();
+      if (wasReconnection && onReconnected != null) {
+        onReconnected!();
+      }
     } catch (e) {
       _bumpBackoff();
       _handleDisconnect('connect failed: $e');
@@ -200,19 +214,7 @@ class SecureWebSocketClient {
   }
 
   Future<void> _reconnectForRetry() async {
-    try {
-      await ensureConnected();
-      return;
-    } catch (_) {
-      // Fallback to local reset without sending close frame.
-    }
-
-    try {
-      _handleDisconnect('retry reconnect local reset');
-      await ensureConnected();
-    } catch (_) {
-      // Let next retry attempt trigger reconnect again.
-    }
+    await ensureConnected().catchError((_) {});
   }
 
   Future<void> recoverConnectionWithoutClose({String reason = 'auto_recover'}) async {
@@ -364,8 +366,13 @@ class SecureWebSocketClient {
           'timestamp': DateTime.now().toIso8601String(),
         }),
       );
+      _heartbeatFailCount = 0;
     } catch (e) {
-      _handleDisconnect('heartbeat failed: $e');
+      _heartbeatFailCount += 1;
+      debugPrint('SecureWebSocketClient: heartbeat failed ($_heartbeatFailCount): $e');
+      if (_heartbeatFailCount >= 2) {
+        _handleDisconnect('heartbeat failed after $_heartbeatFailCount attempts: $e');
+      }
     }
   }
 
@@ -485,6 +492,7 @@ class SecureWebSocketClient {
   void _resetBackoff() {
     final wasDisconnected = _reconnectBackoffCount > 0;
     _reconnectBackoffCount = 0;
+    _heartbeatFailCount = 0;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     if (wasDisconnected) {

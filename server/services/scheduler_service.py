@@ -119,6 +119,15 @@ def schedule_proactive_for_role(role_id: str):
     
     logger.info(f"Scheduled proactive for {role_id} at {next_run}")
 
+def unschedule_proactive_for_role(role_id: str):
+    """取消角色的主动消息调度"""
+    scheduler = get_scheduler()
+    job_id = f"proactive_{role_id}"
+    if scheduler.get_job(job_id):
+        scheduler.remove_job(job_id)
+        logger.info(f"Unscheduled proactive for {role_id}")
+
+
 async def _trigger_proactive(role_id: str):
     """触发主动消息"""
     global _event_callback

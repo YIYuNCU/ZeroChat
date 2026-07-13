@@ -5,6 +5,7 @@ OneBot V11 接口
 2. 反向 WebSocket: /onebot/ws/{role_id}?access_token=xxx
 """
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -15,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
@@ -27,6 +29,7 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 
 AGG_WINDOW = 15.0  # 消息聚合窗口（秒）
+SERVER_URL_FALLBACK = "http://127.0.0.1:8000"
 
 
 # ========== 消息聚合 ==========
@@ -61,14 +64,14 @@ async def _schedule_flush(key: Tuple[str, int, str]):
 
     role_id = key[0]
     try:
-        reply_text = await _process_and_reply(role_id, transformed, buf.message_id)
+        reply_text, image_paths = await _process_and_reply(role_id, transformed, buf.message_id)
     except Exception as e:
         logger.error(f"OneBot AI 处理失败: role={role_id}, error={e}", exc_info=True)
         return
 
-    if reply_text:
+    if reply_text or image_paths:
         try:
-            await _send_reply(buf.conn, transformed, reply_text)
+            await _send_reply(buf.conn, transformed, reply_text, message_id=buf.message_id, image_paths=image_paths)
             logger.info(
                 f"OneBot 回复发送: role={role_id}, "
                 f"target={transformed['origin']}, "
@@ -88,6 +91,11 @@ def _enqueue(transformed: Dict[str, Any], message_id: Optional[int], conn):
     existing = _agg_buffers.get(key)
     if existing:
         existing.contents.append(transformed["content"])
+        existing.message_id = message_id  # 始终引用最新消息
+        # 合并图片 URL
+        new_urls = transformed.get("image_urls") or []
+        if new_urls:
+            existing.transformed.setdefault("image_urls", []).extend(new_urls)
         existing.last_ts = time.monotonic()
         # 重置定时器
         if existing.flush_task and not existing.flush_task.done():
@@ -118,12 +126,13 @@ class OneBotEvent(BaseModel):
 
 # ========== 消息转换 ==========
 
-def _flatten_message(message: Any, self_id: Optional[int] = None) -> str:
-    """将 OneBot message 字段（字符串或 segment 数组）转换为纯文本，自动去除开头的 @机器人"""
+def _flatten_message(message: Any, self_id: Optional[int] = None) -> Tuple[str, List[str]]:
+    """将 OneBot message 字段转换为纯文本和图片 URL 列表，自动去除开头的 @机器人"""
     if isinstance(message, str):
-        return message
+        return message, []
     if isinstance(message, list):
         parts: List[str] = []
+        image_urls: List[str] = []
         skip_leading_at = True  # 仅跳过消息开头的 @机器人
         for seg in message:
             if not isinstance(seg, dict):
@@ -148,6 +157,9 @@ def _flatten_message(message: Any, self_id: Optional[int] = None) -> str:
                     parts.append("[表情]")
                 elif seg_type == "image":
                     parts.append("[图片]")
+                    url = str(data.get("url", "")).strip()
+                    if url:
+                        image_urls.append(url)
                 elif seg_type == "record":
                     parts.append("[语音]")
                 elif seg_type == "video":
@@ -162,8 +174,8 @@ def _flatten_message(message: Any, self_id: Optional[int] = None) -> str:
                     parts.append("[XML消息]")
                 else:
                     parts.append(f"[{seg_type}]")
-        return "".join(parts).strip()
-    return str(message or "")
+        return "".join(parts).strip(), image_urls
+    return str(message or ""), []
 
 
 def _is_at_bot(message: Any, self_id: Optional[int]) -> bool:
@@ -205,8 +217,8 @@ def _transform_event(event: OneBotEvent, self_id: Optional[int] = None) -> Optio
     if event.message_type not in ("private", "group"):
         return None
 
-    content = _flatten_message(event.message, self_id=self_id)
-    if not content.strip():
+    content, image_urls = _flatten_message(event.message, self_id=self_id)
+    if not content.strip() and not image_urls:
         return None
 
     sender_name = _extract_sender_name(event)
@@ -224,6 +236,7 @@ def _transform_event(event: OneBotEvent, self_id: Optional[int] = None) -> Optio
         "content": content,
         "origin": origin,
         "sender": sender,
+        "image_urls": image_urls,
         "user_id": event.user_id,
         "group_id": group_id,
     }
@@ -277,14 +290,30 @@ async def _process_and_reply(
     role_id: str,
     transformed: Dict[str, Any],
     message_id: Optional[int],
-) -> str:
-    """调用 AI 处理消息，返回回复文本"""
+) -> Tuple[str, List[Path]]:
+    """调用 AI 处理消息，返回 (回复文本, 表情图片路径列表)"""
     from routers.ai_behavior import AIEvent, AIEventType, handle_ai_event
+
+    # ===== 图片识别预处理 =====
+    content = transformed["content"]
+    image_urls = transformed.get("image_urls") or []
+    if image_urls:
+        descriptions = await _describe_onebot_images(image_urls)
+        if descriptions:
+            # 将 [图片] 占位符替换为识别结果，多余的描述追加到末尾
+            pic_count = content.count("[图片]")
+            used = 0
+            for desc in descriptions[:pic_count]:
+                content = content.replace("[图片]", f"[图片: {desc}]", 1)
+                used += 1
+            if used < len(descriptions):
+                extra = " ".join(f"[图片识别: {d}]" for d in descriptions[used:])
+                content = f"{content}\n{extra}" if content else extra
 
     ai_event = AIEvent(
         role_id=role_id,
         event_type=AIEventType.CHAT,
-        content=transformed["content"],
+        content=content,
         context={
             "origin": transformed["origin"],
             "sender": transformed["sender"],
@@ -301,22 +330,166 @@ async def _process_and_reply(
     elif isinstance(result, dict):
         result_dict = result
     else:
-        return ""
+        return "", []
 
     if result_dict.get("success"):
-        return result_dict.get("content") or ""
-    return ""
+        reply_text = result_dict.get("content") or ""
+        emojis_called = (result_dict.get("metadata") or {}).get("emojis_called") or []
+        image_paths = _resolve_emojis(emojis_called, role_id)
+        return reply_text, image_paths
+    return "", []
 
 
 def _strip_action_descriptions(text: str) -> str:
     """去除 AI 回复中残留的动作/心理/状态描写（兜底过滤）"""
-    text = re.sub(r'<[^>]+>', '', text)       # <脸红>
+    # 使用状态机处理 <>，正确处理内含 > 字符（如 (>_<)）或嵌套的情况
+    result = []
+    depth = 0
+    for ch in text:
+        if ch == '<':
+            depth += 1
+        elif ch == '>':
+            if depth > 0:
+                depth -= 1
+        elif depth == 0:
+            result.append(ch)
+    text = ''.join(result)
     text = re.sub(r'【[^】]+】', '', text)      # 【小声说】
-    text = re.sub(r'/[^/]+/', '', text)        # /害羞地低下头/
+    text = re.sub(r'/[一-鿿][^/]*/', '', text)   # /揉了揉眼睛/（仅中文内容，避免误匹配URL）
+    text = re.sub(r'\*\*[^*]+\*\*', '', text)  # **真的**（双星号强调，必须在单*之前）
     text = re.sub(r'\*[^*]+\*', '', text)      # *叹气*
+    text = re.sub(r'\[[^\[\]]+\]', '', text)   # [小声嘀咕]（补充说明）
+    text = re.sub(r'（[^）]+）', '', text)        # （停顿片刻）
     # 清理多余空白和残留标点
     text = re.sub(r'[，、，]+$', '', text.strip())
     return text.strip()
+
+
+# ========== OneBot 图片识别 ==========
+
+async def _describe_onebot_images(image_urls: List[str]) -> List[str]:
+    """下载 OneBot 消息中的图片，通过 Vision API 识别内容，返回描述列表"""
+    from services import vision_service
+
+    vision_cfg = vision_service.resolve_vision_config()
+    api_url = vision_cfg.get("api_url", "")
+    api_key = vision_cfg.get("api_key", "")
+    model = vision_cfg.get("model", "gpt-4o")
+
+    if not api_url or not api_key:
+        logger.info("OneBot 图片识别跳过：未配置 Vision API")
+        return []
+
+    descriptions: List[str] = []
+    max_images = 3  # 限制处理数量避免过长延迟
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for url in image_urls[:max_images]:
+            try:
+                # 从 QQ CDN 下载图片
+                resp = await client.get(url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": "https://qq.com",
+                })
+                resp.raise_for_status()
+                image_bytes = resp.content
+                if not image_bytes:
+                    continue
+
+                mime = vision_service.guess_image_mime(image_bytes) or "image/jpeg"
+                b64 = base64.b64encode(image_bytes).decode("utf-8")
+                data_url = f"data:{mime};base64,{b64}"
+
+                # 使用共享 vision_service 构建消息并调用 API
+                messages = vision_service.build_vision_messages(
+                    data_url, "请用一句话简洁描述这张图片的内容"
+                )
+                body = {
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": 256,
+                }
+                api_result = await vision_service.call_vision_api(api_url, api_key, body)
+                if api_result:
+                    descriptions.append(api_result)
+                    logger.info(f"OneBot 图片识别成功: {api_result[:50]}...")
+            except httpx.TimeoutException:
+                logger.warning(f"OneBot 图片下载超时: {url[:60]}...")
+            except Exception as e:
+                logger.warning(f"OneBot 图片处理失败: {e}")
+                continue
+
+    return descriptions
+
+
+# ========== 表情图片查找 ==========
+
+def _resolve_emojis(emotions: List[str], role_id: str) -> List[Path]:
+    """根据情绪名称列表直接查找对应的表情图片（由工具调用驱动，共享 ai_tools 处理逻辑）"""
+    from services.ai_tools import _pick_emoji_file
+
+    image_paths: List[Path] = []
+    seen: set = set()
+    for emotion in emotions:
+        e = emotion.lower()
+        if e in seen:
+            continue
+        seen.add(e)
+        f = _pick_emoji_file(role_id, e)
+        if f is not None:
+            image_paths.append(f)
+    return image_paths
+
+
+# ========== 服务器 URL 解析 ==========
+
+def _build_server_url(websocket=None) -> str:
+    """从 WebSocket 连接或 CONFIG 构建服务器 URL（用于 HTTP 图片传输）"""
+    from main import CONFIG
+
+    if websocket is not None:
+        scheme = "https" if websocket.url.scheme == "wss" else "http"
+        return f"{scheme}://{websocket.url.hostname}:{websocket.url.port}"
+
+    host = CONFIG.get("host", "0.0.0.0")
+    port = CONFIG.get("port", 8000)
+    if not host or host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
+# ========== 构建 OneBot 消息数组 ==========
+
+def _build_message_segments(
+    reply_text: str,
+    message_id: Optional[int],
+    origin: str,
+    user_id: int,
+    image_paths: Optional[List[Path]] = None,
+    server_url: str = SERVER_URL_FALLBACK,
+) -> List[Dict[str, Any]]:
+    """构建 OneBot 消息数组（reply + @ + text + image）"""
+    segments: List[Dict[str, Any]] = []
+
+    if message_id is not None:
+        segments.append({"type": "reply", "data": {"id": message_id}})
+
+    if origin == "onebot_group":
+        segments.append({"type": "at", "data": {"qq": user_id}})
+
+    if reply_text:
+        segments.append({"type": "text", "data": {"text": f" {reply_text}"}})
+
+    if image_paths:
+        for img_path in image_paths:
+            # img_path = .../data/roles/{role_id}/emojis/{emotion}/{filename}
+            # ROLES_DIR = .../data/roles → relative = {role_id}/emojis/{emotion}/{filename}
+            relative = img_path.relative_to(ROLES_DIR)
+            parts = relative.parts  # (role_id, "emojis", emotion, filename)
+            http_url = f"{server_url.rstrip('/')}/files/public/emojis/{parts[0]}/{parts[2]}/{parts[3]}"
+            segments.append({"type": "image", "data": {"file": http_url}})
+
+    return segments
 
 
 async def _send_reply(
@@ -324,30 +497,41 @@ async def _send_reply(
     transformed: Dict[str, Any],
     reply_text: str,
     raw: bool = False,
+    message_id: Optional[int] = None,
+    image_paths: Optional[List[Path]] = None,
 ):
-    """通过 WebSocket 连接发送回复到 QQ"""
+    """通过 WebSocket 连接发送回复到 QQ（消息数组格式：reply + @ + text + image）"""
     if not reply_text.strip():
         return
 
     if raw:
         clean_reply = reply_text.strip()
     else:
-        # 兜底过滤：去除动作描写等非对话内容
         clean_reply = _strip_action_descriptions(reply_text)
-        # 去除可能残留的情绪标签 [emoji_category]
-        clean_reply = re.sub(r'\s*\[[\w一-鿿]+\]\s*$', '', clean_reply).strip()
-    if not clean_reply:
+
+    paths = image_paths or []
+    if not clean_reply and not paths:
         return
+
+    server_url = transformed.get("_server_url", SERVER_URL_FALLBACK)
+    segments = _build_message_segments(
+        reply_text=clean_reply,
+        message_id=message_id,
+        origin=transformed["origin"],
+        user_id=transformed["user_id"],
+        image_paths=paths,
+        server_url=server_url,
+    )
 
     if transformed["origin"] == "onebot_group":
         await conn.send_action("send_group_msg", {
             "group_id": transformed["group_id"],
-            "message": clean_reply,
+            "message": segments,
         })
     else:
         await conn.send_action("send_private_msg", {
             "user_id": transformed["user_id"],
-            "message": clean_reply,
+            "message": segments,
         })
 
 
@@ -431,34 +615,35 @@ def _get_scene_config(onebot_config: Dict, conv_key: str) -> Dict:
 
 
 def _check_random_reply(onebot_config: Dict, role_id: str, current_time: float, conv_key: str) -> bool:
-    """检查是否应触发随机回复（群聊无 @ 时使用）。返回 True 表示本次应回复。"""
+    """检查是否应触发主动回复（群聊无 @ 时使用）。返回 True 表示本次应回复。"""
     cfg = _get_scene_config(onebot_config, conv_key)
-    interval = float(cfg.get("interval", 3)) * 3600
-    last_time = float(cfg.get("last_time", 0))
 
-    if current_time - last_time < interval:
+    # 主动回复未开启时，不进行任何无 @ 回复
+    if not cfg.get("enabled", False):
         return False
 
-    if cfg.get("enabled", False):
-        cfg["last_time"] = current_time
-        _persist_onebot_config(role_id, onebot_config)
-        return True
-
-    rate = float(cfg.get("rate", 0.05))
-    burst = int(cfg.get("burst", 10))
     remaining = int(cfg.get("remaining", 0))
 
+    # 优先消耗 burst，使剩余次数在短时间内集中释放
     if remaining > 0:
         cfg["remaining"] = remaining - 1
         cfg["last_time"] = current_time
         _persist_onebot_config(role_id, onebot_config)
         return True
 
+    interval = float(cfg.get("interval", 3)) * 3600
+    last_time = float(cfg.get("last_time", 0))
+    if current_time - last_time < interval:
+        return False
+
+    rate = float(cfg.get("rate", 0.05))
+    burst = int(cfg.get("burst", 10))
+
     if random.random() < rate:
         cfg["remaining"] = burst - 1
         cfg["last_time"] = current_time
         _persist_onebot_config(role_id, onebot_config)
-        logger.info(f"随机回复触发: role={role_id}, conv={conv_key}, rate={rate}, burst={burst}")
+        logger.info(f"主动回复触发: role={role_id}, conv={conv_key}, rate={rate}, burst={burst}")
         return True
 
     return False
@@ -484,6 +669,7 @@ async def _handle_command(
     role_id: str,
     onebot_config: Dict,
     transformed: Dict[str, Any],
+    message_id: Optional[int] = None,
 ) -> Optional[str]:
     """
     处理系统指令。返回指令执行结果文本（已发送给主用户），或 None 表示非指令。
@@ -696,7 +882,7 @@ async def _handle_command(
             )
 
     if reply is not None:
-        await _send_reply(conn, transformed, reply, raw=True)
+        await _send_reply(conn, transformed, reply, raw=True, message_id=message_id, image_paths=[])
     return reply
 
 
@@ -993,12 +1179,13 @@ async def onebot_ws_endpoint(websocket: WebSocket, role_id: str):
     except (TypeError, ValueError):
         effective_self_id = 0
     conn = await ws_manager.connect(websocket, role_id, self_id=effective_self_id)
-    logger.info(f"OneBot WS 连接建立: role={role_id}, self_id={effective_self_id}")
+    server_url = _build_server_url(websocket)
+    logger.info(f"OneBot WS 连接建立: role={role_id}, self_id={effective_self_id}, server_url={server_url}")
 
     # 如果首条消息已读取（通过 body 鉴权时），先处理它
     if first_data is not None:
         try:
-            await _handle_ws_frame(conn, role_id, onebot_config, first_data)
+            await _handle_ws_frame(conn, role_id, onebot_config, first_data, server_url=server_url)
         except Exception as e:
             logger.error(f"OneBot WS 首条消息处理失败: {e}")
 
@@ -1024,7 +1211,7 @@ async def onebot_ws_endpoint(websocket: WebSocket, role_id: str):
                 pass
 
             # 处理事件
-            await _handle_ws_frame(conn, role_id, onebot_config, data)
+            await _handle_ws_frame(conn, role_id, onebot_config, data, server_url=server_url)
 
     except WebSocketDisconnect:
         pass
@@ -1039,6 +1226,7 @@ async def _handle_ws_frame(
     role_id: str,
     onebot_config: Dict,
     data: Dict,
+    server_url: str = SERVER_URL_FALLBACK,
 ):
     """处理单个 WebSocket 事件帧（聚合后统一处理）"""
     event = OneBotEvent(**data)
@@ -1050,6 +1238,9 @@ async def _handle_ws_frame(
 
     if transformed is None:
         return
+
+    # 传递服务器 URL（OneBot 发送表情图片时通过 HTTP 而非 file:///）
+    transformed["_server_url"] = onebot_config.get("server_url") or server_url
 
     # 主QQ号判断：先识别发送者身份（需要在白名单过滤之前）
     try:
@@ -1089,7 +1280,7 @@ async def _handle_ws_frame(
 
     # 系统指令拦截（仅主用户的识别命令跳过聚合，直接执行）
     if transformed["sender"] == "user" and transformed["content"].startswith("/"):
-        cmd_result = await _handle_command(conn, role_id, onebot_config, transformed)
+        cmd_result = await _handle_command(conn, role_id, onebot_config, transformed, message_id=event.message_id)
         if cmd_result is not None:
             return  # 指令已处理，不进入聚合
 
@@ -1175,6 +1366,9 @@ async def handle_onebot_event(
     if transformed is None:
         return {"status": "ignored", "reason": "not a message event or empty content"}
 
+    # 传递服务器 URL（HTTP 传输图片时使用）
+    transformed["_server_url"] = str(request.base_url).rstrip("/")
+
     # 主QQ号判断：先识别发送者身份（需要在白名单过滤之前）
     try:
         main_user_id = int(onebot_config.get("main_user_id", 0) or 0)
@@ -1206,7 +1400,7 @@ async def handle_onebot_event(
     if transformed["sender"] == "user" and transformed["content"].startswith("/"):
         conn = ws_manager.get_connection(role_id)
         if conn:
-            cmd_result = await _handle_command(conn, role_id, onebot_config, transformed)
+            cmd_result = await _handle_command(conn, role_id, onebot_config, transformed, message_id=event.message_id)
         else:
             cmd_result = await _handle_command_http(role_id, onebot_config, transformed)
         if cmd_result is not None:
@@ -1225,7 +1419,7 @@ async def handle_onebot_event(
 
     # AI 处理
     try:
-        reply_text = await _process_and_reply(role_id, transformed, event.message_id)
+        reply_text, image_paths = await _process_and_reply(role_id, transformed, event.message_id)
         reply_text = _strip_action_descriptions(reply_text)
     except Exception as e:
         logger.error(f"OneBot AI 处理失败: {e}", exc_info=True)
@@ -1233,9 +1427,9 @@ async def handle_onebot_event(
 
     # 如果有 WS 连接，尝试通过 WS 发送回复
     conn = ws_manager.get_connection(role_id)
-    if conn and reply_text:
+    if conn and (reply_text or image_paths):
         try:
-            await _send_reply(conn, transformed, reply_text)
+            await _send_reply(conn, transformed, reply_text, message_id=event.message_id, image_paths=image_paths)
         except Exception as e:
             logger.error(f"OneBot WS 回复发送失败: {e}")
 

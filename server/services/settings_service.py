@@ -47,6 +47,9 @@ def get_default_settings() -> Dict[str, Any]:
         "embedding_api_url": "",
         "embedding_api_key": "",
         "embedding_model": "",
+        "auth_token": "",
+        "encryption_secret": "",
+        "onebot_enabled": True,
         "updated_at": None,
     }
 

@@ -10,12 +10,23 @@ from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 import httpx
 
+from core.utils import ensure_path_within_root, ensure_simple_path_segment
+
 router = APIRouter()
 
 # 数据目录
 DATA_DIR = Path(__file__).parent.parent / "data"
 CHATS_DIR = DATA_DIR / "chats"
 CONFIG_DIR = Path(__file__).parent.parent / "config"
+
+
+def _get_chat_file(chat_id: str) -> Path:
+    try:
+        safe_chat_id = ensure_simple_path_segment(chat_id, "chat_id")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    CHATS_DIR.mkdir(parents=True, exist_ok=True)
+    return ensure_path_within_root(CHATS_DIR / f"{safe_chat_id}.json", CHATS_DIR)
 
 class ChatMessage(BaseModel):
     role: str  # user / assistant / system
@@ -42,7 +53,7 @@ def load_config():
 
 def save_chat_message(chat_id: str, role: str, content: str):
     """保存聊天消息"""
-    chat_file = CHATS_DIR / f"{chat_id}.json"
+    chat_file = _get_chat_file(chat_id)
     messages = []
     if chat_file.exists():
         with open(chat_file, "r", encoding="utf-8") as f:
@@ -60,7 +71,7 @@ def save_chat_message(chat_id: str, role: str, content: str):
 
 def get_chat_history(chat_id: str, limit: int = 20) -> List[dict]:
     """获取聊天历史"""
-    chat_file = CHATS_DIR / f"{chat_id}.json"
+    chat_file = _get_chat_file(chat_id)
     if not chat_file.exists():
         return []
     with open(chat_file, "r", encoding="utf-8") as f:
@@ -130,7 +141,7 @@ async def get_history(chat_id: str, limit: int = 50):
 @router.delete("/chats/{chat_id}")
 async def clear_chat(chat_id: str):
     """清空聊天记录"""
-    chat_file = CHATS_DIR / f"{chat_id}.json"
+    chat_file = _get_chat_file(chat_id)
     if chat_file.exists():
         chat_file.unlink()
     return {"success": True}

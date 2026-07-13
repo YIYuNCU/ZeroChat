@@ -21,7 +21,7 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 USER_EMOJI_DIR = DATA_DIR / "user_emojis"
 USER_EMOJI_DB = DATA_DIR / "user_emojis.sqlite"
-from core.utils import is_tool_role_id
+from core.utils import ensure_path_within_root, ensure_simple_path_segment, is_tool_role_id
 
 def _normalize_category_name(name: str) -> str:
     normalized = str(name or "").strip().lower()
@@ -30,6 +30,27 @@ def _normalize_category_name(name: str) -> str:
     if any(c in normalized for c in ["..", "/", "\\"]):
         raise HTTPException(status_code=400, detail="分类名不合法")
     return normalized
+
+
+def _normalize_role_id(role_id: str) -> str:
+    try:
+        return ensure_simple_path_segment(role_id, "role_id")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _normalize_filename(filename: str, field_name: str = "filename") -> str:
+    try:
+        return ensure_simple_path_segment(filename, field_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _resolve_path_in_root(path: Path, root: Path) -> Path:
+    try:
+        return ensure_path_within_root(path, root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid file path") from exc
 
 def _init_user_emoji_db(conn: sqlite3.Connection):
     conn.execute(
@@ -215,6 +236,7 @@ def _overlay_role_core_memory_from_db(role_data: Dict[str, Any]) -> Dict[str, An
 
 def get_role_dir(role_id: str) -> Path:
     """获取角色目录，自动创建完整目录结构"""
+    role_id = _normalize_role_id(role_id)
     role_dir = ROLES_DIR / role_id
     role_dir.mkdir(parents=True, exist_ok=True)
     
@@ -251,7 +273,7 @@ def _get_role_avatar_path(role_id: str) -> Optional[Path]:
     for ext in ["jpg", "jpeg", "png", "gif", "webp"]:
         avatar_path = assets_dir / f"avatar.{ext}"
         if avatar_path.exists():
-            return avatar_path
+            return _resolve_path_in_root(avatar_path, role_dir)
     return None
 
 def _get_role_avatar_hash(role_id: str) -> str:
@@ -381,8 +403,14 @@ async def update_role(role_id: str, update: RoleUpdate, request: Request):
     
     for key, value in update.model_dump(exclude_none=True).items():
         role[key] = value
-    
+
     save_role(role_id, role)
+    if update.proactive_config is not None:
+        from services import scheduler_service
+        if update.proactive_config.enabled:
+            scheduler_service.schedule_proactive_for_role(role_id)
+        else:
+            scheduler_service.unschedule_proactive_for_role(role_id)
     if update.core_memory is not None:
         from services.memory_service import load_memory, save_memory
 
@@ -481,9 +509,10 @@ ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 def get_assets_dir(role_id: str) -> Path:
     """获取角色素材目录"""
-    assets_dir = get_role_dir(role_id) / "assets"
+    role_dir = get_role_dir(role_id)
+    assets_dir = role_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
-    return assets_dir
+    return _resolve_path_in_root(assets_dir, role_dir)
 
 def get_asset_metadata_file(role_id: str) -> Path:
     """获取素材元数据文件"""
@@ -565,7 +594,8 @@ async def get_asset(role_id: str, asset_id: str):
     if not asset:
         raise HTTPException(status_code=404, detail="素材不存在")
     
-    file_path = get_assets_dir(role_id) / asset["filename"]
+    asset_filename = _normalize_filename(str(asset["filename"]))
+    file_path = _resolve_path_in_root(get_assets_dir(role_id) / asset_filename, get_role_dir(role_id))
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
     
@@ -581,7 +611,8 @@ async def delete_asset(role_id: str, asset_id: str):
         raise HTTPException(status_code=404, detail="素材不存在")
     
     # 删除文件
-    file_path = get_assets_dir(role_id) / asset["filename"]
+    asset_filename = _normalize_filename(str(asset["filename"]))
+    file_path = _resolve_path_in_root(get_assets_dir(role_id) / asset_filename, get_role_dir(role_id))
     if file_path.exists():
         file_path.unlink()
     
@@ -678,10 +709,10 @@ async def upload_role_emoji(role_id: str, category: str, file: UploadFile = File
 @router.delete("/roles/{role_id}/emojis/{category}/{filename}")
 async def delete_role_emoji(role_id: str, category: str, filename: str):
     normalized = _normalize_category_name(category)
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(status_code=400, detail="文件名不合法")
+    filename = _normalize_filename(filename)
 
-    file_path = get_role_dir(role_id) / "emojis" / normalized / filename
+    role_dir = get_role_dir(role_id)
+    file_path = _resolve_path_in_root(role_dir / "emojis" / normalized / filename, role_dir)
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="表情不存在")
     file_path.unlink()
@@ -690,8 +721,14 @@ async def delete_role_emoji(role_id: str, category: str, filename: str):
 @router.get("/emojis/{role_id}/{emotion}/{filename}")
 async def get_emoji(role_id: str, emotion: str, filename: str):
     """获取角色表情包文件"""
-    
-    emoji_path = ROLES_DIR / role_id / "emojis" / emotion / filename
+
+    role_dir = get_role_dir(role_id)
+    normalized_emotion = _normalize_category_name(emotion)
+    normalized_filename = _normalize_filename(filename)
+    emoji_path = _resolve_path_in_root(
+        role_dir / "emojis" / normalized_emotion / normalized_filename,
+        role_dir,
+    )
     if emoji_path.exists() and emoji_path.is_file():
         print(f"Serving emoji: {emoji_path}")
         return FileResponse(emoji_path)
@@ -700,25 +737,27 @@ async def get_emoji(role_id: str, emotion: str, filename: str):
 @router.get("/roles/{role_id}/emojis/{emotion}/random")
 async def get_random_emoji(role_id: str, emotion: str):
     """从后端表情包文件夹中随机选择一个表情包"""
-    
-    emoji_dir = ROLES_DIR / role_id / "emojis" / emotion
+
+    role_dir = get_role_dir(role_id)
+    normalized_emotion = _normalize_category_name(emotion)
+    emoji_dir = _resolve_path_in_root(role_dir / "emojis" / normalized_emotion, role_dir)
     if not emoji_dir.exists():
-        return {"found": False, "emotion": emotion}
+        return {"found": False, "emotion": normalized_emotion}
     
     # 扫描支持的图片格式
     supported_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
     files = [f for f in emoji_dir.iterdir() if f.is_file() and f.suffix.lower() in supported_ext]
     
     if not files:
-        return {"found": False, "emotion": emotion}
+        return {"found": False, "emotion": normalized_emotion}
     
     chosen = random.choice(files)
     # 返回可访问的 URL 路径
     return {
         "found": True,
-        "emotion": emotion,
+        "emotion": normalized_emotion,
         "filename": chosen.name,
-        "url": f"/api/emojis/{role_id}/{emotion}/{chosen.name}"
+        "url": f"/api/emojis/{role_id}/{normalized_emotion}/{chosen.name}"
     }
 
 # ========== 用户表情（SQLite 映射） ==========
@@ -854,7 +893,7 @@ async def get_user_emoji_file(emoji_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="表情不存在")
 
-    file_path = Path(str(row["file_path"]))
+    file_path = _resolve_path_in_root(Path(str(row["file_path"])), USER_EMOJI_DIR)
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="表情文件不存在")
     return FileResponse(file_path)
@@ -869,7 +908,7 @@ async def delete_user_emoji(emoji_id: str):
         if not row:
             raise HTTPException(status_code=404, detail="表情不存在")
 
-        file_path = Path(str(row["file_path"]))
+        file_path = _resolve_path_in_root(Path(str(row["file_path"])), USER_EMOJI_DIR)
         if file_path.exists():
             file_path.unlink()
 
@@ -918,9 +957,11 @@ async def upload_role_avatar_file(role_id: str, request: Request, file: UploadFi
     role_dir = get_role_dir(role_id)
     
     # 获取文件扩展名
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    avatar_filename = f"avatar.{ext}"
-    avatar_path = role_dir / "assets" / avatar_filename
+    ext = f".{file.filename.split('.')[-1].lower()}" if "." in (file.filename or "") else ".jpg"
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}")
+    avatar_filename = f"avatar{ext}"
+    avatar_path = _resolve_path_in_root(role_dir / "assets" / avatar_filename, role_dir)
     
     # 保存文件
     with open(avatar_path, "wb") as f:

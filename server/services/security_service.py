@@ -11,9 +11,34 @@ import json
 import secrets
 from typing import Any, Dict
 
+from core.utils import is_secure_secret
 
-DEFAULT_AUTH_TOKEN = "ZEROCHAT_FIXED_TOKEN_2026"
-DEFAULT_ENCRYPTION_SECRET = "ZEROCHAT_TRANSFER_SECRET_2026"
+
+LEGACY_DEFAULT_AUTH_TOKEN = "ZEROCHAT_FIXED_TOKEN_2026"
+LEGACY_DEFAULT_ENCRYPTION_SECRET = "ZEROCHAT_TRANSFER_SECRET_2026"
+
+
+def get_auth_token(config: Dict[str, Any]) -> str:
+    token = str(config.get("auth_token") or "").strip()
+    if not is_secure_secret(token, LEGACY_DEFAULT_AUTH_TOKEN):
+        raise ValueError(
+            "auth_token is missing or insecure; set a random value with at least 16 characters"
+        )
+    return token
+
+
+def get_encryption_secret(config: Dict[str, Any]) -> str:
+    secret = str(config.get("encryption_secret") or "").strip()
+    if not is_secure_secret(secret, LEGACY_DEFAULT_ENCRYPTION_SECRET):
+        raise ValueError(
+            "encryption_secret is missing or insecure; set a random value with at least 16 characters"
+        )
+    return secret
+
+
+def validate_security_config(config: Dict[str, Any]) -> None:
+    get_auth_token(config)
+    get_encryption_secret(config)
 
 
 def _build_keystream(secret_bytes: bytes, nonce: bytes, length: int) -> bytes:

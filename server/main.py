@@ -13,6 +13,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from services.security_service import validate_security_config
+
 # 确定根目录
 if getattr(sys, "frozen", False):
     ROOT_DIR = Path(sys.executable).parent
@@ -56,8 +58,8 @@ def load_config():
         "vision_api_key": "",
         "vision_model": "gpt-4o",
         "vision_mode": "standalone",
-        "auth_token": "ZEROCHAT_FIXED_TOKEN_2026",
-        "encryption_secret": "ZEROCHAT_TRANSFER_SECRET_2026",
+        "auth_token": "",
+        "encryption_secret": "",
         "onebot_enabled": True,
     }
     if config_file.exists():
@@ -70,6 +72,7 @@ def load_config():
 
 
 CONFIG = load_config()
+validate_security_config(CONFIG)
 
 from core.lifecycle import create_lifespan
 from core.middleware import RequestLoggingMiddleware, SecurityMiddleware
@@ -103,6 +106,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://sakura.evian.asia",
+        "https://zc.evian.asia",
     ],
     allow_origin_regex=(
         r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"

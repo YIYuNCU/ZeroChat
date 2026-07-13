@@ -5,9 +5,9 @@
 from typing import Optional
 import hashlib
 from pydantic import BaseModel, ConfigDict
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
-from core.utils import mask_api_key
+from core.utils import ensure_path_within_root, ensure_simple_path_segment, mask_api_key
 
 router = APIRouter()
 
@@ -162,6 +162,14 @@ import uuid
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 AVATARS_DIR = DATA_DIR / "avatars"
+ALLOWED_AVATAR_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def _normalize_avatar_filename(filename: str) -> str:
+    try:
+        return ensure_simple_path_segment(filename, "filename")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @router.post("/settings/avatar")
 async def upload_avatar(file: UploadFile = File(...)):
@@ -169,9 +177,11 @@ async def upload_avatar(file: UploadFile = File(...)):
     AVATARS_DIR.mkdir(parents=True, exist_ok=True)
     
     # 生成唯一文件名
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    filename = f"user_avatar_{uuid.uuid4().hex[:8]}.{ext}"
-    filepath = AVATARS_DIR / filename
+    ext = f".{file.filename.split('.')[-1].lower()}" if "." in (file.filename or "") else ".jpg"
+    if ext not in ALLOWED_AVATAR_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+    filename = f"user_avatar_{uuid.uuid4().hex[:8]}{ext}"
+    filepath = ensure_path_within_root(AVATARS_DIR / filename, AVATARS_DIR)
     
     # 保存文件
     with open(filepath, "wb") as f:
@@ -192,7 +202,8 @@ async def upload_avatar(file: UploadFile = File(...)):
 async def get_avatar(filename: str):
     """获取头像文件"""
     from fastapi.responses import FileResponse
-    filepath = AVATARS_DIR / filename
+    safe_name = _normalize_avatar_filename(filename)
+    filepath = ensure_path_within_root(AVATARS_DIR / safe_name, AVATARS_DIR)
     if filepath.exists():
         return FileResponse(filepath)
     return {"error": "not found"}

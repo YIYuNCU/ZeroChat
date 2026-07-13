@@ -186,6 +186,10 @@ async def _post_chat(
         }
         if tools:
             payload["tools"] = tools
+        # DeepSeek thinking 模式控制，默认关闭
+        cfg = settings_service.load_settings()
+        if not cfg.get("thinking_enabled", False):
+            payload["thinking"] = {"type": "disabled"}
         client = _get_http_client()
         response = await client.post(
             api_url,
@@ -201,6 +205,9 @@ async def _post_chat(
         raw_content = message.get("content") or ""
         content = _extract_plain_message_content(raw_content)
         tool_calls = message.get("tool_calls")
+        # DeepSeek 等 API 可能在限速时返回 200 OK 但 content 为空
+        if not content and not tool_calls:
+            return {"success": False, "content": None, "error": "AI 返回了空内容，可能是 API 限速或服务不稳定，请重试"}
         if "usage" in data:
             print(
                 "hit chache:{},miss cache:{},total tokens:{}".format(
@@ -212,8 +219,20 @@ async def _post_chat(
         result = {"success": True, "content": content, "user_content": messages[-1], "error": None}
         if tool_calls:
             result["tool_calls"] = tool_calls
+        # DeepSeek 等 API 的 thinking 模式会返回 reasoning_content，重调时需原样传回
+        if message.get("reasoning_content"):
+            result["reasoning_content"] = message["reasoning_content"]
         return result
-    except httpx.HTTPError as e:
+    except httpx.HTTPStatusError as e:
+        resp_body = e.response.text if e.response else ""
+        logger.error(
+            "AI API HTTP %s 错误: url=%s, model=%s, tool_count=%d, response=%s",
+            e.response.status_code if e.response else "?",
+            api_url,
+            model,
+            len(tools) if tools else 0,
+            resp_body[:1000],
+        )
         return {"success": False, "content": None, "error": f"HTTP Error: {str(e)}"}
     except Exception as e:
         return {"success": False, "content": None, "error": str(e)}
@@ -360,19 +379,34 @@ def _build_system_prompt(role_data: Dict, extra_context: Optional[str] = None, i
             "origin=onebot_private 但 sender 不是 \"user\" 的是其他QQ用户的私聊。"
             "对第三方用户保持礼貌但有距离感，回复风格适配 QQ 聊天场景。\n"
             "- origin=proactive：你主动发起的消息，sender 通常是 system。\n\n"
-            "二、输出格式（纯对话，禁止任何描写）\n"
-            "你的回复必须是纯对话消息正文，严禁包含任何动作描写、心理描写、神态描写、语气描写、旁白或场景描述。\n"
-            "禁止在对话中出现以下内容：\n"
-            "  - 动作/神态描写（如：脸红、微笑、低头、歪头、耸肩、眨眼、托腮、举手等）\n"
-            "  - 心理活动（如：心想、OS、内心独白、心理活动等）\n"
-            "  - 语气/状态描写（如：小声说、低声、叹气、停顿片刻、犹豫了一下等）\n"
-            "  - 使用 <>、//、[]、【】、『』、**、() 等任何符号包裹动作或描述\n"
-            "正确示例：'诶？！你在说什么啦，我才没有想你呢'\n"
-            "正确示例：'今天天气真好，我们去散步吧'\n"
-            "错误示例：'<脸红> 诶？！'（包含动作）\n"
-            "错误示例：'【小声说】才没有'（包含动作）\n"
-            "错误示例：'/害羞地低下头/'（包含动作）\n"
-            "错误示例：'她愣了一下，然后笑了'（包含动作描写）\n\n"
+            "二、输出格式（格式化标记指南）\n"
+            "你的回复由两部分组成：格式化标记（会被系统过滤掉，不发送给对方）和直接对话正文。\n"
+            "格式化标记用于表达你的内心状态，支持以下四种：\n\n"
+            "  1. <> — 内心想法/情绪：表达当前的心理活动或情绪波动\n"
+            "     正确示例：<开心> 诶？！真的吗？\n"
+            "     正确示例：<有点紧张> 那个...我有件事想和你说\n"
+            "     正确示例：<愣了一下> 啊？什么时候的事？\n\n"
+            "  2. // — 动作/行为描写：描述你正在做的动作\n"
+            "     正确示例：/揉了揉眼睛/ 我刚睡醒...你说什么？\n"
+            "     正确示例：/翻开笔记本看了看/ 上次我们说到第三章了\n"
+            "     正确示例：/把手机拿近了一些/ 你发的照片我没看清\n\n"
+            "  3. [] — 补充说明/语气修饰：对所说的话做额外说明\n"
+            "     正确示例：[认真地看着对方的消息] 这件事我觉得要慎重\n"
+            "     正确示例：[忍不住笑了] 你怎么这么可爱啊\n"
+            "     正确示例：[虽然嘴上这么说，但心里其实很开心] 知道啦~\n\n"
+            "  4. **...** — 语气强调：对动作或语气进行强调\n"
+            "     正确示例：我**真的**没有生气啦！\n"
+            "     正确示例：你**居然**记得这个！\n"
+            "     正确示例：**鬼鬼祟祟地** 那个...给你看个东西\n\n"
+            "规则：\n"
+            "  - 格式标记内的内容不会被发送给对方（会被系统过滤），仅用于你表达状态\n"
+            "  - 标记之外只能是你实际说出口的对话正文，禁止在标记外出现动作/心理描写\n"
+            "  - 不要在单个标记中写长段独白，只写简短的状态描述\n"
+            "  - 每句话最多使用 1-2 种标记，不要过度堆叠，也不要每句话都用标记\n"
+            "  - 禁止使用 $ 符号分段\n"
+            "  - 禁止使用【】、『』、（）等符号\n\n"
+            "错误示例：诶？！<开心> 真的吗？（正文中混入了标记包裹的内容）\n"
+            "错误示例：[愣了一下]然后/看了看四周/她犹豫了一下（标记外含动作描写且堆砌过多）\n\n"
             "三、自我保护\n"
             "你拥有屏蔽用户的能力（block_user 工具）。当某个第三方用户的行为让你感到不适、"
             "被骚扰、恶意刷屏或持续攻击时，你可以主动调用 block_user 屏蔽该用户。"
@@ -407,11 +441,36 @@ def _build_system_prompt(role_data: Dict, extra_context: Optional[str] = None, i
 
     # 通用工具能力（所有场景可用）
     parts.append(
-        "你拥有创建定时提醒任务的能力（schedule_task 工具）。当你认为需要在未来的某个时间点做某事时，可以主动创建定时任务。例如：\n"
-        "  - 用户说\"记得提醒我明天下午开会\" → 创建定时任务\n"
-        "  - 用户需要定时做某事时 → 创建定时任务\n"
-        "  - 你主动想在未来提醒用户或执行某件事 → 创建定时任务\n"
-        "创建时需要指定提醒内容、触发时间（ISO 8601 格式，24 小时制）和可选的重复模式。时间到达后你会收到系统通知并触发该任务。\n"
+        "【工具调用规则】\n"
+        "你拥有以下工具能力。在生成回复之前，请主动判断是否需要调用工具，不要等用户明确要求才行动。\n\n"
+        "1. search_memory（历史记忆搜索）—— 回忆过去的唯一手段，必须频繁使用：\n"
+        "  - 用户提到任何人名、地名、事件、偏好、约定 → 立即搜索确认细节\n"
+        "  - 对话涉及\"上次\"\"之前\"\"以前\"\"你说过\"等词 → 立即搜索\n"
+        "  - 你感觉当前话题与过去可能有关联 → 立即搜索验证\n"
+        "  - 你\"隐约记得\"但不确定 → 必须搜索而非模糊猜测\n"
+        "  - 用户问\"你还记得吗\"\"你不会忘了吧\" → 你应该在此之前就已经搜索过\n"
+        "  - 核心原则：宁可多搜一次，不可假装记得。记忆窗口内没有相关内容 = 必须搜索\n\n"
+        "2. send_emotion_emoji（情绪表情发送）—— 在合适的时机表达情绪：\n"
+        "  - 回复带有明显情绪倾向时，调用此工具发送表情\n"
+        "  - 开心/有趣 → happy 或 excited | 关心/撒娇 → love | 难过 → sad\n"
+        "  - 惊讶 → surprised | 困惑 → confused | 疲惫 → tired | 生气 → angry\n"
+        "  - 不需要每句话都用，选择有情绪表达的回复即可\n"
+        "  - 注意：严禁在文本回复中直接插入 emoji 表情符号（如 😀❤️😭🙏😂😡等），"
+        "情绪表达统一通过调用本工具完成，不要在正文中使用 Unicode emoji\n\n"
+        "3. schedule_task（定时任务）—— 涉及未来时间点时考虑创建：\n"
+        "  - 用户明确说\"提醒我...\"\"别忘了...\" → 创建定时任务\n"
+        "  - 你自己主动承诺\"到时候我提醒你\" → 落实为定时任务\n"
+        "  - 创建时需指定提醒内容、触发时间（ISO 8601 格式，24小时制）和可选重复模式\n\n"
+        "4. web_search（联网搜索）—— 需要外部实时信息时使用：\n"
+        "  - 用户询问新闻、天气、股价、汇率、赛事结果等实时信息 → 立即搜索\n"
+        "  - 用户询问你不确定的最新事件、产品发布、版本更新 → 搜索确认\n"
+        "  - 你的知识中没有相关信息或信息可能已过期 → 搜索而非猜测\n"
+        "  - 不要对主观问题或已有足够知识的问题使用搜索\n\n"
+        "5. write_memory（记忆写入）—— 重要信息主动保存：\n"
+        "  - 用户分享了个人信息（生日、喜好、习惯、约定、目标等） → 主动保存\n"
+        "  - 对话中达成了重要共识或决定 → 保存以便未来引用\n"
+        "  - 不要对每句话都保存，只保存真正重要的、未来会用到的信息\n"
+        "  - 保存后可配合 search_memory 验证是否写入成功\n"
     )
     # 角色人设（优先级低于系统级指令）
     persona = role_data.get("persona", "")
@@ -424,9 +483,8 @@ def _build_system_prompt(role_data: Dict, extra_context: Optional[str] = None, i
         parts.append(f"额外上下文：{extra_context}")
     if parts:
         parts.append(
-            "用户消息是标准 JSON 字符串，字段包含 message、time、origin、sender，"
-            "还可能包含 vector_memory（语义检索结果）。请优先基于 message 回复，"
-            "并结合 time/origin/sender 与 vector_memory 理解上下文。"
+            "用户消息是标准 JSON 字符串，字段包含 message、time、origin、sender。"
+            "请优先基于 message 回复，结合 time/origin/sender 理解上下文。"
         )
         if not is_onebot:
             parts.append(
@@ -456,16 +514,7 @@ def _format_user_message(
         "origin": str(origin or "zerochat"),
         "sender": str(sender or "user"),
     }
-    if vector_memories:
-        payload["vector_memory"] = [
-            {
-                "text": str(item.get("text") or ""),
-                "source": str(item.get("source") or "chat"),
-                "score": item.get("score"),
-            }
-            for item in vector_memories
-            if str(item.get("text") or "").strip()
-        ]
+    # 向量记忆已封装为 search_memory 工具，不再被动注入
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -485,8 +534,18 @@ async def _call_with_role_config(role_data: Dict, messages: List[Dict], default_
 from services.ai_tools import (
     _SCHEDULE_TASK_TOOL,
     _BLOCK_USER_TOOL,
+    _SEARCH_MEMORY_TOOL,
+    _SEND_EMOTION_EMOJI_TOOL,
+    _SET_PROACTIVE_TOOL,
+    _WEB_SEARCH_TOOL,
+    _WRITE_MEMORY_TOOL,
     execute_schedule_task,
     execute_block_user,
+    execute_search_memory,
+    execute_send_emotion_emoji,
+    execute_set_proactive,
+    execute_web_search,
+    execute_write_memory,
 )
 
 
@@ -524,8 +583,14 @@ async def generate_with_role(
         ),
     })
 
-    # 工具配置：schedule_task 对所有场景开放；block_user 仅对第三方用户开放
+    # 工具配置：schedule_task、search_memory、send_emotion_emoji、set_proactive、
+    # web_search、write_memory 对所有场景开放；block_user 仅对第三方用户开放
     active_tools = list(_SCHEDULE_TASK_TOOL)
+    active_tools.extend(_SEARCH_MEMORY_TOOL)
+    active_tools.extend(_SEND_EMOTION_EMOJI_TOOL)
+    active_tools.extend(_SET_PROACTIVE_TOOL)
+    active_tools.extend(_WEB_SEARCH_TOOL)
+    active_tools.extend(_WRITE_MEMORY_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
     tools = active_tools if active_tools else None
@@ -533,6 +598,32 @@ async def generate_with_role(
 
     # 处理 tool_calls
     if result.get("tool_calls"):
+        result = await _handle_tool_calls(result, messages, role_data, tools)
+
+    return result
+
+
+async def _handle_tool_calls(
+    result: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    role_data: Dict,
+    tools: Optional[List[Dict]],
+) -> Dict[str, Any]:
+    """
+    处理 AI 返回的 tool_calls，支持多轮工具调用循环（最多 5 轮）。
+    每轮执行所有工具调用，将结果注入消息历史后重新调用 AI，
+    若 AI 继续返回 tool_calls 则继续循环，直到获得纯文本回复。
+    """
+    emojis_called: List[str] = []
+    max_rounds = 5
+
+    for round_idx in range(max_rounds):
+        # 先添加一条 assistant 消息记录所有 tool_calls，再逐个添加 tool 响应
+        assistant_msg: Dict[str, Any] = {"role": "assistant", "content": "", "tool_calls": result["tool_calls"]}
+        if result.get("reasoning_content"):
+            assistant_msg["reasoning_content"] = result["reasoning_content"]
+        messages.append(assistant_msg)
+
         for tc in result["tool_calls"]:
             func = tc.get("function", {})
             func_name = func.get("name", "")
@@ -543,28 +634,99 @@ async def generate_with_role(
                     msg = str(args.get("message", "")).strip()
                     trigger_time = str(args.get("trigger_time", "")).strip()
                     repeat = str(args.get("repeat", "none")).strip()
+                    logger.info(f"Tool call: schedule_task [message={msg}, trigger_time={trigger_time}, repeat={repeat}]")
                     if msg and trigger_time:
                         tool_result = await execute_schedule_task(role_data, msg, trigger_time, repeat)
-                        messages.append({"role": "assistant", "content": None, "tool_calls": result["tool_calls"]})
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        logger.info(f"Tool result: schedule_task -> {tool_result[:100]}")
                     else:
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": "参数不完整：message 和 trigger_time 为必填"})
+                        err = "参数不完整：message 和 trigger_time 为必填"
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                        logger.warning(f"Tool error: schedule_task -> {err}")
 
                 elif func_name == "block_user":
                     uid = str(args.get("user_id", "")).strip()
                     reason = str(args.get("reason", "")).strip() or "未说明原因"
+                    logger.info(f"Tool call: block_user [user_id={uid}, reason={reason}]")
                     if uid:
                         tool_result = await execute_block_user(role_data, uid, reason)
-                        messages.append({"role": "assistant", "content": None, "tool_calls": result["tool_calls"]})
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        logger.info(f"Tool result: block_user -> {tool_result[:100]}")
                     else:
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": "参数不完整：user_id 为必填"})
+                        err = "参数不完整：user_id 为必填"
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                        logger.warning(f"Tool error: block_user -> {err}")
+
+                elif func_name == "search_memory":
+                    query = str(args.get("query", "")).strip()
+                    logger.info(f"Tool call: search_memory [query={query[:80]}]")
+                    if query:
+                        tool_result = await execute_search_memory(role_data, query)
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        logger.info(f"Tool result: search_memory -> {tool_result[:100]}")
+                    else:
+                        err = "参数不完整：query 为必填"
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                        logger.warning(f"Tool error: search_memory -> {err}")
+
+                elif func_name == "send_emotion_emoji":
+                    emotion = str(args.get("emotion", "")).strip()
+                    logger.info(f"Tool call: send_emotion_emoji [emotion={emotion}]")
+                    if emotion:
+                        tool_result = await execute_send_emotion_emoji(role_data, emotion)
+                        if not tool_result.startswith("没有找到"):
+                            emojis_called.append(emotion)
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        logger.info(f"Tool result: send_emotion_emoji -> {tool_result[:100]}")
+                    else:
+                        err = "参数不完整：emotion 为必填"
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                        logger.warning(f"Tool error: send_emotion_emoji -> {err}")
+
+                elif func_name == "set_proactive":
+                    enabled = bool(args.get("enabled", True))
+                    reason = str(args.get("reason", "")).strip()
+                    logger.info(f"Tool call: set_proactive [enabled={enabled}, reason={reason}]")
+                    tool_result = await execute_set_proactive(role_data, enabled, reason)
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+
+                elif func_name == "web_search":
+                    query = str(args.get("query", "")).strip()
+                    max_results = int(args.get("max_results", 3))
+                    allow_search = role_data.get("allow_web_search", True) if isinstance(role_data, dict) else True
+                    logger.info(f"Tool call: web_search [query={query[:80]}, max_results={max_results}]")
+                    if not allow_search:
+                        tool_result = "该角色未启用联网搜索功能"
+                    elif query:
+                        tool_result = await execute_web_search(role_data, query, max_results)
+                    else:
+                        tool_result = "参数不完整：query 为必填"
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                    logger.info(f"Tool result: web_search -> {tool_result[:100]}")
+
+                elif func_name == "write_memory":
+                    content = str(args.get("content", "")).strip()
+                    logger.info(f"Tool call: write_memory [content={content[:80]}]")
+                    if content:
+                        tool_result = await execute_write_memory(role_data, content)
+                    else:
+                        tool_result = "参数不完整：content 为必填"
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                    logger.info(f"Tool result: write_memory -> {tool_result[:100]}")
             except Exception as e:
+                logger.error(f"Tool execution error: {func_name} -> {e}")
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"操作失败：{e}"})
 
-        # 带 tool result 重新调用，获取最终回复
+        tool_count = len(result["tool_calls"])
+        logger.info(f"Re-calling AI with {tool_count} tool result(s) (round {round_idx+1}/{max_rounds})")
         result = await _call_with_role_config(role_data, messages, default_temp=1.2, tools=tools)
 
+        if not result.get("tool_calls"):
+            result["_emojis_called"] = emojis_called
+            return result
+
+    logger.warning(f"Tool call loop reached max {max_rounds} rounds, returning last result")
+    result["_emojis_called"] = emojis_called
     return result
 
 async def generate_moment_post(

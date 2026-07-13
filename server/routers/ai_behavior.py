@@ -143,6 +143,16 @@ def _sanitize_reply_content(reply: Any) -> str:
     if not text:
         return ""
 
+    # 兼容层：AI 可能返回带 message/time/origin/sender 的 JSON 字符串
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            msg = parsed.get("message")
+            if msg is not None:
+                return str(msg).strip()
+    except Exception:
+        pass
+
     normalized = text.replace("：", ":")
     lines = [line.rstrip() for line in normalized.splitlines()]
     message_idx = -1
@@ -464,7 +474,9 @@ async def detect_intent(request: IntentDetectRequest):
       if not api_url or not api_key:
           return IntentDetectResponse(success=False, error="AI API 未配置")
 
-      result = await call_ai_direct(
+      from services.json_parse import call_ai_json
+
+      result = await call_ai_json(
           messages=[
               {"role": "system", "content": system_prompt},
               {"role": "user", "content": local_message},
@@ -474,6 +486,7 @@ async def detect_intent(request: IntentDetectRequest):
           model=model,
           temperature=0.1,
           max_tokens=200,
+          direct=True,
       )
 
       if not result.get("success"):
@@ -482,16 +495,7 @@ async def detect_intent(request: IntentDetectRequest):
               error=result.get("error") or "intent classify failed",
           )
 
-      content = (result.get("content") or "").strip()
-      if not content:
-          return IntentDetectResponse(success=False, error="empty ai response")
-
-      start = content.find("{")
-      end = content.rfind("}")
-      if start == -1 or end == -1 or end <= start:
-          return IntentDetectResponse(success=False, error="invalid ai response")
-
-      parsed = json.loads(content[start : end + 1])
+      parsed = result.get("data") or {}
       return IntentDetectResponse(
           success=True,
           intent=str(parsed.get("intent") or "normal_chat"),
@@ -527,8 +531,7 @@ async def _run_memory_ai_pipeline(
     from services.memory_service import (
         get_context_messages,
         get_memory_context_string,
-        get_relevant_memories,
-        append_short_term,
+append_short_term,
         trigger_memory_summary,
         _get_memory_length,
     )
@@ -597,16 +600,8 @@ async def _run_memory_ai_pipeline(
         client_history = _normalize_history_items(local_context.get("history"))
         history = backend_history if backend_history else client_history
 
+    # 向量记忆已封装为 search_memory 工具，由 AI 主动调用
     vector_memories: List[Dict[str, Any]] = []
-    try:
-        vector_memories = await get_relevant_memories(
-            role_id,
-            user_message,
-            top_k=2,
-            min_score=0.8,
-        )
-    except Exception as e:
-        print(f"向量记忆检索失败：{e}")
 
     backend_memory_context = (get_memory_context_string(role_id) or "").strip()
     client_core_memory = _normalize_core_memory(local_context.get("core_memory"))
@@ -702,6 +697,7 @@ async def _run_memory_ai_pipeline(
         "extra_context": extra_context,
         "new_core": new_core,
         "vector_memory_count": vector_memories_count,
+        "emojis_called": result.get("_emojis_called", []),
     }
 
 async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
@@ -794,12 +790,12 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     elif new_core is None:
         print(f"记忆总结触发：角色 {role.get('name')} 没有生成新的核心记忆")
     elif new_core == "noneed":
-        print(f"无需记忆总结，已跳过总结过程")
-    # 检测情绪并获取表情包
-    emoji = await detect_emotion_and_get_emoji(role_id,"1000000000001", ai_reply)
-    if emoji:
-        print(f"情绪检测：角色 {role.get('name')} 的回复被检测出情绪，返回表情包: {emoji}")
-        ai_reply += f" [{emoji}]"
+        pass
+    # 用户发消息后重置主动消息冷却计时
+    if str(event_context.get("sender") or "user") == "user":
+        from services import scheduler_service
+        scheduler_service.schedule_proactive_for_role(role_id)
+    # 情绪表情已封装为 send_emotion_emoji 工具，由 AI 主动调用
     return AIResponse(
         success=True,
         action="reply",
@@ -807,7 +803,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         metadata={
             "role_name": role.get("name"),
             "request_id": pipeline_result.get("request_id") or request_id,
-            "emoji": emoji  # 如果有匹配的表情包，返回表情包名称
+            "emojis_called": pipeline_result.get("emojis_called", []),
         }
     )
 
@@ -815,6 +811,8 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
 
 async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
     """处理主动消息触发"""
+    if not role.get("proactive_config", {}).get("enabled", False):
+        return AIResponse(success=False, action="ignore", content=None)
 
     role_id = event.role_id
     trigger_prompt = event.content or "请生成一条主动消息与用户互动，内容可以是问候、关心、建议等，要求符合角色设定，并符合上下文。"
@@ -1070,32 +1068,7 @@ async def _post_chat_completion(api_url: str, api_key: str, body: Dict[str, Any]
     return response.json()
 
 
-def _append_vision_memory(
-    role_id: Optional[str],
-    user_prompt: str,
-    final_reply: str,
-    mode: str,
-    image_understanding: Optional[str] = None,
-) -> None:
-    """将识图过程关键信息写入短期记忆。"""
-    from services.memory_service import append_short_term
-
-    rid = str(role_id or "").strip()
-    if not rid or is_tool_role_id(rid):
-        return
-
-    prompt_text = (user_prompt or "").strip() or "请描述这张图片的内容"
-
-    understanding = str(image_understanding or "").strip()
-    if understanding:
-        append_short_term(rid, "user", f"[图片识别结果/{mode}] {understanding}")
-    else:
-        append_short_term(rid, "user", f"[图片识别请求] {prompt_text}")
-        append_short_term(rid, "assistant", f"[图片识别结果/{mode}] {(final_reply or '').strip()}")
-
-    reply_text = (final_reply or "").strip()
-    if reply_text and (not understanding or reply_text != understanding):
-        append_short_term(rid, "assistant", f"[图片识别回复] {reply_text}")
+# _append_vision_memory 已迁移至 services.vision_service
 
 @router.post("/chat/vision")
 async def chat_with_vision(request: VisionRequest):
@@ -1104,23 +1077,20 @@ async def chat_with_vision(request: VisionRequest):
     
     使用 OpenAI Vision API 或兼容的 API 进行图片识别
     """
-    from services import settings_service
+    from services import vision_service
     from services.ai_service import generate_with_role
-    
+
     try:
         upload_dir_for_cleanup: Optional[Path] = None
 
-        settings = settings_service.load_settings()
-        global_ai = settings_service.get_ai_config()
-        vision_cfg = settings_service.get_vision_config()
-
-        mode = str(request.run_mode or vision_cfg.get("mode") or settings.get("vision_mode") or "standalone").strip().lower()
+        vision_cfg = vision_service.resolve_vision_config()
+        mode = str(request.run_mode or vision_cfg.get("mode") or "standalone").strip().lower()
         if mode not in {"standalone", "pre_model"}:
             mode = "standalone"
 
-        vision_api_url = str(vision_cfg.get("api_url") or "").strip() or str(global_ai.get("api_url") or "").strip()
-        vision_api_key = str(vision_cfg.get("api_key") or "").strip() or str(global_ai.get("api_key") or "").strip()
-        vision_model = str(vision_cfg.get("model") or "").strip() or str(global_ai.get("model") or "gpt-4o").strip()
+        vision_api_url = vision_cfg.get("api_url", "")
+        vision_api_key = vision_cfg.get("api_key", "")
+        vision_model = vision_cfg.get("model", "gpt-4o")
 
         upload_id = str(request.upload_id or "").strip()
         image_base64_value = str(request.image_base64 or "").strip()
@@ -1149,25 +1119,8 @@ async def chat_with_vision(request: VisionRequest):
             raise HTTPException(status_code=400, detail="image_base64 或 upload_id 必须提供")
 
         image_data_url = f"data:{request.mime_type};base64,{image_base64_value}"
-        multimodal_messages: List[Dict[str, Any]] = []
-
-        if request.system_prompt:
-            multimodal_messages.append({"role": "system", "content": request.system_prompt})
-
-        multimodal_messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_data_url},
-                    },
-                    {
-                        "type": "text",
-                        "text": request.user_prompt,
-                    },
-                ],
-            }
+        multimodal_messages = vision_service.build_vision_messages(
+            image_data_url, request.user_prompt, request.system_prompt
         )
 
         # 独立模型模式：全角色统一识图模型直接返回结果
@@ -1182,7 +1135,7 @@ async def chat_with_vision(request: VisionRequest):
                 },
             )
             reply = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-            _append_vision_memory(
+            vision_service.append_vision_memory(
                 role_id=request.role_id,
                 user_prompt=request.user_prompt,
                 final_reply=reply,
@@ -1194,30 +1147,17 @@ async def chat_with_vision(request: VisionRequest):
             return {"reply": reply, "success": True, "mode": mode, "vision_model": vision_model}
 
         # 前置模型模式：先识图，再把识图结果交给聊天模型生成最终回复
+        pre_messages = vision_service.build_vision_messages(
+            image_data_url,
+            f"用户的问题是：{request.user_prompt}\n请提取图片中和用户问题相关的关键内容，长度不超过100个字符。",
+            "你是图片理解助手。请准确提取图像中的关键视觉信息，输出简洁文本，不要编造不可见细节。",
+        )
         pre_result = await _post_chat_completion(
             api_url=vision_api_url,
             api_key=vision_api_key,
             body={
                 "model": vision_model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "你是图片理解助手。请准确提取图像中的关键视觉信息，输出简洁文本，不要编造不可见细节。",
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": image_data_url},
-                            },
-                            {
-                                "type": "text",
-                                "text": "请提取这张图的关键内容，长度不超过100个字符。",
-                            },
-                        ],
-                    },
-                ],
+                "messages": pre_messages,
                 "max_tokens": 700,
             },
         )
@@ -1292,7 +1232,7 @@ async def chat_with_vision(request: VisionRequest):
                 },
             )
             reply = _sanitize_reply_content(final_result.get("choices", [{}])[0].get("message", {}).get("content", ""))
-        _append_vision_memory(
+        vision_service.append_vision_memory(
             role_id=request.role_id,
             user_prompt=request.user_prompt,
             final_reply=reply,

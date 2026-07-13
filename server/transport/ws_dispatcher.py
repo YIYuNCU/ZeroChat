@@ -699,6 +699,15 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
     if action == "ai_intent":
         return await _handle_ai_intent(payload, backend_base_url)
 
+    if action == "recover_chat_push":
+        from transport.push_hub import get_missed_chat_pushes
+
+        task_ids = payload.get("task_ids")
+        if isinstance(task_ids, list):
+            recovered = get_missed_chat_pushes(task_ids)
+            return {"recovered": recovered}
+        return {"recovered": []}
+
     # --- Inline short delegation handlers ---
     if action == "chat_snapshot":
         client_md5 = str(payload.get("client_md5") or "").strip()

@@ -918,7 +918,48 @@ class ChatController extends ChangeNotifier {
       },
     );
 
+    // Register reconnection recovery
+    SecureWebSocketClient.instance.onReconnected = () {
+      unawaited(_recoverPendingChatTasks());
+    };
+
     debugPrint('ChatController: chat push listener initialized');
+  }
+
+  /// Recover missed chat pushes after WebSocket reconnection.
+  /// The server caches recent chat_response pushes; on reconnect we query
+  /// for any pushes that arrived while we were disconnected.
+  Future<void> _recoverPendingChatTasks() async {
+    if (_pendingChatTasks.isEmpty) return;
+
+    final taskIds = _pendingChatTasks.keys.toList();
+    debugPrint('ChatController: recovering ${taskIds.length} pending chat tasks');
+
+    try {
+      final result = await SecureWebSocketClient.instance.request(
+        'recover_chat_push',
+        {'task_ids': taskIds},
+        timeout: const Duration(seconds: 10),
+      );
+
+      final recovered = result['recovered'];
+      if (recovered is List) {
+        for (final item in recovered) {
+          if (item is! Map) continue;
+          final taskId = item['task_id']?.toString() ?? '';
+          final pushPayload = item['payload'];
+          if (taskId.isEmpty || pushPayload is! Map) continue;
+
+          final completer = _pendingChatTasks.remove(taskId);
+          if (completer == null || completer.isCompleted) continue;
+
+          completer.complete(Map<String, dynamic>.from(pushPayload));
+          debugPrint('ChatController: recovered push for task $taskId');
+        }
+      }
+    } catch (e) {
+      debugPrint('ChatController: recover missed pushes failed: $e');
+    }
   }
 
   Future<String?> _callAI({
@@ -927,6 +968,7 @@ class ChatController extends ChangeNotifier {
     required String userMessage,
     required bool isGroup,
   }) async {
+    String? asyncPushError;
     final recentMessages = MessageStore.instance.getRecentRounds(
       chatId,
       role.maxContextRounds,
@@ -973,7 +1015,16 @@ class ChatController extends ChangeNotifier {
       _pendingChatTasks[taskId] = completer;
 
       try {
-        final pushPayload = await completer.future;
+        final pushPayload = await completer.future.timeout(
+          const Duration(seconds: 120),
+          onTimeout: () {
+            _pendingChatTasks.remove(taskId);
+            throw TimeoutException(
+              'Async chat push timeout',
+              const Duration(seconds: 120),
+            );
+          },
+        );
 
         final success = pushPayload['success'] == true;
         final content = pushPayload['content']?.toString();
@@ -998,10 +1049,49 @@ class ChatController extends ChangeNotifier {
           return content;
         }
 
-        debugPrint('ChatController: Async chat failed: ${pushPayload['error']}');
+        asyncPushError = pushPayload['error']?.toString();
+        debugPrint('ChatController: Async chat failed: $asyncPushError');
       } catch (e) {
         _pendingChatTasks.remove(taskId);
         debugPrint('ChatController: Async chat error (taskId=$taskId): $e');
+
+        // On timeout, try to recover the missed push from server cache
+        if (e is TimeoutException) {
+          try {
+            final result = await SecureWebSocketClient.instance.request(
+              'recover_chat_push',
+              {'task_ids': [taskId]},
+              timeout: const Duration(seconds: 10),
+            );
+            final recovered = result['recovered'];
+            if (recovered is List && recovered.isNotEmpty) {
+              final pushPayload = (recovered[0] is Map)
+                  ? (recovered[0] as Map)['payload']
+                  : null;
+              if (pushPayload is Map) {
+                final success = pushPayload['success'] == true;
+                final content = pushPayload['content']?.toString();
+                if (success && content != null) {
+                  debugPrint('ChatController: AI response via recovery push');
+                  final metadata = pushPayload['metadata'] is Map
+                      ? Map<String, dynamic>.from(pushPayload['metadata'])
+                      : null;
+                  final requestId = metadata?['request_id']?.toString().trim();
+                  await MemoryService.appendJsonMemoryPair(
+                    roleId: role.id,
+                    userContent: userMessage,
+                    assistantContent: content,
+                    requestId: (requestId != null && requestId.isNotEmpty) ? requestId : null,
+                    jsonMemory: (attachedJson != null && attachedJson.isNotEmpty) ? attachedJson : null,
+                  );
+                  return content;
+                }
+              }
+            }
+          } catch (recoveryError) {
+            debugPrint('ChatController: push recovery failed: $recoveryError');
+          }
+        }
       }
     }
 
@@ -1016,7 +1106,7 @@ class ChatController extends ChangeNotifier {
     final errorMessage = createMessage(
       senderId: 'error',
       receiverId: 'me',
-      content: '消息发送失败：网络连接中断，请检查后端服务是否运行',
+      content: '消息发送失败：${asyncPushError ?? '网络连接中断，请检查后端服务是否运行'}',
     );
     await MessageStore.instance.addMessage(chatId, errorMessage);
     return null;
