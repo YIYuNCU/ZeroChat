@@ -18,6 +18,7 @@ class InputBar extends StatefulWidget {
   final Function(String)? onSend;
   final Function(String imagePath)? onImageSend;
   final void Function(EmojiItem emoji)? onEmojiSend;
+  final ValueChanged<String>? onTextChanged;
   final VoidCallback? onInputActivated;
   final ValueChanged<bool>? onEmojiPanelVisibilityChanged;
   final ValueChanged<double>? onEmojiPanelHeightChanged;
@@ -30,6 +31,7 @@ class InputBar extends StatefulWidget {
     this.onSend,
     this.onImageSend,
     this.onEmojiSend,
+    this.onTextChanged,
     this.onInputActivated,
     this.onEmojiPanelVisibilityChanged,
     this.onEmojiPanelHeightChanged,
@@ -105,6 +107,7 @@ class _InputBarState extends State<InputBar> {
         _showSendButton = hasText;
       });
     }
+    widget.onTextChanged?.call(_controller.text);
   }
 
   void _handleSend() {

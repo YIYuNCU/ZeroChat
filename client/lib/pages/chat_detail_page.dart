@@ -671,6 +671,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   onSend: _sendMessage,
                   onImageSend: _sendImageMessage,
                   onEmojiSend: _sendEmojiMessage,
+                  onTextChanged: (_) => ChatController.instance
+                      .notifyInputActivity(widget.chatId),
                   roleId: widget.isGroup
                       ? RoleService.getCurrentRole().id
                       : widget.chatId,

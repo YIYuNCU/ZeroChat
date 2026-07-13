@@ -221,6 +221,22 @@ class ChatController extends ChangeNotifier {
     );
   }
 
+  /// 输入框内容变化时调用：只要还有待发送消息，就重置等待定时器。
+  /// 这样用户在发送后继续打字时，请求会持续等待，直到停止输入满 X 秒。
+  void notifyInputActivity(String chatId) {
+    final waitSeconds = SettingsService.instance.messageWaitSeconds;
+    // 立即发送模式，或当前没有待发送消息时，不做任何等待处理
+    if (waitSeconds == 0) return;
+    final pending = _pendingMessages[chatId];
+    if (pending == null || pending.isEmpty) return;
+
+    _waitTimers[chatId]?.cancel();
+    _waitTimers[chatId] = Timer(
+      Duration(seconds: waitSeconds),
+      () => _sendBatchedMessages(chatId),
+    );
+  }
+
   /// 发送合并后的消息
   Future<void> _sendBatchedMessages(String chatId) async {
     // 取出待发送消息

@@ -57,7 +57,7 @@ class _SettingsPageState extends State<SettingsPage> {
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Text(
-              '消息等待时间：发送消息后等待指定秒数，期间发送的消息会合并为一条发送给AI，方便多段输入。设为 0 表示立即发送。',
+              '输入停顿时间：发送消息后，若你仍在输入框中打字，请求会持续等待；停止输入满指定秒数后，才把这段时间发送的消息合并为一条发送给 AI，方便多段慢速输入。设为 0 表示立即发送。',
               style: TextStyle(color: Color(0xFF888888), fontSize: 12),
             ),
           ),
@@ -106,7 +106,7 @@ class _SettingsPageState extends State<SettingsPage> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('等待时间', style: TextStyle(fontSize: 16)),
+              const Text('输入停顿', style: TextStyle(fontSize: 16)),
               Text(
                 seconds == 0 ? '立即发送' : '$seconds 秒',
                 style: const TextStyle(
