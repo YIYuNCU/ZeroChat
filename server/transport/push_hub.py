@@ -12,10 +12,16 @@ _clients_lock = asyncio.Lock()
 _encryption_secret = DEFAULT_ENCRYPTION_SECRET
 _logger = None
 
-# Recent chat_response push cache for missed-push recovery
+# Recent push cache for missed-push recovery.
+# Covers chat_response (keyed by task_id) plus proactive/task messages
+# (keyed by message_id) so clients that were offline/backgrounded can recover
+# pushes that arrived while disconnected.
 _CHAT_PUSH_CACHE: dict[str, tuple[datetime, dict]] = {}
-_CHAT_PUSH_CACHE_TTL = 120  # seconds
-_CHAT_PUSH_CACHE_MAX = 100
+_CHAT_PUSH_CACHE_TTL = 600  # seconds
+_CHAT_PUSH_CACHE_MAX = 200
+
+# Event types whose payload carries a message_id and should be cached for recovery
+_MESSAGE_PUSH_EVENTS = ("task_message", "proactive_message")
 
 
 def configure_push_hub(*, encryption_secret: str | None = None, logger=None):
@@ -70,11 +76,15 @@ async def publish_server_push(event_type: str, payload: dict[str, Any] | None = 
         "data": encrypted,
     }
 
-    # Cache chat_response pushes for missed-push recovery
+    # Cache pushes for missed-push recovery.
+    cache_key = None
     if event_type == "chat_response" and payload and payload.get("task_id"):
-        task_id = payload["task_id"]
+        cache_key = str(payload["task_id"])
+    elif event_type in _MESSAGE_PUSH_EVENTS and payload and payload.get("message_id"):
+        cache_key = str(payload["message_id"])
+    if cache_key:
         _prune_chat_push_cache()
-        _CHAT_PUSH_CACHE[task_id] = (datetime.now(), data)
+        _CHAT_PUSH_CACHE[cache_key] = (datetime.now(), data)
 
     async with _clients_lock:
         clients = list(_clients)

@@ -181,6 +181,34 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           const SizedBox(height: 10),
 
+          // 短期记忆（对话历史）
+          _buildSection([
+            _buildItem(
+              title: '短期记忆',
+              trailing: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '对话历史',
+                    style: TextStyle(
+                      color: Color(0xFF888888),
+                      fontSize: 15,
+                    ),
+                  ),
+                  SizedBox(width: 4),
+                  Icon(
+                    Icons.arrow_forward_ios,
+                    size: 16,
+                    color: Color(0xFFCCCCCC),
+                  ),
+                ],
+              ),
+              onTap: _showShortTermMemory,
+            ),
+          ]),
+
+          const SizedBox(height: 10),
+
           // 向量记忆（长期语义记忆）
           _buildSection([
             _buildItem(
@@ -952,74 +980,394 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     );
   }
 
-  void _showVectorMemoryOptions() {
+  void _showShortTermMemory() {
+    List<Map<String, dynamic>> items = [];
+    bool loading = true;
+
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.white,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
       ),
       builder: (context) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  '向量记忆',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'AI 在对话中自动生成的语义记忆，用于在长对话中维持对历史话题的理解。\n当前共 ${MemoryService.vectorMemoryCount} 条向量记忆。',
-                  style: const TextStyle(fontSize: 14, color: Color(0xFF888888)),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: MemoryService.vectorMemoryCount > 0
-                        ? () async {
-                            Navigator.pop(context);
-                            final confirm = await showDialog<bool>(
-                              context: context,
-                              builder: (ctx) => AlertDialog(
-                                title: const Text('清空向量记忆'),
-                                content: const Text('确定要清空所有向量记忆吗？这将删除 AI 自动生成的语义记忆。'),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(ctx, false),
-                                    child: const Text('取消'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(ctx, true),
-                                    child: const Text('确认', style: TextStyle(color: Colors.red)),
-                                  ),
-                                ],
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            Future<void> reload() async {
+              final list = await MemoryService.getShortTermFromBackend(
+                roleId: _currentRole.id,
+              );
+              if (!mounted) return;
+              setModalState(() {
+                items = list;
+                loading = false;
+              });
+            }
+
+            if (loading) {
+              reload();
+            }
+
+            return DraggableScrollableSheet(
+              initialChildSize: 0.7,
+              minChildSize: 0.3,
+              maxChildSize: 0.95,
+              expand: false,
+              builder: (context, scrollController) {
+                return Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '短期记忆 (${items.length} 条)',
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          if (items.isNotEmpty)
+                            TextButton(
+                              onPressed: () async {
+                                final confirm = await _confirmDialog(
+                                  '清空短期记忆',
+                                  '确定要清空所有短期对话记忆吗？这会删除后端保存的对话历史，AI 将失去近期上下文。',
+                                );
+                                if (confirm == true) {
+                                  await MemoryService.clearShortTermBackend(
+                                    roleId: _currentRole.id,
+                                  );
+                                  await reload();
+                                }
+                              },
+                              child: const Text(
+                                '清空',
+                                style: TextStyle(color: Colors.red),
                               ),
-                            );
-                            if (confirm == true) {
-                              await MemoryService.clearVectorMemory();
-                              if (mounted) setState(() {});
-                            }
-                          }
-                        : null,
-                    icon: const Icon(Icons.delete_outline, size: 20),
-                    label: const Text('清空所有向量记忆'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.red,
-                      side: const BorderSide(color: Colors.red),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: loading
+                          ? const Center(child: CircularProgressIndicator())
+                          : items.isEmpty
+                              ? const Center(
+                                  child: Text(
+                                    '暂无短期记忆',
+                                    style: TextStyle(color: Color(0xFF888888)),
+                                  ),
+                                )
+                              : ListView.builder(
+                                  controller: scrollController,
+                                  itemCount: items.length,
+                                  itemBuilder: (context, index) {
+                                    return _buildShortTermTile(
+                                      items[index],
+                                      reload,
+                                    );
+                                  },
+                                ),
+                    ),
+                  ],
+                );
+              },
+            );
+          },
         );
       },
+    );
+  }
+
+  Widget _buildShortTermTile(
+    Map<String, dynamic> item,
+    Future<void> Function() reload,
+  ) {
+    final id = item['id'] is int
+        ? item['id'] as int
+        : int.tryParse('${item['id']}') ?? -1;
+    final role = '${item['role'] ?? ''}';
+    final origin = '${item['origin'] ?? ''}';
+    final message = MemoryService.extractShortTermMessage(item['content']);
+    final isUser = role == 'user';
+    final roleLabel = isUser ? '用户' : 'AI';
+
+    return ListTile(
+      leading: CircleAvatar(
+        radius: 16,
+        backgroundColor:
+            isUser ? const Color(0xFF07C160) : const Color(0xFFBBBBBB),
+        child: Text(
+          roleLabel,
+          style: const TextStyle(fontSize: 11, color: Colors.white),
+        ),
+      ),
+      title: Text(
+        message,
+        maxLines: 4,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: origin.isNotEmpty && origin != 'zerochat'
+          ? Text(
+              origin,
+              style: const TextStyle(fontSize: 12, color: Color(0xFFAAAAAA)),
+            )
+          : null,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.edit_outlined, color: Color(0xFF888888)),
+            onPressed: id < 0
+                ? null
+                : () async {
+                    final edited =
+                        await _editTextDialog('编辑短期记忆', message);
+                    if (edited != null &&
+                        edited.isNotEmpty &&
+                        edited != message) {
+                      final ok = await MemoryService.updateShortTermEntry(
+                        id,
+                        edited,
+                        roleId: _currentRole.id,
+                      );
+                      if (ok) await reload();
+                    }
+                  },
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline, color: Colors.red),
+            onPressed: id < 0
+                ? null
+                : () async {
+                    await MemoryService.deleteShortTermEntry(
+                      id,
+                      roleId: _currentRole.id,
+                    );
+                    await reload();
+                  },
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showVectorMemoryOptions() {
+    List<Map<String, dynamic>> items = [];
+    bool loading = true;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            Future<void> reload() async {
+              final list = await MemoryService.listVectorMemories(
+                roleId: _currentRole.id,
+              );
+              if (!mounted) return;
+              setModalState(() {
+                items = list;
+                loading = false;
+              });
+              setState(() {});
+            }
+
+            if (loading) {
+              // 首次构建时触发加载
+              reload();
+            }
+
+            return DraggableScrollableSheet(
+              initialChildSize: 0.6,
+              minChildSize: 0.3,
+              maxChildSize: 0.9,
+              expand: false,
+              builder: (context, scrollController) {
+                return Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '向量记忆 (${items.length} 条)',
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          if (items.isNotEmpty)
+                            TextButton(
+                              onPressed: () async {
+                                final confirm = await _confirmDialog(
+                                  '清空向量记忆',
+                                  '确定要清空所有向量记忆吗？这将删除 AI 自动生成的语义记忆。',
+                                );
+                                if (confirm == true) {
+                                  await MemoryService.clearVectorMemory();
+                                  await reload();
+                                }
+                              },
+                              child: const Text(
+                                '清空',
+                                style: TextStyle(color: Colors.red),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: loading
+                          ? const Center(child: CircularProgressIndicator())
+                          : items.isEmpty
+                              ? const Center(
+                                  child: Text(
+                                    'AI 会在对话中自动生成语义记忆\n暂无向量记忆',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: Color(0xFF888888)),
+                                  ),
+                                )
+                              : ListView.builder(
+                                  controller: scrollController,
+                                  itemCount: items.length,
+                                  itemBuilder: (context, index) {
+                                    final item = items[index];
+                                    final id = item['id'] is int
+                                        ? item['id'] as int
+                                        : int.tryParse('${item['id']}') ?? -1;
+                                    final text = '${item['text'] ?? ''}';
+                                    final source = '${item['source'] ?? ''}';
+                                    return ListTile(
+                                      title: Text(
+                                        text,
+                                        maxLines: 3,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      subtitle: source.isNotEmpty
+                                          ? Text(
+                                              source,
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                color: Color(0xFFAAAAAA),
+                                              ),
+                                            )
+                                          : null,
+                                      trailing: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.edit_outlined,
+                                              color: Color(0xFF888888),
+                                            ),
+                                            onPressed: id < 0
+                                                ? null
+                                                : () async {
+                                                    final edited =
+                                                        await _editTextDialog(
+                                                      '编辑向量记忆',
+                                                      text,
+                                                    );
+                                                    if (edited != null &&
+                                                        edited.isNotEmpty &&
+                                                        edited != text) {
+                                                      final ok = await MemoryService
+                                                          .updateVectorMemory(
+                                                              id, edited,
+                                                              roleId:
+                                                                  _currentRole.id);
+                                                      if (ok) await reload();
+                                                    }
+                                                  },
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(
+                                              Icons.delete_outline,
+                                              color: Colors.red,
+                                            ),
+                                            onPressed: id < 0
+                                                ? null
+                                                : () async {
+                                                    await MemoryService
+                                                        .deleteVectorMemory(id,
+                                                            roleId:
+                                                                _currentRole.id);
+                                                    await reload();
+                                                  },
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
+                    ),
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// 通用确认对话框
+  Future<bool?> _confirmDialog(String title, String content) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(content),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确认', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 通用文本编辑对话框
+  Future<String?> _editTextDialog(String title, String initial) {
+    final controller = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          maxLines: 5,
+          minLines: 1,
+          decoration: const InputDecoration(border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
     );
   }
 

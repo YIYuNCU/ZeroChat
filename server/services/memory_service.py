@@ -1262,12 +1262,103 @@ def clear_short_term_by_conversation(role_id: str, conversation_key: str):
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         logger.info(f"已清除记忆: role={role_id}, conversation_key={conversation_key}")
 
+def update_short_term_entry(role_id: str, entry_id: int, message: str) -> bool:
+    """更新单条短期记忆的消息内容（保留 origin/sender/timestamp 等元数据）。
+
+    对 user 消息按标准 JSON 结构重新封装；assistant 消息直接写入纯文本，
+    与 append_short_term 的写入策略保持一致。
+    """
+    if is_tool_role_id(role_id):
+        return False
+    text = str(message or "").strip()
+    if not text:
+        return False
+
+    with _get_connection(role_id) as conn:
+        row = conn.execute(
+            "SELECT role, timestamp, origin, sender FROM short_term WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        if not row:
+            return False
+        role, timestamp, origin, sender = row[0], row[1], row[2], row[3]
+        if role == "assistant":
+            new_content = text
+        else:
+            new_content = ensure_structured_memory_message(
+                content=text,
+                role=role,
+                timestamp=timestamp,
+                origin=origin,
+                sender=sender,
+            )
+        cursor = conn.execute(
+            "UPDATE short_term SET content = ? WHERE id = ?",
+            (new_content, entry_id),
+        )
+        _set_meta(conn, "updated_at", datetime.now().isoformat())
+        return cursor.rowcount > 0
+
+def delete_short_term_entry(role_id: str, entry_id: int) -> bool:
+    """按主键删除单条短期记忆。"""
+    if is_tool_role_id(role_id):
+        return False
+    with _get_connection(role_id) as conn:
+        cursor = conn.execute("DELETE FROM short_term WHERE id = ?", (entry_id,))
+        _set_meta(conn, "updated_at", datetime.now().isoformat())
+        return cursor.rowcount > 0
+
 def clear_vector_memory(role_id: str):
     """清空向量记忆库"""
     if is_tool_role_id(role_id):
         return
     from services.vector_memory import VectorMemoryStore
     VectorMemoryStore(role_id).clear()
+
+def list_vector_memories(role_id: str, limit: int = 500, offset: int = 0) -> List[Dict]:
+    """列出向量记忆条目（不含 embedding 本体）。"""
+    if is_tool_role_id(role_id):
+        return []
+    from services.vector_memory import VectorMemoryStore
+    return VectorMemoryStore(role_id).list_all(limit=limit, offset=offset)
+
+def delete_vector_memory(role_id: str, memory_id: int) -> bool:
+    """删除单条向量记忆。"""
+    if is_tool_role_id(role_id):
+        return False
+    from services.vector_memory import VectorMemoryStore
+    return VectorMemoryStore(role_id).delete_by_id(memory_id)
+
+async def update_vector_memory(role_id: str, memory_id: int, new_text: str) -> Dict[str, Any]:
+    """更新单条向量记忆的文本并重新生成嵌入向量。
+
+    Returns:
+        {"success": bool, "item": dict | None, "error": str | None}
+    """
+    if is_tool_role_id(role_id):
+        return {"success": False, "item": None, "error": "invalid role"}
+
+    text = str(new_text or "").strip()
+    if not text:
+        return {"success": False, "item": None, "error": "empty text"}
+
+    from services.vector_memory import VectorMemoryStore
+    from services.ai_service import generate_embedding
+
+    store = VectorMemoryStore(role_id)
+    if store.get_by_id(memory_id) is None:
+        return {"success": False, "item": None, "error": "memory not found"}
+
+    result = await generate_embedding(text)
+    if not result.get("success") or not result.get("embedding"):
+        return {"success": False, "item": None,
+                "error": result.get("error") or "embedding failed"}
+
+    updated = store.update_text(memory_id, text, result["embedding"])
+    if not updated:
+        return {"success": False, "item": None, "error": "update failed"}
+
+    return {"success": True, "item": store.get_by_id(memory_id), "error": None}
 
 def get_memory_context_string(role_id: str) -> str:
     """

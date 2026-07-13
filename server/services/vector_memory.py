@@ -150,6 +150,84 @@ class VectorMemoryStore:
         finally:
             conn.close()
 
+    def list_all(self, limit: int = 500, offset: int = 0) -> List[Dict]:
+        """列出向量记忆（不返回 embedding 向量本体，避免传输冗余数据）。
+
+        Returns:
+            [{"id": int, "text": str, "role": str, "timestamp": str,
+              "source": str, "created_at": str}, ...]，按 id 倒序（最新在前）。
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, text, role, timestamp, source, created_at "
+                "FROM vector_embeddings ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "text": row[1],
+                    "role": row[2],
+                    "timestamp": row[3],
+                    "source": row[4],
+                    "created_at": row[5],
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def get_by_id(self, memory_id: int) -> Optional[Dict]:
+        """按主键获取单条向量记忆（不含 embedding 本体）。"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT id, text, role, timestamp, source, created_at "
+                "FROM vector_embeddings WHERE id = ?",
+                (memory_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "text": row[1],
+                "role": row[2],
+                "timestamp": row[3],
+                "source": row[4],
+                "created_at": row[5],
+            }
+        finally:
+            conn.close()
+
+    def delete_by_id(self, memory_id: int) -> bool:
+        """按主键删除单条向量记忆，返回是否删除成功。"""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "DELETE FROM vector_embeddings WHERE id = ?", (memory_id,)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_text(self, memory_id: int, new_text: str,
+                    new_embedding: List[float]) -> bool:
+        """更新单条向量记忆的文本与嵌入向量，返回是否更新成功。"""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "UPDATE vector_embeddings SET text = ?, embedding = ?, timestamp = ? "
+                "WHERE id = ?",
+                (new_text, json.dumps(new_embedding),
+                 datetime.now().isoformat(), memory_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:
     """计算两个向量的余弦相似度"""

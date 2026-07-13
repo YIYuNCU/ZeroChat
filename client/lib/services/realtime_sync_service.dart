@@ -12,6 +12,7 @@ class RealtimeSyncService {
 
   static bool _initialized = false;
   static StreamSubscription<Map<String, dynamic>>? _subscription;
+  static StreamSubscription<void>? _reconnectSubscription;
 
   static DateTime _lastChatSync = DateTime.fromMillisecondsSinceEpoch(0);
   static DateTime _lastTaskSync = DateTime.fromMillisecondsSinceEpoch(0);
@@ -66,7 +67,32 @@ class RealtimeSyncService {
       },
     );
 
+    // 重连成功后主动做一次全量对账，补齐离线/后台期间产生的消息、任务和动态。
+    _reconnectSubscription =
+        SecureWebSocketClient.instance.onReconnectedStream.listen(
+      (_) => resyncAll(),
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('RealtimeSyncService: reconnect stream error: $error');
+      },
+    );
+
     debugPrint('RealtimeSyncService initialized');
+  }
+
+  /// 全量对账：拉取聊天快照、任务、动态。用于重连或前台恢复后补齐离线期间的更新。
+  static Future<void> resyncAll() async {
+    final now = DateTime.now();
+    _lastChatSync = now;
+    _lastTaskSync = now;
+    _lastMomentSync = now;
+    try {
+      await MessageStore.instance.syncFromBackendSnapshot();
+      await TaskService.fetchFromBackend();
+      await MomentsService.instance.fetchFromBackend();
+      debugPrint('RealtimeSyncService: full resync completed');
+    } catch (e) {
+      debugPrint('RealtimeSyncService: full resync failed: $e');
+    }
   }
 
   static bool _isChatPush(String type) {
@@ -86,6 +112,8 @@ class RealtimeSyncService {
   static Future<void> dispose() async {
     await _subscription?.cancel();
     _subscription = null;
+    await _reconnectSubscription?.cancel();
+    _reconnectSubscription = null;
     _initialized = false;
   }
 }

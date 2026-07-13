@@ -40,6 +40,8 @@ class SecureWebSocketClient {
       <String, Completer<Map<String, dynamic>>>{};
     final StreamController<Map<String, dynamic>> _serverPushController =
       StreamController<Map<String, dynamic>>.broadcast();
+    final StreamController<void> _reconnectedController =
+      StreamController<void>.broadcast();
 
   Completer<void>? _connectingCompleter;
   int _requestSeq = 0;
@@ -50,6 +52,10 @@ class SecureWebSocketClient {
 
   bool get isConnected => _socket != null && _socket!.readyState == WebSocket.open;
   Stream<Map<String, dynamic>> get serverPushStream => _serverPushController.stream;
+
+  /// Emits after every successful reconnection (not the first connect).
+  /// Multiple subscribers can listen (e.g. RealtimeSyncService full re-sync).
+  Stream<void> get onReconnectedStream => _reconnectedController.stream;
 
   Future<void> ensureConnected() async {
     final existing = _socket;
@@ -107,8 +113,13 @@ class SecureWebSocketClient {
 
       _startHeartbeat();
       completer.complete();
-      if (wasReconnection && onReconnected != null) {
-        onReconnected!();
+      if (wasReconnection) {
+        if (onReconnected != null) {
+          onReconnected!();
+        }
+        if (!_reconnectedController.isClosed) {
+          _reconnectedController.add(null);
+        }
       }
     } catch (e) {
       _bumpBackoff();

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import '../models/message.dart';
 import 'storage_service.dart';
@@ -271,6 +273,64 @@ class MemoryService {
     await _syncCoreMemoryToBackend();
   }
 
+  /// 列出后端向量记忆条目
+  static Future<List<Map<String, dynamic>>> listVectorMemories({String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'vector_memory_list',
+        {'role_id': rid},
+      );
+      final items = response['items'];
+      if (items is List) {
+        final list = items
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        vectorMemoryCount = list.length;
+        return list;
+      }
+      return [];
+    } catch (e) {
+      debugPrint('MemoryService: List vector memories failed: $e');
+      return [];
+    }
+  }
+
+  /// 删除单条向量记忆
+  static Future<bool> deleteVectorMemory(int memoryId, {String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'vector_memory_delete',
+        {'role_id': rid, 'memory_id': memoryId},
+      );
+      final bool success = response['success'] == true;
+      if (response['vector_memory_count'] is int) {
+        vectorMemoryCount = response['vector_memory_count'] as int;
+      }
+      return success;
+    } catch (e) {
+      debugPrint('MemoryService: Delete vector memory failed: $e');
+      return false;
+    }
+  }
+
+  /// 更新单条向量记忆文本（后端会重新嵌入）
+  static Future<bool> updateVectorMemory(int memoryId, String newText, {String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'vector_memory_update',
+        {'role_id': rid, 'memory_id': memoryId, 'new_text': newText},
+      );
+      return response['success'] == true;
+    } catch (e) {
+      debugPrint('MemoryService: Update vector memory failed: $e');
+      return false;
+    }
+  }
+
   /// 清空后端向量记忆库
   static Future<bool> clearVectorMemory() async {
     try {
@@ -289,6 +349,91 @@ class MemoryService {
       debugPrint('MemoryService: Clear vector memory failed: $e');
       return false;
     }
+  }
+
+  // ========== 后端短期记忆（对话历史）管理 ==========
+
+  /// 从后端拉取短期记忆条目（含 id / role / content / origin / timestamp）
+  static Future<List<Map<String, dynamic>>> getShortTermFromBackend({String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'roles_memory_get',
+        {'role_id': rid},
+      );
+      final raw = response['short_term'];
+      if (raw is List) {
+        return raw
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+      }
+      return [];
+    } catch (e) {
+      debugPrint('MemoryService: Get short-term from backend failed: $e');
+      return [];
+    }
+  }
+
+  /// 更新单条短期记忆内容
+  static Future<bool> updateShortTermEntry(int entryId, String message, {String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'short_term_update',
+        {'role_id': rid, 'entry_id': entryId, 'message': message},
+      );
+      return response['success'] == true;
+    } catch (e) {
+      debugPrint('MemoryService: Update short-term entry failed: $e');
+      return false;
+    }
+  }
+
+  /// 删除单条短期记忆
+  static Future<bool> deleteShortTermEntry(int entryId, {String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'short_term_delete',
+        {'role_id': rid, 'entry_id': entryId},
+      );
+      return response['success'] == true;
+    } catch (e) {
+      debugPrint('MemoryService: Delete short-term entry failed: $e');
+      return false;
+    }
+  }
+
+  /// 清空后端短期记忆
+  static Future<bool> clearShortTermBackend({String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'short_term_clear',
+        {'role_id': rid},
+      );
+      return response['success'] == true;
+    } catch (e) {
+      debugPrint('MemoryService: Clear short-term backend failed: $e');
+      return false;
+    }
+  }
+
+  /// 从短期记忆条目的 content 中提取可读消息文本
+  /// (content 可能是 {"message":...,"time":...} 的 JSON 字符串)
+  static String extractShortTermMessage(dynamic content) {
+    final text = (content ?? '').toString().trim();
+    if (text.isEmpty) return '';
+    if (text.startsWith('{') && text.endsWith('}')) {
+      try {
+        final decoded = jsonDecode(text);
+        if (decoded is Map && decoded['message'] != null) {
+          return decoded['message'].toString();
+        }
+      } catch (_) {}
+    }
+    return text;
   }
 
   /// 同步核心记忆到后端

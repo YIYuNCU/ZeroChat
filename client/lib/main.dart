@@ -244,6 +244,11 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       BackgroundRuntimeService.notifyAppLifecycle(inForeground: true);
+      // 回到前台后确保连接并做一次全量对账，补齐后台期间可能漏收的消息。
+      unawaited(() async {
+        await SecureWebSocketClient.instance.ensureConnected();
+        await RealtimeSyncService.resyncAll();
+      }());
       return;
     }
 

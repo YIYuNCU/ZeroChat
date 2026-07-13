@@ -127,21 +127,20 @@ def _extract_plain_message_content(content: Any) -> str:
     if not text:
         return ""
 
-    # Strip markdown code fences
+    # Prefer structured JSON response when present.
+    from services.json_parse import extract_json_object
+
+    parsed = extract_json_object(text)
+    if parsed is not None:
+        message_value = parsed.get("message")
+        if message_value is not None:
+            message_text = str(message_value).strip()
+            if message_text:
+                return message_text
+
+    # Strip markdown code fences before line-based fallback parsing
     if text.startswith("```") and text.endswith("```"):
         text = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", text).rstrip("`").strip()
-
-    # Prefer structured JSON response when present.
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            message_value = parsed.get("message")
-            if message_value is not None:
-                message_text = str(message_value).strip()
-                if message_text:
-                    return message_text
-    except Exception:
-        pass
 
     normalized = text.replace("：", ":")
     lines = [line.rstrip() for line in normalized.splitlines()]
@@ -628,7 +627,10 @@ async def _handle_tool_calls(
             func = tc.get("function", {})
             func_name = func.get("name", "")
             try:
-                args = json.loads(func.get("arguments", "{}"))
+                from services.json_parse import extract_json_object
+                args = extract_json_object(func.get("arguments", "{}"))
+                if args is None:
+                    args = {}
 
                 if func_name == "schedule_task":
                     msg = str(args.get("message", "")).strip()

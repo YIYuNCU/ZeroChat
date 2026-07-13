@@ -935,6 +935,37 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             raise ValueError("role_id missing")
         return await roles.get_memory(role_id)
 
+    if action == "short_term_update":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        entry_id = payload.get("entry_id")
+        if entry_id is None:
+            raise ValueError("entry_id missing")
+        from services.memory_service import update_short_term_entry
+        message = str(payload.get("message") or "")
+        success = update_short_term_entry(role_id, int(entry_id), message)
+        return {"success": success}
+
+    if action == "short_term_delete":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        entry_id = payload.get("entry_id")
+        if entry_id is None:
+            raise ValueError("entry_id missing")
+        from services.memory_service import delete_short_term_entry
+        success = delete_short_term_entry(role_id, int(entry_id))
+        return {"success": success}
+
+    if action == "short_term_clear":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        from services.memory_service import clear_short_term
+        clear_short_term(role_id)
+        return {"success": True}
+
     if action == "vector_memory_clear":
         role_id = str(payload.get("role_id") or "").strip()
         if not role_id:
@@ -942,6 +973,38 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         from services.memory_service import clear_vector_memory
         clear_vector_memory(role_id)
         return {"success": True, "vector_memory_count": 0}
+
+    if action == "vector_memory_list":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        from services.memory_service import list_vector_memories
+        limit = int(payload.get("limit") or 500)
+        offset = int(payload.get("offset") or 0)
+        items = list_vector_memories(role_id, limit=limit, offset=offset)
+        return {"items": items, "count": len(items)}
+
+    if action == "vector_memory_delete":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        memory_id = payload.get("memory_id")
+        if memory_id is None:
+            raise ValueError("memory_id missing")
+        from services.memory_service import delete_vector_memory, _get_vector_memory_count
+        success = delete_vector_memory(role_id, int(memory_id))
+        return {"success": success, "vector_memory_count": _get_vector_memory_count(role_id)}
+
+    if action == "vector_memory_update":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        memory_id = payload.get("memory_id")
+        if memory_id is None:
+            raise ValueError("memory_id missing")
+        new_text = str(payload.get("new_text") or "")
+        from services.memory_service import update_vector_memory
+        return await update_vector_memory(role_id, int(memory_id), new_text)
 
     if action == "health":
         return {"status": "healthy", "timestamp": datetime.now().isoformat()}

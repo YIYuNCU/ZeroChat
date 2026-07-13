@@ -144,14 +144,13 @@ def _sanitize_reply_content(reply: Any) -> str:
         return ""
 
     # 兼容层：AI 可能返回带 message/time/origin/sender 的 JSON 字符串
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            msg = parsed.get("message")
-            if msg is not None:
-                return str(msg).strip()
-    except Exception:
-        pass
+    from services.json_parse import extract_json_object
+
+    parsed = extract_json_object(text)
+    if parsed is not None:
+        msg = parsed.get("message")
+        if msg is not None:
+            return str(msg).strip()
 
     normalized = text.replace("：", ":")
     lines = [line.rstrip() for line in normalized.splitlines()]
@@ -437,7 +436,6 @@ async def handle_ai_event(event: AIEvent):
 @router.post("/ai/intent", response_model=IntentDetectResponse)
 async def detect_intent(request: IntentDetectRequest):
     """通过后端代理进行意图识别"""
-    from services.ai_service import call_ai_direct
     from services import settings_service
 
     system_prompt = """
