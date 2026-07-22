@@ -525,7 +525,7 @@ async def _run_memory_ai_pipeline(
     include_assistant_memory: bool = True,
     trigger_summary_after_reply: bool = True,
 ) -> Dict[str, Any]:
-    from services.ai_service import generate_with_role
+    from services.ai_service import generate_with_role, is_no_reply_directive
     from services.memory_service import (
         get_context_messages,
         get_memory_context_string,
@@ -533,8 +533,6 @@ append_short_term,
         trigger_memory_summary,
         _get_memory_length,
     )
-    from services.vector_memory import embed_and_store
-
     local_context = event_context or {}
     is_main_user = (user_sender == "user")
     role_max_context_rounds = role.get("max_context_rounds") if isinstance(role, dict) else None
@@ -615,6 +613,15 @@ append_short_term,
 
     normalized_request_id = str(request_id or local_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
 
+    # 数值系统：读取当前值注入 prompt（仅主 App 路径，onebot 不启用四部分/数值）
+    stats_current = None
+    if not origin.startswith("onebot"):
+        try:
+            from services import stats_service
+            stats_current = stats_service.get_current_values(role_id, role)
+        except Exception as e:
+            print(f"数值状态读取失败：{e}")
+
     result = await generate_with_role(
         role_data=role,
         user_message=user_message,
@@ -623,6 +630,7 @@ append_short_term,
         vector_memories=vector_memories,
         origin=origin,
         sender=user_sender,
+        stats_current=stats_current,
     )
 
     vector_memories_count = len(vector_memories)
@@ -640,6 +648,16 @@ append_short_term,
         }
 
     ai_reply = _sanitize_reply_content(result.get("content") or "")
+    no_reply = is_no_reply_directive(ai_reply)
+
+    # 数值系统：从回复中解析数值块并按上下限裁剪后持久化
+    if stats_current is not None and not no_reply:
+        try:
+            from services import stats_service
+            stats_service.update_from_reply(role_id, role, ai_reply)
+        except Exception as e:
+            print(f"数值状态更新失败：{e}")
+
     if include_user_memory:
         user_memory_content = str(user_message or "").strip()
         if not user_memory_content:
@@ -657,9 +675,8 @@ append_short_term,
             sender=user_sender,
             sender_id=sender_id,
             group_id=group_id,
-            embed=is_main_user,
         )
-    if include_assistant_memory:
+    if include_assistant_memory and not no_reply:
         append_short_term(
             role_id,
             "assistant",
@@ -671,16 +688,7 @@ append_short_term,
             sender=role.get("name") or "assistant",
             sender_id=sender_id,
             group_id=group_id,
-            embed=is_main_user,
         )
-        if is_main_user and len(ai_reply.strip()) >= 30 and not is_tool_role_id(role_id):
-            try:
-                asyncio.ensure_future(embed_and_store(
-                    role_id, ai_reply, role="assistant",
-                    timestamp=datetime.now().isoformat(), source="chat"
-                ))
-            except Exception:
-                pass
 
     new_core = None
     if trigger_summary_after_reply:
@@ -691,6 +699,7 @@ append_short_term,
         "error": None,
         "request_id": normalized_request_id,
         "reply": ai_reply,
+        "no_reply": no_reply,
         "history": history,
         "extra_context": extra_context,
         "new_core": new_core,
@@ -708,6 +717,14 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     role_id = event.role_id
     user_message = event.content or ""
     event_context = event.context or {}
+
+    # 归档角色不可对话
+    if role.get("archived", False):
+        return AIResponse(
+            success=False,
+            action="ignore",
+            error="角色已归档，无法聊天",
+        )
 
     search_context = ""
     enable_connection = role.get("enable_connection", False)
@@ -793,15 +810,17 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     if str(event_context.get("sender") or "user") == "user":
         from services import scheduler_service
         scheduler_service.schedule_proactive_for_role(role_id)
+    no_reply = pipeline_result.get("no_reply") is True
     # 情绪表情已封装为 send_emotion_emoji 工具，由 AI 主动调用
     return AIResponse(
         success=True,
-        action="reply",
+        action="ignore" if no_reply else "reply",
         content=ai_reply,
         metadata={
             "role_name": role.get("name"),
             "request_id": pipeline_result.get("request_id") or request_id,
-            "emojis_called": pipeline_result.get("emojis_called", []),
+            "emojis_called": [] if no_reply else pipeline_result.get("emojis_called", []),
+            "no_reply": no_reply,
         }
     )
 
@@ -828,6 +847,8 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
     )
     if not pipeline_result.get("success"):
         return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
+    if pipeline_result.get("no_reply") is True:
+        return AIResponse(success=True, action="ignore", content=None)
 
     ai_message = pipeline_result.get("reply") or ""
     
@@ -887,6 +908,8 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
     )
     if not pipeline_result.get("success"):
         return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
+    if pipeline_result.get("no_reply") is True:
+        return AIResponse(success=True, action="ignore", content=None)
 
     ai_message = pipeline_result.get("reply") or ""
     

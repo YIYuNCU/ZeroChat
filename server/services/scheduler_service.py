@@ -86,7 +86,11 @@ def schedule_proactive_for_role(role_id: str):
     
     with open(profile_file, "r", encoding="utf-8") as f:
         role = json.load(f)
-    
+
+    # 归档角色不发主动消息
+    if role.get("archived", False):
+        return
+
     proactive_config = role.get("proactive_config", {})
     if not proactive_config.get("enabled", False):
         return
@@ -281,6 +285,8 @@ async def _check_moment_posts():
                     role_id = str(profile.get("id", "")).strip()
                     if role_id.startswith("1000000000"):
                         continue  # 跳过系统角色
+                    if profile.get("archived", False):
+                        continue  # 跳过已归档角色
                     roles.append(profile)
     
     if not roles:
@@ -332,6 +338,8 @@ def _load_non_tool_roles() -> List[Dict]:
             role_id = str(profile.get("id", "")).strip()
             if not role_id or is_tool_role_id(role_id):
                 continue
+            if profile.get("archived", False):
+                continue  # 跳过已归档角色
             roles.append(profile)
         except Exception:
             continue

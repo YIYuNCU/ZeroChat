@@ -2,6 +2,8 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../models/message.dart';
+import '../models/stats_config.dart';
+import '../core/message_parts.dart';
 import '../services/sticker_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
@@ -185,15 +187,244 @@ class ChatBubble extends StatelessWidget {
             _buildQuoteBlock(),
             const SizedBox(height: 6),
           ],
-          // 正文
-          Text(
-            message.content,
+          // 正文按标签的原始顺序逐片段渲染。
+          ..._buildBodyParts(),
+        ],
+      ),
+    );
+  }
+
+  /// 构建消息正文各片段（对话/动作/心理/事实/数值）。
+  List<Widget> _buildBodyParts() {
+    final parts = MessageParts.parse(
+      message.content,
+      allowFact: isSender,
+      allowNoReply: !isSender,
+    );
+    final role = isSender ? null : RoleService.getRoleById(message.senderId);
+    final showAction = role?.showAction ?? true;
+    final showPsychology = role?.showPsychology ?? true;
+    final showStats = role?.showStats ?? true;
+    final widgets = <Widget>[];
+
+    void addPart(Widget widget, {double spacing = 6}) {
+      widgets.add(
+        Padding(
+          padding: EdgeInsets.only(top: widgets.isEmpty ? 0 : spacing),
+          child: widget,
+        ),
+      );
+    }
+
+    for (final part in parts.parts) {
+      switch (part.type) {
+        case MessagePartType.dialogue:
+          addPart(_buildDialogue(part.text));
+          break;
+        case MessagePartType.action:
+          if (showAction) addPart(_buildAction(part.text));
+          break;
+        case MessagePartType.psychology:
+          if (showPsychology) addPart(_buildPsychology(part.text));
+          break;
+        case MessagePartType.fact:
+          // parse(allowFact: false) 已保证 AI 事实块不会进入此分支。
+          addPart(_buildFact(part.text), spacing: 8);
+          break;
+        case MessagePartType.stats:
+          if (showStats && part.stats != null && part.stats!.isNotEmpty) {
+            addPart(_buildStats(part.stats!, role?.statsConfig), spacing: 8);
+          }
+          break;
+        case MessagePartType.noReply:
+          addPart(_buildNoReply(part.text));
+          break;
+      }
+    }
+
+    if (widgets.isEmpty && parts.parts.isEmpty && message.content.isNotEmpty) {
+      widgets.add(_buildDialogue(message.content));
+    }
+    return widgets;
+  }
+
+  Widget _buildDialogue(String text) {
+    return Text(
+      text,
+      style: const TextStyle(
+        fontSize: 17,
+        color: Color(0xFF000000),
+        height: 1.4,
+      ),
+    );
+  }
+
+  Widget _buildPsychology(String text) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(top: 2, right: 4),
+          child: Icon(
+            Icons.psychology_alt_outlined,
+            size: 15,
+            color: Color(0xFF9C7BB8),
+          ),
+        ),
+        Flexible(
+          child: Text(
+            text,
             style: const TextStyle(
-              fontSize: 17,
-              color: Color(0xFF000000),
-              height: 1.4,
+              fontSize: 14,
+              fontStyle: FontStyle.italic,
+              color: Color(0xFF8A6FA6),
+              height: 1.3,
             ),
           ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAction(String text) {
+    return Text(
+      text,
+      style: const TextStyle(
+        fontSize: 14,
+        fontStyle: FontStyle.italic,
+        color: Color(0xFF888888),
+        height: 1.3,
+      ),
+    );
+  }
+
+  Widget _buildFact(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF4D6),
+        borderRadius: BorderRadius.circular(6),
+        border: const Border(
+          left: BorderSide(color: Color(0xFFD89B21), width: 3),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 1, right: 5),
+            child: Icon(
+              Icons.fact_check_outlined,
+              size: 15,
+              color: Color(0xFF9A6800),
+            ),
+          ),
+          Flexible(
+            child: Text(
+              text,
+              style: const TextStyle(
+                fontSize: 14,
+                color: Color(0xFF684700),
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNoReply(String text) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(
+          Icons.notifications_off_outlined,
+          size: 15,
+          color: Color(0xFF888888),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          text,
+          style: const TextStyle(
+            fontSize: 13,
+            fontStyle: FontStyle.italic,
+            color: Color(0xFF888888),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStats(Map<String, String> stats, StatsConfig? config) {
+    final items = config?.stats ?? const <StatItem>[];
+    // 建立 key -> 定义 映射，用于显示名称与画进度条
+    final defByKey = {for (final s in items) s.key: s};
+
+    final chips = <Widget>[];
+    stats.forEach((key, value) {
+      final def = defByKey[key];
+      final label = def?.name.isNotEmpty == true ? def!.name : key;
+      final numValue = double.tryParse(value);
+      double? ratio;
+      if (def != null && numValue != null && def.max > def.min) {
+        ratio = ((numValue - def.min) / (def.max - def.min)).clamp(0.0, 1.0);
+      }
+      chips.add(_buildStatChip(label, value, ratio));
+    });
+
+    return Wrap(spacing: 6, runSpacing: 6, children: chips);
+  }
+
+  Widget _buildStatChip(String label, String value, double? ratio) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF0F2F5),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE0E3E8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF666666)),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                value,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF333333),
+                ),
+              ),
+            ],
+          ),
+          if (ratio != null) ...[
+            const SizedBox(height: 3),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: SizedBox(
+                width: 64,
+                height: 4,
+                child: LinearProgressIndicator(
+                  value: ratio,
+                  backgroundColor: const Color(0xFFE0E3E8),
+                  valueColor: const AlwaysStoppedAnimation<Color>(
+                    Color(0xFF7BC857),
+                  ),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

@@ -62,11 +62,19 @@ async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     Returns:
         [{"title": "...", "body": "...", "href": "..."}]
     """
+    # 包已从 duckduckgo_search 更名为 ddgs，优先使用新包，兼容旧包
     try:
-        from duckduckgo_search import DDGS
-        
+        from ddgs import DDGS
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            logger.warning("搜索依赖未安装！请运行: pip install ddgs")
+            return []
+
+    try:
         logger.info(f"Starting web search for: '{query}'")
-        
+
         results = []
         with DDGS(timeout=10) as ddgs:
             for r in ddgs.text(query, max_results=max_results):
@@ -75,13 +83,10 @@ async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
                     "body": r.get("body", ""),
                     "href": r.get("href", ""),
                 })
-        
+
         logger.info(f"Search completed: '{query}' -> {len(results)} results")
         return results
-        
-    except ImportError:
-        logger.warning("duckduckgo_search not installed! Run: pip install duckduckgo_search")
-        return []
+
     except Exception as e:
         logger.error(f"Search error for '{query}': {type(e).__name__}: {e}")
         return []

@@ -31,6 +31,7 @@ data/roles/*/memory.sqlite
 data/roles/*/memory.sqlite-shm
 data/roles/*/memory.sqlite-wal
 data/roles/*/memory.json.backup
+data/roles/*/profile.json
 
 config/
 *.png

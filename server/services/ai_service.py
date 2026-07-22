@@ -14,6 +14,13 @@ from services import settings_service
 
 logger = logging.getLogger(__name__)
 
+NO_REPLY_DIRECTIVE = "<无回复/>"
+
+
+def is_no_reply_directive(content: Any) -> bool:
+    """仅接受独立的无回复指令，避免吞掉与正文混合的回复。"""
+    return str(content or "").strip() == NO_REPLY_DIRECTIVE
+
 # 共享 httpx 客户端连接池
 _SHARED_CLIENT: Optional[httpx.AsyncClient] = None
 _SHARED_CLIENT_LOCK = None
@@ -175,6 +182,7 @@ async def _post_chat(
     temperature: float,
     max_tokens: int,
     tools: Optional[List[Dict]] = None,
+    stats_role_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
         payload: Dict[str, Any] = {
@@ -207,15 +215,18 @@ async def _post_chat(
         # DeepSeek 等 API 可能在限速时返回 200 OK 但 content 为空
         if not content and not tool_calls:
             return {"success": False, "content": None, "error": "AI 返回了空内容，可能是 API 限速或服务不稳定，请重试"}
-        if "usage" in data:
-            print(
-                "hit chache:{},miss cache:{},total tokens:{}".format(
-                    data["usage"].get("prompt_cache_hit_tokens"),
-                    data["usage"].get("prompt_cache_miss_tokens"),
-                    data["usage"].get("total_tokens")
-                )
-            )
+        usage = data.get("usage")
+        if usage:
+            # 按角色累计 token 用量与缓存量（无角色的辅助调用不计入）
+            if stats_role_id:
+                try:
+                    from services.memory_service import record_usage
+                    record_usage(stats_role_id, usage, model)
+                except Exception as exc:
+                    logger.warning("record_usage failed: %s", exc)
         result = {"success": True, "content": content, "user_content": messages[-1], "error": None}
+        if usage:
+            result["usage"] = usage
         if tool_calls:
             result["tool_calls"] = tool_calls
         # DeepSeek 等 API 的 thinking 模式会返回 reasoning_content，重调时需原样传回
@@ -244,6 +255,7 @@ async def call_ai(
     temperature: float = 0.7,
     max_tokens: int = 1000,
     tools: Optional[List[Dict]] = None,
+    stats_role_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     统一 AI API 调用
@@ -253,6 +265,7 @@ async def call_ai(
         model: 模型名称，默认从配置读取
         temperature: 温度参数
         max_tokens: 最大 token 数
+        stats_role_id: 若提供，则按该角色累计记录本次 token/缓存用量
 
     Returns:
         {"success": bool, "content": str, "error": str}
@@ -271,6 +284,7 @@ async def call_ai(
         temperature=resolved_temperature,
         max_tokens=max_tokens,
         tools=tools,
+        stats_role_id=stats_role_id,
     )
 
 async def call_ai_direct(
@@ -354,7 +368,52 @@ async def generate_embedding(
         return {"success": False, "embedding": None, "error": str(e)}
 
 
-def _build_system_prompt(role_data: Dict, extra_context: Optional[str] = None, is_onebot: bool = False) -> str:
+def _build_stats_instruction(role_data: Dict, stats_current: Optional[Dict[str, Any]] = None) -> str:
+    """根据角色的 stats_config 构建数值系统指令（含当前值）。未启用则返回空串。"""
+    stats_config = role_data.get("stats_config") or {}
+    if not stats_config.get("enabled"):
+        return ""
+    stats = stats_config.get("stats") or []
+    if not stats:
+        return ""
+    stats_current = stats_current or {}
+    lines = [
+        "【数值系统】\n"
+        "你需要维护以下数值，并在每次回复中输出一个数值块，格式为："
+        "<数值>键1:值1;键2:值2;...</数值>（每个数值用 键:值 表示，多个用 ; 分隔）。\n"
+        "规则：\n"
+        "  - 必须覆盖下方列出的全部数值，取值为数字且必须落在各自的上下限区间内\n"
+        "  - 依据数值的作用与当前对话情境合理演化（可增可减，变化幅度要自然）\n"
+        "  - 数值块作为独立的一段输出（用 $ 与其他内容分隔）\n"
+        "当前各数值及其定义：",
+    ]
+    for item in stats:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        name = str(item.get("name") or key).strip()
+        vmin = item.get("min", 0)
+        vmax = item.get("max", 100)
+        initial = item.get("initial")
+        cur = stats_current.get(key)
+        if cur is None:
+            cur = initial if initial is not None else vmin
+        desc = str(item.get("description") or "").strip()
+        desc_part = f"，作用：{desc}" if desc else ""
+        lines.append(
+            f"  - {name}（键 {key}）：当前 {cur}，范围 [{vmin}, {vmax}]{desc_part}"
+        )
+    return "\n".join(lines)
+
+
+def _build_system_prompt(
+    role_data: Dict,
+    extra_context: Optional[str] = None,
+    is_onebot: bool = False,
+    stats_current: Optional[Dict[str, Any]] = None,
+) -> str:
     """Build system prompt from role data."""
     parts = []
 
@@ -468,6 +527,8 @@ def _build_system_prompt(role_data: Dict, extra_context: Optional[str] = None, i
         "5. write_memory（记忆写入）—— 重要信息主动保存：\n"
         "  - 用户分享了个人信息（生日、喜好、习惯、约定、目标等） → 主动保存\n"
         "  - 对话中达成了重要共识或决定 → 保存以便未来引用\n"
+        "  - 必须先综合人物、事件、结果、上下文与发生时间，写成简洁客观的摘要，禁止复制聊天原文\n"
+        "  - 能确定事件发生时间时传 occurred_at；无法确定时省略，由系统使用当前消息时间\n"
         "  - 不要对每句话都保存，只保存真正重要的、未来会用到的信息\n"
         "  - 保存后可配合 search_memory 验证是否写入成功\n"
     )
@@ -490,10 +551,41 @@ def _build_system_prompt(role_data: Dict, extra_context: Optional[str] = None, i
                 '你给用户的回复必须严格执行以下要求:只包含消息正文(即只包含message部分),'
                 '不要输出 time、origin、sender 等其他字段内容'
             )
+            parts.append(
+                "【消息格式标记】\n"
+                "你的回复可由以下部分组成，每部分用对应的中文标签包裹：\n"
+                "  - 对话：<对话>...</对话> —— 你实际说出口的话，这是主体内容\n"
+                "  - 动作：<动作>...</动作> —— 描述你正在做的动作/行为（可选）\n"
+                "  - 心理：<心理>...</心理> —— 你的内心想法或情绪波动（可选）\n"
+                "规则：\n"
+                "  - 除无回复指令外，对话部分必不可少；动作、心理按需使用，不要每句都用\n"
+                "  - 灵活组合各种类型，按内容实际发生/生成的顺序输出；不得套用固定顺序\n"
+                "  - 同一种类型在一次回复中可以出现多次，例如："
+                "<对话>...</对话><动作>...</动作><对话>...</对话>"
+                "<心理>...</心理><动作>...</动作>\n"
+                "  - 同类内容出现在不同位置时必须保留为多个标签块，不得跨位置合并\n"
+                "  - 未被标签包裹的散文本会被当作对话处理，但推荐显式使用 <对话> 标签\n"
+                "  - 标签内只写对应类型的内容，不要在一个标签里混入其他类型\n"
+                "  - 不要使用【】、『』、() 等其他符号来表达动作或心理\n"
+                "  - <事实>...</事实> 是用户专属格式，表示已经发生的客观事件。"
+                "看到用户消息中的事实块时按已发生事件理解，但你绝对不能输出 <事实> 标签"
+            )
+            parts.append(
+                "【无回复指令】\n"
+                f"当你结合上下文判断确实无需回复时，可以返回 {NO_REPLY_DIRECTIVE}。\n"
+                "规则：\n"
+                "  - 仅在回应会显得多余、打扰或没有实际内容时使用；用户提出问题、表达情绪或期待互动时应正常回复\n"
+                f"  - 使用时整条回复必须且只能是 {NO_REPLY_DIRECTIVE}，不得与对话、动作、心理、数值、$ 分段或其他文本混用\n"
+                "  - 无回复时不要调用发送表情等面向用户的输出工具"
+            )
         parts.append(
             "在回复中适当使用$字符进行分段操作，在改变对话内容时进行分段，"
             "以使回复内容更易读，但不要每句话都分段，不要每句话都转换内容。"
         )
+        if not is_onebot:
+            stats_instruction = _build_stats_instruction(role_data, stats_current)
+            if stats_instruction:
+                parts.append(stats_instruction)
     return "\n\n".join(parts)
 
 
@@ -520,6 +612,7 @@ def _format_user_message(
 async def _call_with_role_config(role_data: Dict, messages: List[Dict], default_temp: float = 0.7, tools: Optional[List[Dict]] = None) -> Dict[str, Any]:
     """Call AI using role-specific model configuration."""
     model_override, url_override, key_override, temp_override = _get_role_ai_config(role_data)
+    stats_role_id = str(role_data.get("id") or "").strip() if isinstance(role_data, dict) else ""
     return await call_ai(
         messages,
         model=model_override,
@@ -527,6 +620,7 @@ async def _call_with_role_config(role_data: Dict, messages: List[Dict], default_
         api_key=key_override,
         temperature=temp_override or default_temp,
         tools=tools,
+        stats_role_id=stats_role_id or None,
     )
 
 
@@ -556,6 +650,7 @@ async def generate_with_role(
     vector_memories: Optional[List[Dict[str, Any]]] = None,
     origin: str = "zerochat",
     sender: str = "user",
+    stats_current: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     以角色身份生成回复
@@ -563,7 +658,9 @@ async def generate_with_role(
     messages = []
     is_onebot = origin.startswith("onebot")
     is_third_party = is_onebot and sender != "user"
-    system_content = _build_system_prompt(role_data, extra_context, is_onebot=is_onebot)
+    system_content = _build_system_prompt(
+        role_data, extra_context, is_onebot=is_onebot, stats_current=stats_current
+    )
     if system_content:
         messages.append({"role": "system", "content": system_content})
     if history:
@@ -707,12 +804,21 @@ async def _handle_tool_calls(
                     logger.info(f"Tool result: web_search -> {tool_result[:100]}")
 
                 elif func_name == "write_memory":
-                    content = str(args.get("content", "")).strip()
-                    logger.info(f"Tool call: write_memory [content={content[:80]}]")
-                    if content:
-                        tool_result = await execute_write_memory(role_data, content)
+                    summary = str(
+                        args.get("summary") or args.get("content") or ""
+                    ).strip()
+                    occurred_at = str(args.get("occurred_at") or "").strip() or None
+                    logger.info(
+                        "Tool call: write_memory [summary=%s, occurred_at=%s]",
+                        summary[:80],
+                        occurred_at,
+                    )
+                    if summary:
+                        tool_result = await execute_write_memory(
+                            role_data, summary, occurred_at
+                        )
                     else:
-                        tool_result = "参数不完整：content 为必填"
+                        tool_result = "参数不完整：summary 为必填"
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
                     logger.info(f"Tool result: write_memory -> {tool_result[:100]}")
             except Exception as e:

@@ -22,6 +22,14 @@ class MemoryService {
   static int maxShortTermSize = 100;
   static const String _jsonMemoryKeyPrefix = 'json_memory_';
 
+  /// 前端 JSON 记忆每角色最大条数（FIFO 截断，避免无限增长）
+  static const int maxJsonMemoryEntries = 200;
+
+  /// 按 roleId 记录上次核心记忆刷新时间与进行中的请求（TTL 节流 + in-flight 去重）
+  static final Map<String, DateTime> _coreMemoryLastRefresh = {};
+  static final Map<String, Future<void>> _coreMemoryInFlight = {};
+  static const Duration _coreMemoryRefreshThrottle = Duration(seconds: 30);
+
   /// 初始化记忆服务
   static Future<void> init() async {
     await _loadCoreMemory();
@@ -50,9 +58,40 @@ class MemoryService {
   }
 
   /// 从后端记忆数据库刷新核心记忆
-  static Future<void> refreshCoreMemoryFromBackend({String? roleId}) async {
+  /// 带按 roleId 的 in-flight 去重与 TTL 节流：切角色来回、连续进出设置页
+  /// 不会在短时间内重复拉取。[force] 为 true 时跳过节流（如用户手动刷新）。
+  static Future<void> refreshCoreMemoryFromBackend({
+    String? roleId,
+    bool force = false,
+  }) async {
+    final rid = roleId ?? RoleService.getCurrentRole().id;
+
+    // 复用进行中的同角色请求
+    final inFlight = _coreMemoryInFlight[rid];
+    if (inFlight != null) {
+      return inFlight;
+    }
+    // TTL 节流
+    if (!force) {
+      final last = _coreMemoryLastRefresh[rid];
+      if (last != null &&
+          DateTime.now().difference(last) < _coreMemoryRefreshThrottle) {
+        return;
+      }
+    }
+
+    final future = _doRefreshCoreMemoryFromBackend(rid);
+    _coreMemoryInFlight[rid] = future;
     try {
-      final rid = roleId ?? RoleService.getCurrentRole().id;
+      await future;
+    } finally {
+      _coreMemoryInFlight.remove(rid);
+    }
+  }
+
+  static Future<void> _doRefreshCoreMemoryFromBackend(String rid) async {
+    _coreMemoryLastRefresh[rid] = DateTime.now();
+    try {
       final response = await SecureWebSocketClient.instance.request(
         'roles_memory_get',
         {'role_id': rid},
@@ -177,6 +216,14 @@ class MemoryService {
     await _syncCoreMemoryToBackend();
   }
 
+  /// 仅更新本地核心记忆缓存（不触发后端同步）。
+  /// 用于调用方已经把权威数据写入后端（如 roles_memory_update）后，
+  /// 直接同步本地状态，避免多余的回读往返。
+  static Future<void> setCoreMemoryLocal(List<String> memories) async {
+    _coreMemory = List<String>.from(memories);
+    await _saveCoreMemory();
+  }
+
   // ========== 工具方法 ==========
 
   /// 清空所有记忆
@@ -204,7 +251,7 @@ class MemoryService {
   static Future<void> appendJsonMemoryPair({
     required String roleId,
     required String userContent,
-    required String assistantContent,
+    required String? assistantContent,
     String? requestId,
     String? taskId,
     String? jsonMemory,
@@ -224,16 +271,28 @@ class MemoryService {
       'request_id': rid,
       'json_memory': payloadContent.isNotEmpty ? payloadContent : null,
     });
-    list.add({
-      'role': 'assistant',
-      'content': assistantContent,
-      'timestamp': now,
-      'task_id': taskId,
-      'request_id': rid,
-      'json_memory': payloadContent.isNotEmpty ? payloadContent : null,
-    });
+    if (assistantContent != null && assistantContent.trim().isNotEmpty) {
+      list.add({
+        'role': 'assistant',
+        'content': assistantContent,
+        'timestamp': now,
+        'task_id': taskId,
+        'request_id': rid,
+        'json_memory': payloadContent.isNotEmpty ? payloadContent : null,
+      });
+    }
+
+    // FIFO 截断：只保留最近 maxJsonMemoryEntries 条，避免无限增长。
+    if (list.length > maxJsonMemoryEntries) {
+      list.removeRange(0, list.length - maxJsonMemoryEntries);
+    }
 
     await StorageService.setJsonList(_jsonMemoryKey(roleId), list);
+  }
+
+  /// 清空指定角色的前端 JSON 记忆（删除角色时调用）
+  static Future<void> clearJsonMemory(String roleId) async {
+    await StorageService.remove(_jsonMemoryKey(roleId));
   }
 
   /// 检查是否应该自动总结核心记忆（每20轮）
@@ -347,6 +406,38 @@ class MemoryService {
       return success;
     } catch (e) {
       debugPrint('MemoryService: Clear vector memory failed: $e');
+      return false;
+    }
+  }
+
+  // ========== Token 用量 / 缓存量统计 ==========
+
+  /// 获取某角色的 token 用量与缓存量统计（累计 + 最近一次）
+  static Future<Map<String, dynamic>?> getUsageStats({String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'usage_stats_get',
+        {'role_id': rid},
+      );
+      return Map<String, dynamic>.from(response);
+    } catch (e) {
+      debugPrint('MemoryService: Get usage stats failed: $e');
+      return null;
+    }
+  }
+
+  /// 重置某角色的用量统计
+  static Future<bool> resetUsageStats({String? roleId}) async {
+    try {
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final response = await SecureWebSocketClient.instance.request(
+        'usage_stats_reset',
+        {'role_id': rid},
+      );
+      return response['success'] == true;
+    } catch (e) {
+      debugPrint('MemoryService: Reset usage stats failed: $e');
       return false;
     }
   }

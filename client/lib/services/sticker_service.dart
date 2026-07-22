@@ -53,6 +53,21 @@ class StickerService {
     }
   }
 
+  /// 删除某角色的整个表情包目录（角色删除时调用，避免孤儿文件残留）
+  static Future<void> clearRoleStickers(String roleId) async {
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      final stickerDir =
+          Directory('${appDir.path}/$_stickerDirName/$roleId');
+      if (await stickerDir.exists()) {
+        await stickerDir.delete(recursive: true);
+        debugPrint('StickerService: Cleared sticker dir for $roleId');
+      }
+    } catch (e) {
+      debugPrint('StickerService: Error clearing sticker dir for $roleId: $e');
+    }
+  }
+
   /// 删除表情包文件
   static Future<bool> deleteSticker(String imagePath) async {
     try {

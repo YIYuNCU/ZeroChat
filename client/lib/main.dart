@@ -28,6 +28,7 @@ import 'services/secure_websocket_client.dart';
 import 'core/chat_controller.dart';
 import 'core/proactive_message_scheduler.dart';
 import 'core/moments_scheduler.dart';
+import 'core/message_store.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -138,7 +139,8 @@ Future<void> _syncRolesFromBackendOnly() async {
   try {
     final isAvailable = await ApiService.isBackendAvailable();
     if (!isAvailable) return;
-    await RoleService.fetchFromBackend();
+    // hash gate：本地缓存已是最新时零往返；冷启动或有变化才全量拉取。
+    await RoleService.syncIfHashMismatch();
     debugPrint('✅ Roles async preload complete');
   } catch (e) {
     debugPrint('⚠️ Roles async preload failed: $e');
@@ -176,8 +178,8 @@ Future<void> _syncWithBackend() async {
     // 启动阶段仅同步公开设置，不默认拉取密钥
     await SettingsService.instance.syncPublicSettingsFromBackend();
 
-    // 同步角色数据
-    await RoleService.fetchFromBackend();
+    // 同步角色数据（与 _syncRolesFromBackendOnly 共用 TTL 节流，避免重复拉取）
+    await RoleService.syncIfHashMismatch();
 
     // 同步朋友圈数据
     await MomentsService.instance.fetchFromBackend();
@@ -256,6 +258,8 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden) {
       BackgroundRuntimeService.notifyAppLifecycle(inForeground: false);
+      // 进入后台前 flush 挂起的消息写入，避免防抖窗口内的数据丢失。
+      unawaited(MessageStore.instance.flushPendingSaves());
       unawaited(SecureWebSocketClient.instance.ensureConnected());
     }
   }

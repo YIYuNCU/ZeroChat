@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../models/emoji_item.dart';
@@ -74,9 +74,10 @@ class _InputBarState extends State<InputBar> {
   }
 
   void _onFocusChanged() {
-    if (!_focusNode.hasFocus) {
-      return;
+    if (mounted) {
+      setState(() {});
     }
+    if (!_focusNode.hasFocus) return;
     widget.onInputActivated?.call();
     if (_showEmojiPicker) {
       _setEmojiPanelVisible(false);
@@ -119,6 +120,31 @@ class _InputBarState extends State<InputBar> {
         _setEmojiPanelVisible(false);
       }
     }
+  }
+
+  void _insertFormat(String tag) {
+    final value = _controller.value;
+    final text = value.text;
+    final selection = value.selection;
+    final selectionIsValid =
+        selection.isValid &&
+        selection.start >= 0 &&
+        selection.end <= text.length;
+    final start = selectionIsValid ? selection.start : text.length;
+    final end = selectionIsValid ? selection.end : text.length;
+    final selectedText = text.substring(start, end);
+    final opening = '<$tag>';
+    final closing = '</$tag>';
+    final replacement = '$opening$selectedText$closing';
+    final updatedText = text.replaceRange(start, end, replacement);
+    final innerStart = start + opening.length;
+    final innerEnd = innerStart + selectedText.length;
+
+    _controller.value = TextEditingValue(
+      text: updatedText,
+      selection: TextSelection(baseOffset: innerStart, extentOffset: innerEnd),
+    );
+    _focusNode.requestFocus();
   }
 
   void _toggleEmojiPanel() {
@@ -266,6 +292,7 @@ class _InputBarState extends State<InputBar> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (_focusNode.hasFocus) _buildFormatToolbar(),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
               child: Row(
@@ -273,7 +300,10 @@ class _InputBarState extends State<InputBar> {
                 children: [
                   Expanded(
                     child: Container(
-                      constraints: const BoxConstraints(minHeight: 40, maxHeight: 120),
+                      constraints: const BoxConstraints(
+                        minHeight: 40,
+                        maxHeight: 120,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(4),
@@ -308,7 +338,10 @@ class _InputBarState extends State<InputBar> {
                       ),
                     ),
                   ),
-                  _buildIconButton(Icons.emoji_emotions_outlined, onPressed: _toggleEmojiPanel),
+                  _buildIconButton(
+                    Icons.emoji_emotions_outlined,
+                    onPressed: _toggleEmojiPanel,
+                  ),
                   if (_showSendButton)
                     _buildSendButton()
                   else
@@ -332,6 +365,47 @@ class _InputBarState extends State<InputBar> {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildFormatToolbar() {
+    const formats = <(String, String)>[
+      ('对话', '对话'),
+      ('动作', '动作'),
+      ('心理', '心理'),
+      ('事实', '事实'),
+    ];
+
+    return SizedBox(
+      height: 38,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
+        scrollDirection: Axis.horizontal,
+        itemCount: formats.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 6),
+        itemBuilder: (context, index) {
+          final (label, tag) = formats[index];
+          final isFact = tag == '事实';
+          return ActionChip(
+            key: ValueKey('format_$tag'),
+            label: Text(label),
+            avatar: isFact
+                ? const Icon(Icons.fact_check_outlined, size: 15)
+                : null,
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 2),
+            labelStyle: TextStyle(
+              fontSize: 12,
+              color: isFact ? const Color(0xFF8A5A00) : const Color(0xFF555555),
+            ),
+            backgroundColor: isFact
+                ? const Color(0xFFFFF2CC)
+                : const Color(0xFFECECEC),
+            side: BorderSide.none,
+            onPressed: () => _insertFormat(tag),
+          );
+        },
       ),
     );
   }
@@ -379,7 +453,10 @@ class _EmojiPickerPanel extends StatefulWidget {
   final String? roleId;
   final void Function(EmojiItem emoji) onEmojiSelected;
 
-  const _EmojiPickerPanel({required this.roleId, required this.onEmojiSelected});
+  const _EmojiPickerPanel({
+    required this.roleId,
+    required this.onEmojiSelected,
+  });
 
   @override
   State<_EmojiPickerPanel> createState() => _EmojiPickerPanelState();
@@ -499,12 +576,15 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
         ? await EmojiService.instance.deleteUserCategory(category)
         : (widget.roleId == null
               ? false
-              : await EmojiService.instance.deleteAiCategory(widget.roleId!, category));
+              : await EmojiService.instance.deleteAiCategory(
+                  widget.roleId!,
+                  category,
+                ));
     if (!ok) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('删除分类失败')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('删除分类失败')));
       return;
     }
 
@@ -512,9 +592,9 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已删除分类: $category')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('已删除分类: $category')));
   }
 
   Future<void> _deleteEmojiByLongPress(EmojiItem emoji) async {
@@ -552,9 +632,9 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
 
     if (!ok) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('删除表情失败')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('删除表情失败')));
       return;
     }
 
@@ -564,9 +644,9 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('表情已删除')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('表情已删除')));
   }
 
   Future<void> _addCategory() async {
@@ -603,23 +683,26 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
         ? await EmojiService.instance.addUserCategory(category)
         : (widget.roleId == null
               ? false
-              : await EmojiService.instance.addAiCategory(widget.roleId!, category));
+              : await EmojiService.instance.addAiCategory(
+                  widget.roleId!,
+                  category,
+                ));
 
     if (ok) {
       await _loadAll();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('分类创建成功')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('分类创建成功')));
     }
   }
 
   Future<void> _uploadEmoji() async {
     if (_selectedCategory == null || _selectedCategory!.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先选择分类')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先选择分类')));
       return;
     }
 
@@ -668,9 +751,9 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
       tag = tagController.text.trim();
       if (tag.isEmpty) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('标签不能为空')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('标签不能为空')));
         return;
       }
     }
@@ -692,9 +775,9 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
     if (result != null) {
       await _changeCategory(_selectedCategory!);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('上传成功')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('上传成功')));
     }
   }
 
@@ -864,19 +947,26 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
                     fullUrl,
                     fit: BoxFit.cover,
                     headers: SecureBackendClient.authHeaders,
-                    errorBuilder: (_, _, _) => const Icon(Icons.image_not_supported),
+                    errorBuilder: (_, _, _) =>
+                        const Icon(Icons.image_not_supported),
                   ),
                   if (!emoji.isAi && (emoji.tag ?? '').isNotEmpty)
                     Align(
                       alignment: Alignment.bottomCenter,
                       child: Container(
                         color: const Color(0xAA000000),
-                        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 3,
+                          vertical: 2,
+                        ),
                         child: Text(
                           emoji.tag!,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Colors.white, fontSize: 10),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                          ),
                         ),
                       ),
                     ),

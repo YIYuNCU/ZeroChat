@@ -260,14 +260,19 @@ async def execute_search_memory(role_data: Dict, query: str) -> str:
 
         results = store.search(result["embedding"], top_k=3, min_score=0.35)
         if not results:
-            return "未找到与「{query}」相关的历史记忆"
+            return f"未找到与「{query}」相关的历史记忆"
 
         lines = []
         for r in results:
             text = r.get("text", "")
             score = r.get("score", 0)
             source = r.get("source", "chat")
-            lines.append(f"- {text[:200]}（相关度:{score:.2f}, 来源:{source}）")
+            occurred_at = r.get("timestamp") or "未知"
+            recorded_at = r.get("created_at") or "未知"
+            lines.append(
+                f"- {text[:200]}（发生时间:{occurred_at}, "
+                f"记录时间:{recorded_at}, 来源:{source}, 相关度:{score:.2f}）"
+            )
         return "找到以下相关记忆：\n" + "\n".join(lines)
     except Exception as e:
         logger.error(f"语义记忆搜索失败 role={role_id}: {e}")
@@ -332,42 +337,73 @@ _WRITE_MEMORY_TOOL = [{
     "type": "function",
     "function": {
         "name": "write_memory",
-        "description": "将重要信息写入长期记忆。当用户分享了重要的个人信息（生日、偏好、约定）、关键事件、或你判断未来对话中需要记住的内容时，主动调用此工具保存。不要对每句话都写入，只保存真正重要的、未来会用到的信息。",
+        "description": "将重要信息写入长期记忆。必须先综合当前内容、人物、事件结果、上下文和时间，生成简洁客观的记忆摘要，禁止直接复制整段聊天。只保存未来确实会用到的信息。",
         "parameters": {
             "type": "object",
             "properties": {
-                "content": {
+                "summary": {
                     "type": "string",
-                    "description": "要保存的记忆内容，用简洁的陈述句描述，例如'用户的生日是5月20日''用户喜欢吃辣'"
+                    "description": "综合提炼后的记忆摘要，用完整、客观的陈述句说明人物、事件和结果，不要粘贴聊天原文"
+                },
+                "occurred_at": {
+                    "type": "string",
+                    "description": "事件发生时间，ISO 8601 格式。事件发生时间不明确时省略，服务端会使用当前消息时间"
                 }
             },
-            "required": ["content"]
+            "required": ["summary"]
         }
     }
 }]
 
 
-async def execute_write_memory(role_data: Dict, content: str) -> str:
-    """将重要信息写入向量记忆库"""
-    content = content.strip()
-    if not content:
-        return "写入失败：记忆内容为空"
-    if len(content) < 5:
+async def execute_write_memory(
+    role_data: Dict,
+    summary: str,
+    occurred_at: Optional[str] = None,
+) -> str:
+    """将 AI 综合后的重要信息与发生时间写入向量记忆库。"""
+    summary = summary.strip()
+    if not summary:
+        return "写入失败：记忆摘要为空"
+    if len(summary) < 5:
         return "写入失败：记忆内容过短，请描述完整信息"
+
+    raw_occurred_at = str(occurred_at or "").strip()
+    if raw_occurred_at:
+        try:
+            parsed_time = datetime.fromisoformat(
+                raw_occurred_at.replace("Z", "+00:00")
+            )
+            normalized_occurred_at = parsed_time.isoformat()
+        except ValueError:
+            return "写入失败：occurred_at 必须是 ISO 8601 时间"
+    else:
+        normalized_occurred_at = datetime.now().isoformat(timespec="seconds")
 
     role_id = role_data.get("id", "")
     from services.vector_memory import VectorMemoryStore
     from services.ai_service import generate_embedding
 
     try:
-        result = await generate_embedding(content)
+        result = await generate_embedding(summary)
         if not result["success"] or not result["embedding"]:
             return f"记忆写入失败：{result.get('error', '嵌入向量生成失败')}"
 
         store = VectorMemoryStore(role_id)
-        store.store(text=content, embedding=result["embedding"], role="assistant", source="ai_tool")
-        logger.info(f"AI主动写入记忆: role={role_id}, content={content[:80]}")
-        return f"已记住：{content}"
+        store.store(
+            text=summary,
+            embedding=result["embedding"],
+            role="assistant",
+            timestamp=normalized_occurred_at,
+            source="ai_tool",
+        )
+        logger.info(
+            "AI主动写入记忆: role=%s, occurred_at=%s, summary=%s",
+            role_id,
+            normalized_occurred_at,
+            summary[:80],
+        )
+        return f"已记住（发生时间：{normalized_occurred_at}）：{summary}"
     except Exception as e:
         logger.error(f"向量记忆写入失败 role={role_id}: {e}")
         return f"记忆写入失败：{e}"

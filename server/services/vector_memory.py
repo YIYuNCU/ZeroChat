@@ -89,8 +89,8 @@ class VectorMemoryStore:
             min_score: 最低相似度阈值
 
         Returns:
-            [{"id": int, "text": str, "role": str, "timestamp": str,
-              "source": str, "score": float}, ...]
+        [{"id": int, "text": str, "role": str, "timestamp": str,
+          "source": str, "created_at": str, "score": float}, ...]
         """
         conn = self._get_conn()
         try:
@@ -110,6 +110,7 @@ class VectorMemoryStore:
                         "role": row[3],
                         "timestamp": row[4],
                         "source": row[5],
+                        "created_at": row[6],
                         "score": round(score, 4),
                     })
 

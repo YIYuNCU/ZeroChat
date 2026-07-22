@@ -41,6 +41,21 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   late Role _currentRole;
   List<String> _backendCoreMemory = [];
 
+  /// 按 id 倒序排序记忆列表（最新的在最前），不依赖服务端返回顺序
+  static List<Map<String, dynamic>> _sortMemoryDesc(
+    List<Map<String, dynamic>> list,
+  ) {
+    int idOf(Map<String, dynamic> e) {
+      final v = e['id'];
+      if (v is int) return v;
+      return int.tryParse('$v') ?? 0;
+    }
+
+    final sorted = List<Map<String, dynamic>>.from(list);
+    sorted.sort((a, b) => idOf(b).compareTo(idOf(a)));
+    return sorted;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -57,17 +72,21 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   Future<void> _persistCoreMemory(List<String> memories) async {
+    // roles_memory_update 是权威写入，成功后本地直接采用同一份数据，
+    // 无需回读（refreshCoreMemoryFromBackend）也无需整角色 upsert（updateRole）。
     await SecureWebSocketClient.instance.request('roles_memory_update', {
       'role_id': _currentRole.id,
       'core_memory': memories,
     });
-    await MemoryService.refreshCoreMemoryFromBackend(roleId: _currentRole.id);
+    final updated = List<String>.from(memories);
+    await MemoryService.setCoreMemoryLocal(updated);
+    final updatedRole = _currentRole.copyWith(coreMemory: updated);
+    await RoleService.updateRoleLocal(updatedRole);
     if (!mounted) return;
     setState(() {
-      _backendCoreMemory = MemoryService.getCoreMemory();
-      _currentRole = _currentRole.copyWith(coreMemory: _backendCoreMemory);
+      _backendCoreMemory = updated;
+      _currentRole = updatedRole;
     });
-    await RoleService.updateRole(_currentRole.copyWith(coreMemory: _backendCoreMemory));
   }
 
   @override
@@ -232,6 +251,34 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 ],
               ),
               onTap: _showVectorMemoryOptions,
+            ),
+          ]),
+
+          const SizedBox(height: 10),
+
+          // Token 用量统计
+          _buildSection([
+            _buildItem(
+              title: 'Token 用量',
+              trailing: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '用量与缓存',
+                    style: TextStyle(
+                      color: Color(0xFF888888),
+                      fontSize: 15,
+                    ),
+                  ),
+                  SizedBox(width: 4),
+                  Icon(
+                    Icons.arrow_forward_ios,
+                    size: 16,
+                    color: Color(0xFFCCCCCC),
+                  ),
+                ],
+              ),
+              onTap: _showTokenUsage,
             ),
           ]),
 
@@ -980,6 +1027,170 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     );
   }
 
+  void _showTokenUsage() {
+    Map<String, dynamic>? stats;
+    bool loading = true;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            Future<void> reload() async {
+              final data = await MemoryService.getUsageStats(
+                roleId: _currentRole.id,
+              );
+              if (!mounted) return;
+              setModalState(() {
+                stats = data;
+                loading = false;
+              });
+            }
+
+            if (loading) {
+              reload();
+            }
+
+            final cumulative =
+                (stats?['cumulative'] as Map?)?.cast<String, dynamic>() ?? {};
+            final last = (stats?['last'] as Map?)?.cast<String, dynamic>();
+
+            return DraggableScrollableSheet(
+              initialChildSize: 0.6,
+              minChildSize: 0.3,
+              maxChildSize: 0.9,
+              expand: false,
+              builder: (context, scrollController) {
+                return Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'Token 用量',
+                            style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              final confirm = await _confirmDialog(
+                                '重置统计',
+                                '确定要清零该角色的 Token 用量统计吗？',
+                              );
+                              if (confirm == true) {
+                                await MemoryService.resetUsageStats(
+                                  roleId: _currentRole.id,
+                                );
+                                await reload();
+                              }
+                            },
+                            child: const Text(
+                              '重置',
+                              style: TextStyle(color: Colors.red),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: loading
+                          ? const Center(child: CircularProgressIndicator())
+                          : ListView(
+                              controller: scrollController,
+                              padding: const EdgeInsets.all(16),
+                              children: _buildUsageContent(cumulative, last),
+                            ),
+                    ),
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  List<Widget> _buildUsageContent(
+    Map<String, dynamic> cumulative,
+    Map<String, dynamic>? last,
+  ) {
+    int asInt(Map<String, dynamic> m, String k) {
+      final v = m[k];
+      if (v is int) return v;
+      return int.tryParse('$v') ?? 0;
+    }
+
+    final hit = asInt(cumulative, 'cache_hit_tokens');
+    final miss = asInt(cumulative, 'cache_miss_tokens');
+    final hitRate = (hit + miss) > 0
+        ? '${(hit * 100 / (hit + miss)).toStringAsFixed(1)}%'
+        : '—';
+
+    final widgets = <Widget>[
+      const Text('累计',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 8),
+      _usageRow('请求次数', '${asInt(cumulative, 'request_count')}'),
+      _usageRow('输入 tokens', '${asInt(cumulative, 'prompt_tokens')}'),
+      _usageRow('输出 tokens', '${asInt(cumulative, 'completion_tokens')}'),
+      _usageRow('总 tokens', '${asInt(cumulative, 'total_tokens')}'),
+      _usageRow('缓存命中 tokens', '$hit'),
+      _usageRow('缓存未命中 tokens', '$miss'),
+      _usageRow('缓存命中率', hitRate),
+    ];
+
+    if (last != null) {
+      widgets.addAll([
+        const SizedBox(height: 20),
+        const Text('最近一次',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        _usageRow('输入 tokens', '${asInt(last, 'prompt_tokens')}'),
+        _usageRow('输出 tokens', '${asInt(last, 'completion_tokens')}'),
+        _usageRow('总 tokens', '${asInt(last, 'total_tokens')}'),
+        _usageRow('缓存命中 tokens', '${asInt(last, 'cache_hit_tokens')}'),
+        _usageRow('缓存未命中 tokens', '${asInt(last, 'cache_miss_tokens')}'),
+        if ('${last['model'] ?? ''}'.isNotEmpty)
+          _usageRow('模型', '${last['model']}'),
+        if ('${last['timestamp'] ?? ''}'.isNotEmpty)
+          _usageRow('时间', '${last['timestamp']}'.replaceFirst('T', ' ').split('.').first),
+      ]);
+    }
+
+    return widgets;
+  }
+
+  Widget _usageRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: const TextStyle(fontSize: 14, color: Color(0xFF888888))),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(fontSize: 14),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showShortTermMemory() {
     List<Map<String, dynamic>> items = [];
     bool loading = true;
@@ -1000,7 +1211,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               );
               if (!mounted) return;
               setModalState(() {
-                items = list;
+                items = _sortMemoryDesc(list);
                 loading = false;
               });
             }
@@ -1176,7 +1387,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               );
               if (!mounted) return;
               setModalState(() {
-                items = list;
+                items = _sortMemoryDesc(list);
                 loading = false;
               });
               setState(() {});

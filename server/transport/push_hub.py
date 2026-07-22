@@ -4,12 +4,12 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from services.security_service import DEFAULT_ENCRYPTION_SECRET, encrypt_payload
+from services.security_service import encrypt_payload
 
 
 _clients: set[WebSocket] = set()
 _clients_lock = asyncio.Lock()
-_encryption_secret = DEFAULT_ENCRYPTION_SECRET
+_encryption_secret: str | None = None
 _logger = None
 
 # Recent push cache for missed-push recovery.
@@ -63,6 +63,9 @@ def _prune_chat_push_cache():
 
 
 async def publish_server_push(event_type: str, payload: dict[str, Any] | None = None):
+    if _encryption_secret is None:
+        raise RuntimeError("push hub encryption is not configured")
+
     data = {
         "event_type": event_type,
         "payload": payload or {},

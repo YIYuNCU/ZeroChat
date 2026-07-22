@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../models/role.dart';
 import '../services/role_service.dart';
-import '../services/memory_service.dart';
 import '../services/chat_list_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_websocket_client.dart';
@@ -473,10 +472,8 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
           ),
           TextButton(
             onPressed: () async {
+              // deleteRole 已统一清理短期记忆、聊天记录与聊天列表
               await RoleService.deleteRole(_role.id);
-              MemoryService.clearShortTermMemory(_role.id);
-              // 同时删除聊天记录
-              ChatListService.instance.removeFromList(_role.id);
               if (mounted) {
                 Navigator.pop(context); // 关闭对话框
                 Navigator.pop(context, true); // 返回通讯录

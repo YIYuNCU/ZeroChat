@@ -1,0 +1,95 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:zerochat/core/message_parts.dart';
+import 'package:zerochat/models/message.dart';
+import 'package:zerochat/widgets/chat_bubble.dart';
+
+Message _message(String content, {String senderId = 'role-1'}) {
+  return Message(
+    id: 'message-1',
+    senderId: senderId,
+    receiverId: 'me',
+    content: content,
+    timestamp: DateTime(2026, 7, 14),
+  );
+}
+
+Widget _bubble(Message message, {required bool isSender}) {
+  return MaterialApp(
+    home: Scaffold(
+      body: ChatBubble(
+        message: message,
+        isSender: isSender,
+        senderName: isSender ? '我' : 'AI',
+      ),
+    ),
+  );
+}
+
+void main() {
+  testWidgets('renders repeated mixed parts in source order', (tester) async {
+    await tester.pumpWidget(
+      _bubble(
+        _message(
+          '<对话>第一句</对话>'
+          '<动作>抬手</动作>'
+          '<对话>第二句</对话>'
+          '<心理>有些犹豫</心理>'
+          '<动作>放下手</动作>',
+        ),
+        isSender: false,
+      ),
+    );
+
+    final labels = ['第一句', '抬手', '第二句', '有些犹豫', '放下手'];
+    final positions = labels
+        .map((label) => tester.getTopLeft(find.text(label)).dy)
+        .toList();
+
+    expect(positions, orderedEquals([...positions]..sort()));
+    for (var index = 1; index < positions.length; index++) {
+      expect(positions[index], greaterThan(positions[index - 1]));
+    }
+  });
+
+  testWidgets('only user facts receive fact styling', (tester) async {
+    await tester.pumpWidget(
+      _bubble(_message('<事实>会议已经结束</事实>'), isSender: false),
+    );
+
+    expect(find.text('会议已经结束'), findsOneWidget);
+    expect(find.byIcon(Icons.fact_check_outlined), findsNothing);
+    expect(find.text('<事实>会议已经结束</事实>'), findsNothing);
+
+    await tester.pumpWidget(
+      _bubble(_message('<事实>会议已经结束</事实>', senderId: 'me'), isSender: true),
+    );
+    await tester.pump();
+
+    expect(find.text('会议已经结束'), findsOneWidget);
+    expect(find.byIcon(Icons.fact_check_outlined), findsOneWidget);
+  });
+
+  testWidgets('renders a visible no-reply directive as a quiet hint', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _bubble(_message(MessageParts.noReplyDirective), isSender: false),
+    );
+
+    expect(find.text('无回复'), findsOneWidget);
+    expect(find.byIcon(Icons.notifications_off_outlined), findsOneWidget);
+    expect(find.text(MessageParts.noReplyDirective), findsNothing);
+
+    await tester.pumpWidget(
+      _bubble(
+        _message(MessageParts.noReplyDirective, senderId: 'me'),
+        isSender: true,
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text(MessageParts.noReplyDirective), findsOneWidget);
+    expect(find.byIcon(Icons.notifications_off_outlined), findsNothing);
+  });
+}

@@ -75,7 +75,9 @@ class MomentsScheduler {
 
   /// 触发 AI 发布朋友圈
   Future<void> _triggerAIPost() async {
-    final roles = RoleService.getAllRoles();
+    // 归档角色不发朋友圈
+    final roles =
+        RoleService.getAllRoles().where((r) => !r.archived).toList();
     if (roles.isEmpty) return;
 
     // 随机选择一个角色
@@ -166,7 +168,9 @@ class MomentsScheduler {
     final posts = MomentsService.instance.posts;
     if (posts.isEmpty) return;
 
-    final roles = RoleService.getAllRoles();
+    // 归档角色不参与朋友圈互动
+    final roles =
+        RoleService.getAllRoles().where((r) => !r.archived).toList();
     if (roles.isEmpty) return;
 
     // 随机选择一个角色
@@ -297,6 +301,7 @@ class MomentsScheduler {
       // 获取角色
       final role = RoleService.getRoleById(post.authorId);
       if (role == null) continue;
+      if (role.archived) continue; // 归档角色不回复评论
 
       // 50% 概率回复
       if (_random.nextDouble() > 0.50) continue;

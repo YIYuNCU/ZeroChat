@@ -35,6 +35,11 @@ class MessageStore extends ChangeNotifier {
       <String, DateTime>{};
   static const Duration _placeholderRepairGraceWindow = Duration(seconds: 8);
 
+  /// 持久化写入防抖：内存与 UI 立即更新，落盘按 chat 合并到一个短窗口，
+  /// 避免频繁收发消息时每条都全量重写 SharedPreferences 造成卡顿。
+  final Map<String, Timer> _saveDebounceTimers = <String, Timer>{};
+  static const Duration _saveDebounceWindow = Duration(milliseconds: 500);
+
   /// 初始化（确保只执行一次）
   static Future<void> init() async {
     if (_instance._initialized) {
@@ -109,7 +114,8 @@ class MessageStore extends ChangeNotifier {
   Future<void> addMessage(String chatId, Message message) async {
     _messages[chatId] ??= [];
     _messages[chatId]!.add(message);
-    await _saveMessages(chatId);
+    // 内存与 UI 立即更新；落盘走防抖，合并高频写入。
+    _scheduleSaveMessages(chatId);
     _notifyMessageUpdate(chatId);
     debugPrint(
       'MessageStore: Added message to $chatId (total: ${_messages[chatId]!.length})',
@@ -435,8 +441,10 @@ class MessageStore extends ChangeNotifier {
     }
   }
 
-  /// 保存指定聊天的消息
+  /// 立即将指定聊天的消息落盘（全量重写该 chat 的 list）
   Future<void> _saveMessages(String chatId) async {
+    // 已有挂起的防抖写入则取消，避免重复写。
+    _saveDebounceTimers.remove(chatId)?.cancel();
     final key = 'messages_v2_$chatId';
     final messages = _messages[chatId] ?? [];
     final jsonList = messages.map((m) => m.toStorageString()).toList();
@@ -449,6 +457,33 @@ class MessageStore extends ChangeNotifier {
       chatIds.add(chatId);
       await StorageService.setStringList('message_store_chat_ids', chatIds);
     }
+  }
+
+  /// 防抖落盘：内存已即时更新，这里把落盘合并到一个短窗口内一次完成。
+  void _scheduleSaveMessages(String chatId) {
+    _saveDebounceTimers[chatId]?.cancel();
+    _saveDebounceTimers[chatId] = Timer(_saveDebounceWindow, () {
+      _saveDebounceTimers.remove(chatId);
+      // fire-and-forget：落盘失败仅记录日志，内存仍是权威来源。
+      unawaited(_saveMessages(chatId).catchError((Object e) {
+        debugPrint('MessageStore: debounced save failed for $chatId: $e');
+      }));
+    });
+  }
+
+  /// 立即 flush 所有挂起的防抖写入（app 进入后台/退出时调用，避免丢数据）。
+  Future<void> flushPendingSaves() async {
+    final pendingChatIds = _saveDebounceTimers.keys.toList();
+    if (pendingChatIds.isEmpty) return;
+    for (final chatId in pendingChatIds) {
+      _saveDebounceTimers.remove(chatId)?.cancel();
+    }
+    for (final chatId in pendingChatIds) {
+      await _saveMessages(chatId);
+    }
+    debugPrint(
+      'MessageStore: flushed ${pendingChatIds.length} pending message saves',
+    );
   }
 
   Future<void> _syncAllChatsFromBackendIfNeeded() async {
@@ -611,6 +646,8 @@ class MessageStore extends ChangeNotifier {
   /// 释放资源
   @override
   void dispose() {
+    // 尽力 flush 挂起的写入，避免丢数据。
+    unawaited(flushPendingSaves());
     for (final controller in _streamControllers.values) {
       controller.close();
     }

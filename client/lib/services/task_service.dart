@@ -80,6 +80,11 @@ class TaskService {
   static int _quietTimeStart = 23;
   static int _quietTimeEnd = 7;
 
+  /// in-flight 去重与 TTL 节流：启动路径两处拉取不会重复往返。
+  static Future<bool>? _inFlightFetch;
+  static DateTime? _lastFetchAt;
+  static const Duration _fetchThrottle = Duration(seconds: 30);
+
   /// 初始化任务服务
   static Future<void> init() async {
     await _loadTasks();
@@ -289,7 +294,28 @@ class TaskService {
   }
 
   /// 从后端拉取任务
-  static Future<bool> fetchFromBackend() async {
+  /// 带 in-flight 去重与 TTL 节流；[force] 为 true 时跳过节流。
+  static Future<bool> fetchFromBackend({bool force = false}) async {
+    final inFlight = _inFlightFetch;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    if (!force && _lastFetchAt != null) {
+      if (DateTime.now().difference(_lastFetchAt!) < _fetchThrottle) {
+        return false;
+      }
+    }
+    final future = _doFetchFromBackend();
+    _inFlightFetch = future;
+    try {
+      return await future;
+    } finally {
+      _inFlightFetch = null;
+    }
+  }
+
+  static Future<bool> _doFetchFromBackend() async {
+    _lastFetchAt = DateTime.now();
     try {
       final data = await SecureWebSocketClient.instance.request('tasks_list', {});
       if (data['tasks'] is List) {

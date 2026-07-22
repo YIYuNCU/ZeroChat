@@ -1,8 +1,16 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import '../models/onebot_config.dart';
 import '../models/role.dart';
+import '../models/stats_config.dart';
+import '../core/message_store.dart';
+import 'avatar_cache_service.dart';
+import 'sticker_service.dart';
 import 'storage_service.dart';
 import 'memory_service.dart';
+import 'chat_list_service.dart';
 import 'secure_websocket_client.dart';
 
 /// 角色管理服务
@@ -11,6 +19,16 @@ class RoleService {
   static final List<Role> _roles = [];
   static String _currentRoleId = 'default';
   static const String _toolRolePrefix = '1000000000';
+
+  /// 本地角色列表 hash（与后端 roles_hash 比对，避免无变化时全量拉取）
+  static String _localRolesHash = '';
+
+  /// 进行中的角色同步（in-flight 去重）
+  static Future<bool>? _inFlightSync;
+
+  /// 上次成功发起角色同步的时间（TTL 节流）
+  static DateTime? _lastSyncAt;
+  static const Duration _syncThrottle = Duration(seconds: 30);
 
   static String _normalizeAvatarUrl(String value) {
     final trimmed = value.trim();
@@ -54,16 +72,34 @@ class RoleService {
     if (!_roles.any((r) => r.id == _currentRoleId)) {
       _currentRoleId = _roles.isNotEmpty ? _roles.first.id : 'default';
     }
+    _localRolesHash =
+        StorageService.getString(StorageService.keyRolesHash) ?? '';
   }
 
   /// 保存角色列表
-  static Future<void> _saveRoles() async {
+  /// [backendHash] 若提供（来自后端同步），直接采用；否则本地计算。
+  static Future<void> _saveRoles({String? backendHash}) async {
     final jsonList = _roles.map((r) => r.toJson()).toList();
     await StorageService.setJsonList(StorageService.keyRoles, jsonList);
     await StorageService.setString(
       StorageService.keyCurrentRoleId,
       _currentRoleId,
     );
+    _localRolesHash = (backendHash != null && backendHash.isNotEmpty)
+        ? backendHash
+        : _computeRolesHash(jsonList);
+    await StorageService.setString(
+      StorageService.keyRolesHash,
+      _localRolesHash,
+    );
+  }
+
+  /// 计算角色列表的稳定 SHA256（与后端 compute_roles_hash 对应）
+  /// 注意：本地哈希仅用于"本地是否变化"的判定，不要求与后端逐字节相等；
+  /// 后端一致性由 syncIfHashMismatch 从后端下发的 hash 覆盖保证。
+  static String _computeRolesHash(List<Map<String, dynamic>> jsonList) {
+    final canonical = jsonEncode(jsonList);
+    return sha256.convert(utf8.encode(canonical)).toString();
   }
 
   /// 获取所有角色
@@ -133,20 +169,66 @@ class RoleService {
     }
   }
 
-  /// 删除角色
-  static Future<void> deleteRole(String roleId) async {
-    if (roleId == 'default') {
-      debugPrint('Cannot delete default role');
-      return;
+  /// 仅更新本地角色对象并持久化（不触发后端 upsert）。
+  /// 用于调用方已通过更专用的接口（如 roles_memory_update）把该字段写入后端，
+  /// 只需同步本地缓存，避免多余的整角色 upsert 往返。
+  static Future<void> updateRoleLocal(Role role) async {
+    final index = _roles.indexWhere((r) => r.id == role.id);
+    if (index != -1) {
+      _roles[index] = role;
+      await _saveRoles();
+    }
+  }
+
+  /// 是否允许删除该角色（默认角色与工具角色受保护）
+  static bool canDeleteRole(String roleId) {
+    return roleId != 'default' && !isToolRoleId(roleId);
+  }
+
+  /// 删除角色（好友），并清理所有相关本地数据
+  /// 返回 true 表示删除成功，false 表示该角色受保护不可删除
+  static Future<bool> deleteRole(String roleId) async {
+    if (!canDeleteRole(roleId)) {
+      debugPrint('Cannot delete protected role: $roleId');
+      return false;
     }
     _roles.removeWhere((r) => r.id == roleId);
     // 如果删除的是当前角色，切换到默认角色
     if (_currentRoleId == roleId) {
       _currentRoleId = 'default';
     }
-    // 同时清除该角色的短期记忆
-    MemoryService.clearShortTermMemory(roleId);
     await _saveRoles();
+
+    // 清理该角色的所有本地数据
+    // 1. 短期记忆
+    MemoryService.clearShortTermMemory(roleId);
+    // 2. 聊天记录（持久化的消息）
+    try {
+      await MessageStore.instance.clearMessages(roleId);
+    } catch (e) {
+      debugPrint('RoleService: clearMessages failed for $roleId: $e');
+    }
+    // 3. 从聊天列表移除
+    ChatListService.instance.removeFromList(roleId);
+    // 4. 前端 JSON 记忆
+    try {
+      await MemoryService.clearJsonMemory(roleId);
+    } catch (e) {
+      debugPrint('RoleService: clearJsonMemory failed for $roleId: $e');
+    }
+    // 5. 头像磁盘缓存（含 role_<id>_avatar 及其 moments 变体）
+    try {
+      await AvatarCacheService.evictByPrefix('role_${roleId}_avatar');
+    } catch (e) {
+      debugPrint('RoleService: avatar evict failed for $roleId: $e');
+    }
+    // 6. 表情包目录 stickers/<roleId>/
+    try {
+      await StickerService.clearRoleStickers(roleId);
+    } catch (e) {
+      debugPrint('RoleService: clearRoleStickers failed for $roleId: $e');
+    }
+
     // 自动从后端删除（失败不影响本地已删除状态）
     try {
       await SecureWebSocketClient.instance.request('roles_delete', {
@@ -157,6 +239,40 @@ class RoleService {
       debugPrint(
         'Deleted role: $roleId (backend delete failed: $e, local only)',
       );
+    }
+    return true;
+  }
+
+  /// 复制角色（好友）
+  /// 后端从源角色复制出一个新角色，继承全部设定但不带旧记忆。
+  /// 成功返回新角色，失败返回 null。
+  static Future<Role?> cloneRole(String sourceId, {String? newName}) async {
+    try {
+      final response = await SecureWebSocketClient.instance.request(
+        'roles_clone',
+        {
+          'role_id': sourceId,
+          if (newName != null && newName.trim().isNotEmpty)
+            'new_name': newName.trim(),
+        },
+      );
+      final roleJson = response['role'];
+      if (roleJson is! Map) {
+        debugPrint('RoleService: cloneRole returned no role');
+        return null;
+      }
+      final json = Map<String, dynamic>.from(roleJson);
+      final cloned = Role.fromJson(json).copyWith(
+        avatarUrl: _normalizeAvatarUrl(json['avatar_url']?.toString() ?? ''),
+      );
+      _roles.removeWhere((r) => r.id == cloned.id);
+      _roles.add(cloned);
+      await _saveRoles();
+      debugPrint('RoleService: Cloned role ${cloned.id} from $sourceId');
+      return cloned;
+    } catch (e) {
+      debugPrint('RoleService: cloneRole failed: $e');
+      return null;
     }
   }
 
@@ -244,6 +360,16 @@ class RoleService {
                       json['onebot_config'] as Map<String, dynamic>,
                     )
                   : null,
+              statsConfig: json['stats_config'] != null
+                  ? StatsConfig.fromJson(
+                      json['stats_config'] as Map<String, dynamic>,
+                    )
+                  : null,
+              showAction: json['show_action'] as bool? ?? true,
+              showPsychology: json['show_psychology'] as bool? ?? true,
+              showStats: json['show_stats'] as bool? ?? true,
+              showNoReply: json['show_no_reply'] as bool? ?? false,
+              archived: json['archived'] as bool? ?? false,
             );
 
             // 更新或添加角色（保留本地专有字段）
@@ -272,6 +398,12 @@ class RoleService {
                 menstruationCycle: backendRole.menstruationCycle,
                 temperature: backendRole.temperature,
                 onebotConfig: backendRole.onebotConfig,
+                statsConfig: backendRole.statsConfig,
+                showAction: backendRole.showAction,
+                showPsychology: backendRole.showPsychology,
+                showStats: backendRole.showStats,
+                showNoReply: backendRole.showNoReply,
+                archived: backendRole.archived,
               );
             } else {
               _roles.add(backendRole);
@@ -280,7 +412,9 @@ class RoleService {
             debugPrint('RoleService: Error parsing backend role: $e');
           }
         }
-        await _saveRoles();
+        // 采用后端下发的 hash（若有），保证与后端 roles_hash 一致
+        final backendHash = response['hash']?.toString();
+        await _saveRoles(backendHash: backendHash);
         debugPrint(
           'RoleService: Synced ${rolesJson.length} roles from backend',
         );
@@ -290,6 +424,50 @@ class RoleService {
       debugPrint('RoleService: Backend fetch failed: $e');
     }
     return false;
+  }
+
+  /// 仅在后端 hash 与本地不一致时才全量拉取角色。
+  /// 带 in-flight 去重与 TTL 节流，避免频繁触发（如每次进聊天页）造成的多余往返。
+  static Future<bool> syncIfHashMismatch({bool force = false}) async {
+    // 复用进行中的同步
+    final inFlight = _inFlightSync;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    // TTL 节流（force 时跳过）
+    if (!force && _lastSyncAt != null) {
+      final elapsed = DateTime.now().difference(_lastSyncAt!);
+      if (elapsed < _syncThrottle) {
+        return false;
+      }
+    }
+
+    final future = _doSyncIfHashMismatch();
+    _inFlightSync = future;
+    try {
+      return await future;
+    } finally {
+      _inFlightSync = null;
+    }
+  }
+
+  static Future<bool> _doSyncIfHashMismatch() async {
+    _lastSyncAt = DateTime.now();
+    try {
+      final response = await SecureWebSocketClient.instance.request(
+        'roles_hash',
+        const <String, dynamic>{},
+      );
+      final backendHash = response['hash']?.toString() ?? '';
+      if (backendHash.isNotEmpty && backendHash == _localRolesHash) {
+        debugPrint('RoleService: roles hash matched, skip full fetch');
+        return false;
+      }
+    } catch (e) {
+      // hash 探测失败则退回到全量拉取（保持原有行为）
+      debugPrint('RoleService: roles_hash probe failed, fallback to full fetch: $e');
+    }
+    return fetchFromBackend();
   }
 
   /// 同步单个角色到后端
@@ -313,6 +491,12 @@ class RoleService {
             'menstruation_cycle': role.menstruationCycle,
             'temperature': role.temperature,
             'onebot_config': role.onebotConfig.toJson(),
+            'stats_config': role.statsConfig.toJson(),
+            'show_action': role.showAction,
+            'show_psychology': role.showPsychology,
+            'show_stats': role.showStats,
+            'show_no_reply': role.showNoReply,
+            'archived': role.archived,
             'max_context_rounds': role.maxContextRounds,
             'allow_web_search': role.allowWebSearch,
           },

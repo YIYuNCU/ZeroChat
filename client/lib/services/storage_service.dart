@@ -98,6 +98,7 @@ class StorageService {
   // ========== 存储键定义 ==========
 
   static const String keyRoles = 'roles';
+  static const String keyRolesHash = 'roles_hash';
   static const String keyCurrentRoleId = 'current_role_id';
   static const String keyCoreMemory = 'core_memory';
   static const String keyQuietTimeStart = 'quiet_time_start';

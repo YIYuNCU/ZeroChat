@@ -274,6 +274,9 @@ class ContactsPageState extends State<ContactsPage>
       color: Colors.white,
       child: InkWell(
         onTap: () => _openRoleDetail(role),
+        onLongPress: RoleService.canDeleteRole(role.id)
+            ? () => _showContactActions(role)
+            : null,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           decoration: const BoxDecoration(
@@ -291,12 +294,39 @@ class ContactsPageState extends State<ContactsPage>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      role.name,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w500,
-                      ),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            role.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        if (role.archived) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 1,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFEEEEEE),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text(
+                              '已归档',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF999999),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                     if (role.description.isNotEmpty)
                       Padding(
@@ -378,5 +408,121 @@ class ContactsPageState extends State<ContactsPage>
     if (result == true || result == null) {
       _loadRoles();
     }
+  }
+
+  /// 长按联系人弹出操作菜单
+  void _showContactActions(Role role) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Text(
+                  role.name,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.copy_outlined,
+                    color: Color(0xFF07C160)),
+                title: const Text(
+                  '复制好友',
+                  style: TextStyle(fontSize: 16),
+                ),
+                subtitle: const Text(
+                  '复制全部设定，不含聊天记录与记忆',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                ),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _cloneRole(role);
+                },
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.delete_outline,
+                    color: Color(0xFFFA5151)),
+                title: const Text(
+                  '删除好友',
+                  style: TextStyle(color: Color(0xFFFA5151), fontSize: 16),
+                ),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _confirmDeleteRole(role);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.close, color: Color(0xFF888888)),
+                title: const Text('取消', style: TextStyle(fontSize: 16)),
+                onTap: () => Navigator.pop(sheetContext),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 复制好友
+  Future<void> _cloneRole(Role role) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('正在复制"${role.name}"...'),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+    final cloned = await RoleService.cloneRole(role.id);
+    if (!mounted) return;
+    _loadRoles();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(cloned != null ? '已复制为"${cloned.name}"' : '复制失败'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  /// 删除好友确认
+  void _confirmDeleteRole(Role role) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('删除好友'),
+        content: Text('确定要删除"${role.name}"吗？聊天记录将一并清除，此操作不可恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              final ok = await RoleService.deleteRole(role.id);
+              if (!mounted) return;
+              _loadRoles();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(ok ? '已删除"${role.name}"' : '该好友无法删除'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            },
+            child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
   }
 }

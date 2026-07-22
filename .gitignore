@@ -207,10 +207,6 @@ __marimo__/
 
 server/config/
 server/data/**
-!server/data/roles/
-server/data/roles/**
-!server/data/roles/1000000000*/
-!server/data/roles/1000000000*/**
 client/web/
 client/windows/
 .flutter-plugins/

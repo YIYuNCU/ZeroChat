@@ -390,6 +390,28 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                 if role_model.onebot_config
                 else {"enabled": False, "secret": ""}
             ),
+            "stats_config": (
+                role_model.stats_config.model_dump()
+                if role_model.stats_config
+                else {"enabled": False, "stats": []}
+            ),
+            "show_action": (
+                role_model.show_action if role_model.show_action is not None else True
+            ),
+            "show_psychology": (
+                role_model.show_psychology
+                if role_model.show_psychology is not None
+                else True
+            ),
+            "show_stats": (
+                role_model.show_stats if role_model.show_stats is not None else True
+            ),
+            "show_no_reply": (
+                role_model.show_no_reply
+                if role_model.show_no_reply is not None
+                else False
+            ),
+            "archived": bool(role_model.archived),
             "tags": role_model.tags or [],
             "gender": role_model.gender or "men",
             "menstruation_cycle": (
@@ -882,25 +904,12 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         return await tasks.delete_task(task_id)
 
     if action == "roles_list":
-        role_items = []
-        if roles.ROLES_DIR.exists():
-            for role_dir in roles.ROLES_DIR.iterdir():
-                if not role_dir.is_dir():
-                    continue
+        role_items = roles.build_role_items(backend_base_url)
+        return {"roles": role_items, "hash": roles.compute_roles_hash(role_items)}
 
-                role = roles.load_role(role_dir.name)
-                if not role:
-                    continue
-
-                role_copy = dict(role)
-                role_id = str(role_copy.get("id", "")).strip()
-                if role_id and role_copy.get("avatar_url"):
-                    role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
-                    role_copy["avatar_hash"] = roles._get_role_avatar_hash(role_id)
-
-                role_items.append(role_copy)
-
-        return {"roles": role_items}
+    if action == "roles_hash":
+        role_items = roles.build_role_items(backend_base_url)
+        return {"hash": roles.compute_roles_hash(role_items)}
 
     if action == "roles_delete":
         import shutil
@@ -913,6 +922,24 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         if role_dir.exists():
             shutil.rmtree(role_dir)
         return {"success": True}
+
+    if action == "roles_clone":
+        source_id = str(payload.get("role_id") or payload.get("source_id") or "").strip()
+        if not source_id:
+            raise ValueError("role_id missing")
+
+        new_id = str(payload.get("new_id") or "").strip() or None
+        new_name = payload.get("new_name")
+        new_name = str(new_name).strip() if new_name is not None else None
+
+        data = roles.clone_role(source_id, new_id=new_id, new_name=new_name)
+
+        role_copy = dict(data)
+        new_role_id = str(role_copy.get("id", "")).strip()
+        if new_role_id and role_copy.get("avatar_url"):
+            role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{new_role_id}/avatar"
+            role_copy["avatar_hash"] = roles._get_role_avatar_hash(new_role_id)
+        return {"role": role_copy}
 
     if action == "roles_memory_update":
         role_id = str(payload.get("role_id") or "").strip()
@@ -934,6 +961,20 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         if not role_id:
             raise ValueError("role_id missing")
         return await roles.get_memory(role_id)
+
+    if action == "usage_stats_get":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        from services.memory_service import get_usage_stats
+        return get_usage_stats(role_id)
+
+    if action == "usage_stats_reset":
+        role_id = str(payload.get("role_id") or "").strip()
+        if not role_id:
+            raise ValueError("role_id missing")
+        from services.memory_service import reset_usage_stats
+        return {"success": reset_usage_stats(role_id)}
 
     if action == "short_term_update":
         role_id = str(payload.get("role_id") or "").strip()

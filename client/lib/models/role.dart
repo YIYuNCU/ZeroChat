@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'onebot_config.dart';
 import 'proactive_config.dart';
+import 'stats_config.dart';
 import 'sticker.dart';
 
 /// 角色模型
@@ -47,6 +48,18 @@ class Role {
   // OneBot V11 接口配置（角色独立）
   final OneBotConfig onebotConfig;
 
+  // 数值系统配置（角色独立）
+  final StatsConfig statsConfig;
+
+  // 消息部分显隐（对话始终显示）
+  final bool showAction;
+  final bool showPsychology;
+  final bool showStats;
+  final bool showNoReply;
+
+  // 是否已归档：归档后不能对话、不发朋友圈、不发主动消息
+  final bool archived;
+
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -76,6 +89,12 @@ class Role {
     ProactiveConfig? proactiveConfig,
     StickerConfig? stickerConfig,
     OneBotConfig? onebotConfig,
+    StatsConfig? statsConfig,
+    this.showAction = true,
+    this.showPsychology = true,
+    this.showStats = true,
+    this.showNoReply = false,
+    this.archived = false,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) : coreMemory = coreMemory ?? [],
@@ -89,6 +108,7 @@ class Role {
        proactiveConfig = proactiveConfig ?? const ProactiveConfig(),
        stickerConfig = stickerConfig ?? const StickerConfig(),
        onebotConfig = onebotConfig ?? const OneBotConfig(),
+       statsConfig = statsConfig ?? const StatsConfig(),
        createdAt = createdAt ?? DateTime.now(),
        updatedAt = updatedAt ?? DateTime.now();
 
@@ -130,6 +150,12 @@ class Role {
     ProactiveConfig? proactiveConfig,
     StickerConfig? stickerConfig,
     OneBotConfig? onebotConfig,
+    StatsConfig? statsConfig,
+    bool? showAction,
+    bool? showPsychology,
+    bool? showStats,
+    bool? showNoReply,
+    bool? archived,
     DateTime? updatedAt,
   }) {
     return Role(
@@ -158,6 +184,12 @@ class Role {
       proactiveConfig: proactiveConfig ?? this.proactiveConfig,
       stickerConfig: stickerConfig ?? this.stickerConfig,
       onebotConfig: onebotConfig ?? this.onebotConfig,
+      statsConfig: statsConfig ?? this.statsConfig,
+      showAction: showAction ?? this.showAction,
+      showPsychology: showPsychology ?? this.showPsychology,
+      showStats: showStats ?? this.showStats,
+      showNoReply: showNoReply ?? this.showNoReply,
+      archived: archived ?? this.archived,
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
     );
@@ -247,6 +279,16 @@ class Role {
               json['onebot_config'] as Map<String, dynamic>,
             )
           : const OneBotConfig(),
+      statsConfig: json['stats_config'] != null
+          ? StatsConfig.fromJson(
+              json['stats_config'] as Map<String, dynamic>,
+            )
+          : const StatsConfig(),
+      showAction: json['show_action'] as bool? ?? true,
+      showPsychology: json['show_psychology'] as bool? ?? true,
+      showStats: json['show_stats'] as bool? ?? true,
+      showNoReply: json['show_no_reply'] as bool? ?? false,
+      archived: json['archived'] as bool? ?? false,
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'] as String)
           : DateTime.now(),
@@ -283,6 +325,12 @@ class Role {
       'proactive_config': proactiveConfig.toJson(),
       'sticker_config': stickerConfig.toJson(),
       'onebot_config': onebotConfig.toJson(),
+      'stats_config': statsConfig.toJson(),
+      'show_action': showAction,
+      'show_psychology': showPsychology,
+      'show_stats': showStats,
+      'show_no_reply': showNoReply,
+      'archived': archived,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
     };

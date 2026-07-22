@@ -131,6 +131,20 @@ class OneBotConfig(BaseModel):
     disabled_conversations: List[str] = []
     blocked_users: Dict[str, List[str]] = {}
 
+class StatItem(BaseModel):
+    """单个数值定义"""
+    key: str                              # 唯一键（用于状态存储与解析匹配）
+    name: str                             # 展示名称
+    min: float = 0                        # 下限
+    max: float = 100                      # 上限
+    initial: Optional[float] = None       # 初始值（缺省取 min）
+    description: str = ""                 # 数值的作用/含义
+
+class StatsConfig(BaseModel):
+    """数值系统配置（角色独立）"""
+    enabled: bool = False
+    stats: List[StatItem] = []
+
 class RoleCreate(BaseModel):
     """创建角色"""
     id: str
@@ -165,6 +179,18 @@ class RoleCreate(BaseModel):
     # OneBot V11 接口配置
     onebot_config: Optional[OneBotConfig] = None
 
+    # 数值系统配置
+    stats_config: Optional[StatsConfig] = None
+
+    # 消息部分显隐（对话始终显示）
+    show_action: Optional[bool] = None
+    show_psychology: Optional[bool] = None
+    show_stats: Optional[bool] = None
+    show_no_reply: Optional[bool] = None
+
+    # 归档状态：归档后不能对话、不发朋友圈、不发主动消息
+    archived: Optional[bool] = False
+
     # 上下文设置
     max_context_rounds: Optional[int] = None
     allow_web_search: Optional[bool] = None
@@ -185,6 +211,12 @@ class RoleUpdate(BaseModel):
     personality: Optional[PersonalityTraits] = None
     proactive_config: Optional[ProactiveConfig] = None
     onebot_config: Optional[OneBotConfig] = None
+    stats_config: Optional[StatsConfig] = None
+    show_action: Optional[bool] = None
+    show_psychology: Optional[bool] = None
+    show_stats: Optional[bool] = None
+    show_no_reply: Optional[bool] = None
+    archived: Optional[bool] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
     ai_model: Optional[str] = None
@@ -305,6 +337,98 @@ def normalize_role_avatar_url(role: Dict[str, Any], request: Request) -> Dict[st
         role_copy["avatar_hash"] = _get_role_avatar_hash(role_id)
     return role_copy
 
+
+# 克隆时需要清理的记忆/历史文件与目录（相对角色目录）
+_CLONE_EXCLUDE_NAMES = {
+    "memory.sqlite",
+    "memory.sqlite-shm",
+    "memory.sqlite-wal",
+    "memory.json",
+    "stats_state.json",
+}
+
+
+def clone_role(source_id: str, new_id: Optional[str] = None, new_name: Optional[str] = None) -> Dict[str, Any]:
+    """从已有角色复制出一个新角色：继承全部设定与静态资源（头像/表情包/背景），
+    但不带任何旧的记忆与历史（短期记忆、向量记忆、核心记忆、聊天记录、朋友圈、数值状态）。
+
+    返回新角色的 profile 字典。
+    """
+    source_id = _normalize_role_id(source_id)
+    source = load_role(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="源角色不存在")
+
+    # 生成/校验新角色 ID
+    if new_id:
+        new_id = _normalize_role_id(new_id)
+    else:
+        new_id = uuid.uuid4().hex
+    if load_role(new_id):
+        raise HTTPException(status_code=409, detail="目标角色已存在")
+    if is_tool_role_id(new_id):
+        raise HTTPException(status_code=400, detail="不能克隆为工具角色 ID")
+
+    source_dir = ROLES_DIR / source_id
+    # get_role_dir 会创建完整目录结构与空的 chats/moments 占位文件
+    target_dir = get_role_dir(new_id)
+
+    # 复制静态资源子目录（头像/表情包/背景），跳过聊天与朋友圈历史
+    for sub in ["assets", "emojis", "backgrounds"]:
+        src_sub = source_dir / sub
+        if src_sub.exists():
+            shutil.copytree(src_sub, target_dir / sub, dirs_exist_ok=True)
+
+    # 深拷贝设定，重置记忆/运行态相关字段
+    now = datetime.now().isoformat()
+    data = json.loads(json.dumps(source))  # 深拷贝
+    data["id"] = new_id
+    data["name"] = (new_name or "").strip() or f"{source.get('name', '角色')} 副本"
+    data["core_memory"] = []  # 核心记忆属于记忆，不复制
+    data["archived"] = False   # 复制出的角色默认为正常状态
+    data["created_at"] = now
+    data["updated_at"] = now
+
+    # 主动消息：清除下次触发时间，交由调度器重新分配
+    pc = data.get("proactive_config")
+    if isinstance(pc, dict):
+        pc["next_trigger_time"] = None
+
+    # OneBot：清除运行态（会话禁用/拉黑列表），保留接口配置
+    ob = data.get("onebot_config")
+    if isinstance(ob, dict):
+        ob["disabled_conversations"] = []
+        ob["blocked_users"] = {}
+
+    save_role(new_id, data)
+
+    # 清理任何被目录复制意外带入的记忆/历史文件（防御性；正常不会存在于上述子目录）
+    for name in _CLONE_EXCLUDE_NAMES:
+        p = target_dir / name
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+
+    # 初始化空的记忆数据库
+    if not is_tool_role_id(new_id):
+        from services.memory_service import load_memory, save_memory
+
+        runtime_memory = load_memory(new_id)
+        runtime_memory["core_memory"] = ""
+        save_memory(new_id, runtime_memory)
+
+    # 若启用了主动消息，为新角色调度
+    try:
+        from services import scheduler_service
+        if isinstance(pc, dict) and pc.get("enabled"):
+            scheduler_service.schedule_proactive_for_role(new_id)
+    except Exception:
+        pass
+
+    return data
+
 @router.get("/roles")
 async def list_roles(request: Request):
     """获取所有角色"""
@@ -373,6 +497,14 @@ async def create_role(role: RoleCreate, request: Request):
         "onebot_config": role.onebot_config.model_dump() if role.onebot_config else {
             "enabled": False, "secret": ""
         },
+        "stats_config": role.stats_config.model_dump() if role.stats_config else {
+            "enabled": False, "stats": []
+        },
+        "show_action": role.show_action if role.show_action is not None else True,
+        "show_psychology": role.show_psychology if role.show_psychology is not None else True,
+        "show_stats": role.show_stats if role.show_stats is not None else True,
+        "show_no_reply": role.show_no_reply if role.show_no_reply is not None else False,
+        "archived": bool(role.archived),
         "tags": role.tags or [],
         "gender": role.gender or "men",
         "menstruation_cycle": role.menstruation_cycle.model_dump() if role.menstruation_cycle else {
@@ -431,6 +563,19 @@ async def delete_role(role_id: str):
     except ImportError:
         pass
     return {"success": True}
+
+
+class RoleClone(BaseModel):
+    """克隆角色请求"""
+    new_id: Optional[str] = None      # 新角色 ID，缺省则服务端生成
+    new_name: Optional[str] = None    # 新角色名称，缺省则为「原名 副本」
+
+
+@router.post("/roles/{role_id}/clone")
+async def clone_role_endpoint(role_id: str, body: RoleClone, request: Request):
+    """从已有角色复制出一个新角色（继承全部设定，但不带旧记忆）"""
+    data = clone_role(role_id, new_id=body.new_id, new_name=body.new_name)
+    return normalize_role_avatar_url(_overlay_role_core_memory_from_db(data), request)
 
 # ========== 记忆管理 ==========
 
@@ -1207,6 +1352,33 @@ def _build_chats_snapshot(backend_base_url: Optional[str] = None) -> Dict[str, A
         "total_messages": total_messages,
         "chats": chats,
     }
+
+def build_role_items(backend_base_url: str) -> List[Dict[str, Any]]:
+    """构建角色列表（roles_list 与 roles_hash 共用），保证两者内容一致。"""
+    role_items: List[Dict[str, Any]] = []
+    if ROLES_DIR.exists():
+        for role_dir in sorted(ROLES_DIR.iterdir(), key=lambda p: p.name):
+            if not role_dir.is_dir():
+                continue
+
+            role = load_role(role_dir.name)
+            if not role:
+                continue
+
+            role_copy = dict(role)
+            role_id = str(role_copy.get("id", "")).strip()
+            if role_id and role_copy.get("avatar_url"):
+                role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
+                role_copy["avatar_hash"] = _get_role_avatar_hash(role_id)
+
+            role_items.append(role_copy)
+
+    return role_items
+
+def compute_roles_hash(role_items: List[Dict[str, Any]]) -> str:
+    """对角色列表做稳定 SHA256，用于前后端快速一致性校验。"""
+    canonical = json.dumps(role_items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 @router.get("/roles/{role_id}/chats/messages")
 async def get_chat_messages(role_id: str, request: Request, limit: int = 100, offset: int = 0):

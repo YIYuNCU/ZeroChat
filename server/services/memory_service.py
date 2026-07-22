@@ -715,7 +715,6 @@ def append_short_term(
     sender: Optional[str] = None,
     sender_id: Optional[str] = None,
     group_id: Optional[str] = None,
-    embed: bool = True,
 ):
     """
     追加短期记忆，使用滑动窗口机制
@@ -782,18 +781,6 @@ def append_short_term(
         _set_meta(conn, "message_count_since_summary", str(current_count_int + 1))
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端仅保证 request_id 在 DB 记录中可用。
-
-    # 对用户消息异步生成向量嵌入，存入向量记忆库
-    # 工具角色不生成向量嵌入
-    if embed and role == "user" and len(content.strip()) >= 10 \
-            and not is_tool_role_id(role_id):
-        try:
-            asyncio.ensure_future(embed_and_store(
-                role_id, normalized_content, role="user",
-                timestamp=created_at, source="chat"
-            ))
-        except Exception:
-            pass
 
 async def trigger_chat_summary(
     worker_id: str,
@@ -1314,6 +1301,125 @@ def clear_vector_memory(role_id: str):
         return
     from services.vector_memory import VectorMemoryStore
     VectorMemoryStore(role_id).clear()
+
+# ========== Token 用量 / 缓存量统计（按角色，复用 memory_meta） ==========
+
+_USAGE_TOTAL_KEYS = {
+    "prompt_tokens": "usage_prompt_tokens_total",
+    "completion_tokens": "usage_completion_tokens_total",
+    "total_tokens": "usage_total_tokens_total",
+    "cache_hit_tokens": "usage_cache_hit_total",
+    "cache_miss_tokens": "usage_cache_miss_total",
+    "request_count": "usage_request_count",
+}
+
+def _parse_usage_fields(usage: Dict[str, Any]) -> Dict[str, int]:
+    """从 API 返回的 usage 中兼容解析 token 与缓存命中/未命中量。
+
+    兼容 DeepSeek（prompt_cache_hit_tokens/prompt_cache_miss_tokens）
+    与 OpenAI（prompt_tokens_details.cached_tokens）两种风格。
+    """
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    prompt_tokens = _to_int(usage.get("prompt_tokens"))
+    completion_tokens = _to_int(usage.get("completion_tokens"))
+    total_tokens = _to_int(usage.get("total_tokens")) or (prompt_tokens + completion_tokens)
+
+    # 缓存命中/未命中
+    if usage.get("prompt_cache_hit_tokens") is not None or usage.get("prompt_cache_miss_tokens") is not None:
+        cache_hit = _to_int(usage.get("prompt_cache_hit_tokens"))
+        cache_miss = _to_int(usage.get("prompt_cache_miss_tokens"))
+    else:
+        details = usage.get("prompt_tokens_details")
+        cache_hit = _to_int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+        cache_miss = max(prompt_tokens - cache_hit, 0)
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cache_hit_tokens": cache_hit,
+        "cache_miss_tokens": cache_miss,
+    }
+
+def record_usage(role_id: str, usage: Optional[Dict[str, Any]], model: Optional[str] = None):
+    """累计记录一次 AI 请求的 token 用量与缓存量（按角色）。
+
+    统计失败不得影响正常回复，全程静默兜底。
+    """
+    if is_tool_role_id(role_id) or not isinstance(usage, dict):
+        return
+    try:
+        parsed = _parse_usage_fields(usage)
+        with _get_connection(role_id) as conn:
+            for field, key in _USAGE_TOTAL_KEYS.items():
+                if field == "request_count":
+                    continue
+                current = _get_meta(conn, key, "0")
+                try:
+                    current_int = int(current)
+                except (TypeError, ValueError):
+                    current_int = 0
+                _set_meta(conn, key, str(current_int + parsed[field]))
+
+            count = _get_meta(conn, _USAGE_TOTAL_KEYS["request_count"], "0")
+            try:
+                count_int = int(count)
+            except (TypeError, ValueError):
+                count_int = 0
+            _set_meta(conn, _USAGE_TOTAL_KEYS["request_count"], str(count_int + 1))
+
+            last = dict(parsed)
+            last["model"] = model or ""
+            last["timestamp"] = datetime.now().isoformat()
+            _set_meta(conn, "usage_last_json", json.dumps(last, ensure_ascii=False))
+    except Exception as exc:
+        logger.warning(f"record_usage failed for role={role_id}: {exc}")
+
+def get_usage_stats(role_id: str) -> Dict[str, Any]:
+    """读取某角色的累计用量与最近一次用量。"""
+    empty_cumulative = {field: 0 for field in _USAGE_TOTAL_KEYS}
+    if is_tool_role_id(role_id):
+        return {"cumulative": empty_cumulative, "last": None}
+    try:
+        with _get_connection(role_id) as conn:
+            cumulative: Dict[str, int] = {}
+            for field, key in _USAGE_TOTAL_KEYS.items():
+                value = _get_meta(conn, key, "0")
+                try:
+                    cumulative[field] = int(value)
+                except (TypeError, ValueError):
+                    cumulative[field] = 0
+
+            last_raw = _get_meta(conn, "usage_last_json", None)
+            last = None
+            if last_raw:
+                try:
+                    last = json.loads(last_raw)
+                except Exception:
+                    last = None
+            return {"cumulative": cumulative, "last": last}
+    except Exception as exc:
+        logger.warning(f"get_usage_stats failed for role={role_id}: {exc}")
+        return {"cumulative": empty_cumulative, "last": None}
+
+def reset_usage_stats(role_id: str) -> bool:
+    """清零某角色的用量统计。"""
+    if is_tool_role_id(role_id):
+        return False
+    try:
+        with _get_connection(role_id) as conn:
+            for key in _USAGE_TOTAL_KEYS.values():
+                _set_meta(conn, key, "0")
+            _set_meta(conn, "usage_last_json", None)
+        return True
+    except Exception as exc:
+        logger.warning(f"reset_usage_stats failed for role={role_id}: {exc}")
+        return False
 
 def list_vector_memories(role_id: str, limit: int = 500, offset: int = 0) -> List[Dict]:
     """列出向量记忆条目（不含 embedding 本体）。"""

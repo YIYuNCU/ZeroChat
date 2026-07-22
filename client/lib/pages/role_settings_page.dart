@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/onebot_config.dart';
 import '../models/role.dart';
+import '../models/stats_config.dart';
 
 /// 角色参数设置页面
 /// 调整 AI 角色的参数配置
@@ -34,6 +35,16 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _onebotMainUserIdController;
   late TextEditingController _onebotAllowedUsersController;
   late TextEditingController _onebotAllowedGroupsController;
+
+  // 数值系统
+  late bool _statsEnabled;
+  late List<StatItem> _statItems;
+  // 消息部分显隐
+  late bool _showAction;
+  late bool _showPsychology;
+  late bool _showStats;
+  late bool _showNoReply;
+  late bool _archived;
 
   @override
   void initState() {
@@ -81,6 +92,13 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _onebotAllowedGroupsController = TextEditingController(
       text: widget.role.onebotConfig.allowedGroups.join(','),
     );
+    _statsEnabled = widget.role.statsConfig.enabled;
+    _statItems = List<StatItem>.from(widget.role.statsConfig.stats);
+    _showAction = widget.role.showAction;
+    _showPsychology = widget.role.showPsychology;
+    _showStats = widget.role.showStats;
+    _showNoReply = widget.role.showNoReply;
+    _archived = widget.role.archived;
   }
 
   @override
@@ -485,6 +503,93 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
 
           const SizedBox(height: 10),
 
+          // 消息显示设置（对话始终显示）
+          _buildSection(
+            title: '消息显示',
+            children: [
+              _buildSwitchRow(
+                title: '显示动作',
+                subtitle: '气泡中显示 <动作> 部分',
+                value: _showAction,
+                onChanged: (v) => setState(() => _showAction = v),
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildSwitchRow(
+                title: '显示心理',
+                subtitle: '气泡中显示 <心理> 部分',
+                value: _showPsychology,
+                onChanged: (v) => setState(() => _showPsychology = v),
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildSwitchRow(
+                title: '显示数值',
+                subtitle: '气泡中显示 <数值> 部分',
+                value: _showStats,
+                onChanged: (v) => setState(() => _showStats = v),
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildSwitchRow(
+                title: '显示无回复提示',
+                subtitle: 'AI 返回 <无回复/> 时在聊天中显示提示',
+                value: _showNoReply,
+                onChanged: (v) => setState(() => _showNoReply = v),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 数值系统
+          _buildSection(
+            title: '数值系统',
+            children: [
+              _buildSwitchRow(
+                title: '启用数值',
+                subtitle: '让 AI 维护并在回复中输出数值',
+                value: _statsEnabled,
+                onChanged: (v) => setState(() => _statsEnabled = v),
+              ),
+              if (_statsEnabled) ...[
+                const Divider(height: 1, indent: 16),
+                ..._buildStatItemRows(),
+                const Divider(height: 1, indent: 16),
+                InkWell(
+                  onTap: _addStatItem,
+                  child: const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.add, size: 18, color: Color(0xFF07C160)),
+                        SizedBox(width: 4),
+                        Text('添加数值',
+                            style: TextStyle(
+                                color: Color(0xFF07C160), fontSize: 15)),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 状态管理（归档）
+          _buildSection(
+            title: '状态管理',
+            children: [
+              _buildSwitchRow(
+                title: '归档角色',
+                subtitle: '归档后无法聊天、不发朋友圈和主动消息，可随时恢复',
+                value: _archived,
+                onChanged: (v) => setState(() => _archived = v),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
           // 重置按钮
           _buildSection(
             children: [
@@ -505,6 +610,206 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
 
           const SizedBox(height: 30),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSwitchRow({
+    required String title,
+    String? subtitle,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontSize: 16)),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF888888),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          Switch(
+            value: value,
+            activeColor: const Color(0xFF07C160),
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildStatItemRows() {
+    final rows = <Widget>[];
+    for (var i = 0; i < _statItems.length; i++) {
+      final item = _statItems[i];
+      if (i > 0) rows.add(const Divider(height: 1, indent: 16));
+      final displayName = item.name.isNotEmpty ? item.name : item.key;
+      rows.add(
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+          title: Text(
+            displayName.isNotEmpty ? displayName : '(未命名)',
+            style: const TextStyle(fontSize: 16),
+          ),
+          subtitle: Text(
+            '键 ${item.key.isEmpty ? "?" : item.key} · 范围 [${_fmtNum(item.min)}, ${_fmtNum(item.max)}]'
+            '${item.description.isNotEmpty ? " · ${item.description}" : ""}',
+            style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+          ),
+          trailing: IconButton(
+            icon: const Icon(Icons.delete_outline,
+                size: 20, color: Color(0xFFFA5151)),
+            onPressed: () => setState(() => _statItems.removeAt(i)),
+          ),
+          onTap: () => _editStatItem(i),
+        ),
+      );
+    }
+    if (rows.isEmpty) {
+      rows.add(
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Text(
+            '暂无数值，点击下方添加',
+            style: TextStyle(fontSize: 13, color: Color(0xFF888888)),
+          ),
+        ),
+      );
+    }
+    return rows;
+  }
+
+  String _fmtNum(double v) =>
+      v == v.roundToDouble() ? v.toInt().toString() : v.toString();
+
+  void _addStatItem() => _editStatItem(null);
+
+  /// 编辑或新增一个数值定义。index 为 null 表示新增。
+  void _editStatItem(int? index) {
+    final existing = index != null ? _statItems[index] : null;
+    final keyCtrl = TextEditingController(text: existing?.key ?? '');
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final minCtrl =
+        TextEditingController(text: existing != null ? _fmtNum(existing.min) : '0');
+    final maxCtrl = TextEditingController(
+        text: existing != null ? _fmtNum(existing.max) : '100');
+    final initCtrl = TextEditingController(
+        text: existing?.initial != null ? _fmtNum(existing!.initial!) : '');
+    final descCtrl =
+        TextEditingController(text: existing?.description ?? '');
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(index == null ? '添加数值' : '编辑数值'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildDialogField(keyCtrl, '键（唯一，英文/拼音）', hint: '如 affection'),
+              _buildDialogField(nameCtrl, '名称', hint: '如 好感度'),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildDialogField(minCtrl, '下限',
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true, signed: true)),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildDialogField(maxCtrl, '上限',
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true, signed: true)),
+                  ),
+                ],
+              ),
+              _buildDialogField(initCtrl, '初始值（可空，默认取下限）',
+                  keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true, signed: true)),
+              _buildDialogField(descCtrl, '作用/含义', hint: '这个数值代表什么'),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              final key = keyCtrl.text.trim();
+              if (key.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('键不能为空')),
+                );
+                return;
+              }
+              var min = double.tryParse(minCtrl.text.trim()) ?? 0;
+              var max = double.tryParse(maxCtrl.text.trim()) ?? 100;
+              if (min > max) {
+                final t = min;
+                min = max;
+                max = t;
+              }
+              final initial = initCtrl.text.trim().isEmpty
+                  ? null
+                  : double.tryParse(initCtrl.text.trim());
+              final newItem = StatItem(
+                key: key,
+                name: nameCtrl.text.trim(),
+                min: min,
+                max: max,
+                initial: initial,
+                description: descCtrl.text.trim(),
+              );
+              setState(() {
+                if (index == null) {
+                  _statItems.add(newItem);
+                } else {
+                  _statItems[index] = newItem;
+                }
+              });
+              Navigator.pop(context);
+            },
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDialogField(
+    TextEditingController controller,
+    String label, {
+    String? hint,
+    TextInputType? keyboardType,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: TextField(
+        controller: controller,
+        keyboardType: keyboardType,
+        decoration: InputDecoration(
+          labelText: label,
+          hintText: hint,
+          border: const OutlineInputBorder(),
+          isDense: true,
+        ),
       ),
     );
   }
@@ -671,6 +976,15 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         allowedUsers: _parseIntList(_onebotAllowedUsersController.text),
         allowedGroups: _parseIntList(_onebotAllowedGroupsController.text),
       ),
+      statsConfig: StatsConfig(
+        enabled: _statsEnabled,
+        stats: List<StatItem>.from(_statItems),
+      ),
+      showAction: _showAction,
+      showPsychology: _showPsychology,
+      showStats: _showStats,
+      showNoReply: _showNoReply,
+      archived: _archived,
     );
     Navigator.pop(context, updatedRole);
   }

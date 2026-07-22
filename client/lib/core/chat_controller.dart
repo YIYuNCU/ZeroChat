@@ -13,6 +13,7 @@ import '../services/settings_service.dart';
 import '../services/notification_service.dart';
 import '../services/background_runtime_service.dart';
 import 'message_store.dart';
+import 'message_parts.dart';
 import 'segment_sender.dart';
 import 'group_scheduler.dart';
 import 'memory_manager.dart';
@@ -183,6 +184,23 @@ class ChatController extends ChangeNotifier {
     if (content.trim().isEmpty) return;
 
     debugPrint('ChatController: sendUserMessage to $chatId');
+
+    // 归档角色不可对话（单聊场景，chatId 即 roleId）
+    final targetRole = RoleService.getRoleById(chatId);
+    if (targetRole?.archived == true) {
+      debugPrint('ChatController: role $chatId archived, blocking send');
+      final errorMsg = Message(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        senderId: 'ai',
+        receiverId: 'me',
+        content: '该角色已归档，无法聊天。可在角色设置中恢复。',
+        type: MessageType.text,
+        timestamp: DateTime.now(),
+      );
+      await MessageStore.instance.addMessage(chatId, errorMsg);
+      notifyListeners();
+      return;
+    }
 
     // 创建用户消息并立即显示
     final userMessage = createMessage(
@@ -567,7 +585,11 @@ class ChatController extends ChangeNotifier {
     notifyListeners();
 
     if (message.type == MessageType.image) {
-      _processImageMessageInBackground(chatId, message.content, context.isGroup);
+      _processImageMessageInBackground(
+        chatId,
+        message.content,
+        context.isGroup,
+      );
       return;
     }
 
@@ -641,7 +663,8 @@ class ChatController extends ChangeNotifier {
     );
 
     // 从后端同步角色数据（异步，不阻塞UI）
-    RoleService.fetchFromBackend()
+    // 用 hash gate + TTL 节流：角色无变化时零往返、零本地重写。
+    RoleService.syncIfHashMismatch()
         .then((_) {
           debugPrint('ChatController: Role data synced from backend');
         })
@@ -703,8 +726,13 @@ class ChatController extends ChangeNotifier {
     String contentToSend;
     if (response.success && response.content != null) {
       contentToSend = response.content!;
+    } else if (response.ignored) {
+      debugPrint('ChatController: AI chose not to send scheduled task message');
+      return;
     } else {
-      debugPrint('ChatController: Backend task AI call failed: ${response.error}');
+      debugPrint(
+        'ChatController: Backend task AI call failed: ${response.error}',
+      );
       contentToSend = '嘿～$taskContent';
     }
 
@@ -893,6 +921,9 @@ class ChatController extends ChangeNotifier {
         if (rawReply != null) {
           // 群聊分段发送也不显示 typing
           await _sendSegmentsQueued(chatId, role.id, rawReply, isGroup: true);
+          if (MessageParts.isNoReplyDirective(rawReply)) {
+            continue;
+          }
           context.incrementConsecutiveCount(role.id);
           lastSpeakerId = role.id;
           lastMessage = rawReply;
@@ -912,27 +943,30 @@ class ChatController extends ChangeNotifier {
   void _ensureChatPushListener() {
     if (_chatPushSubscription != null) return;
 
-    _chatPushSubscription = SecureWebSocketClient.instance.serverPushStream.listen(
-      (Map<String, dynamic> event) {
-        final eventType = (event['event_type'] ?? event['type'] ?? '').toString().trim();
-        if (eventType != 'chat_response') return;
+    _chatPushSubscription = SecureWebSocketClient.instance.serverPushStream
+        .listen(
+          (Map<String, dynamic> event) {
+            final eventType = (event['event_type'] ?? event['type'] ?? '')
+                .toString()
+                .trim();
+            if (eventType != 'chat_response') return;
 
-        final dynamic rawPayload = event['payload'];
-        if (rawPayload is! Map) return;
+            final dynamic rawPayload = event['payload'];
+            if (rawPayload is! Map) return;
 
-        final payload = Map<String, dynamic>.from(rawPayload);
-        final taskId = (payload['task_id'] ?? '').toString();
-        if (taskId.isEmpty) return;
+            final payload = Map<String, dynamic>.from(rawPayload);
+            final taskId = (payload['task_id'] ?? '').toString();
+            if (taskId.isEmpty) return;
 
-        final completer = _pendingChatTasks.remove(taskId);
-        if (completer == null || completer.isCompleted) return;
+            final completer = _pendingChatTasks.remove(taskId);
+            if (completer == null || completer.isCompleted) return;
 
-        completer.complete(payload);
-      },
-      onError: (Object error, StackTrace stackTrace) {
-        debugPrint('ChatController: chat push stream error: $error');
-      },
-    );
+            completer.complete(payload);
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            debugPrint('ChatController: chat push stream error: $error');
+          },
+        );
 
     // Register reconnection recovery
     SecureWebSocketClient.instance.onReconnected = () {
@@ -949,7 +983,9 @@ class ChatController extends ChangeNotifier {
     if (_pendingChatTasks.isEmpty) return;
 
     final taskIds = _pendingChatTasks.keys.toList();
-    debugPrint('ChatController: recovering ${taskIds.length} pending chat tasks');
+    debugPrint(
+      'ChatController: recovering ${taskIds.length} pending chat tasks',
+    );
 
     try {
       final result = await SecureWebSocketClient.instance.request(
@@ -1049,19 +1085,25 @@ class ChatController extends ChangeNotifier {
             : null;
 
         if (success && content != null) {
+          final noReply = metadata?['no_reply'] == true ||
+              MessageParts.isNoReplyDirective(content);
           debugPrint('ChatController: AI response via backend (async push)');
           final requestId = metadata?['request_id']?.toString().trim();
           await MemoryService.appendJsonMemoryPair(
             roleId: role.id,
             userContent: userMessage,
-            assistantContent: content,
-            requestId: (requestId != null && requestId.isNotEmpty) ? requestId : null,
-            jsonMemory:
-                (attachedJson != null && attachedJson.isNotEmpty) ? attachedJson : null,
+            assistantContent: noReply ? null : content,
+            requestId: (requestId != null && requestId.isNotEmpty)
+                ? requestId
+                : null,
+            jsonMemory: (attachedJson != null && attachedJson.isNotEmpty)
+                ? attachedJson
+                : null,
           );
           if (metadata != null) {
             debugPrint('ChatController: Metadata from async push: $metadata');
           }
+          if (noReply && !role.showNoReply) return null;
           return content;
         }
 
@@ -1076,7 +1118,9 @@ class ChatController extends ChangeNotifier {
           try {
             final result = await SecureWebSocketClient.instance.request(
               'recover_chat_push',
-              {'task_ids': [taskId]},
+              {
+                'task_ids': [taskId],
+              },
               timeout: const Duration(seconds: 10),
             );
             final recovered = result['recovered'];
@@ -1092,14 +1136,22 @@ class ChatController extends ChangeNotifier {
                   final metadata = pushPayload['metadata'] is Map
                       ? Map<String, dynamic>.from(pushPayload['metadata'])
                       : null;
+                  final noReply = metadata?['no_reply'] == true ||
+                      MessageParts.isNoReplyDirective(content);
                   final requestId = metadata?['request_id']?.toString().trim();
                   await MemoryService.appendJsonMemoryPair(
                     roleId: role.id,
                     userContent: userMessage,
-                    assistantContent: content,
-                    requestId: (requestId != null && requestId.isNotEmpty) ? requestId : null,
-                    jsonMemory: (attachedJson != null && attachedJson.isNotEmpty) ? attachedJson : null,
+                    assistantContent: noReply ? null : content,
+                    requestId: (requestId != null && requestId.isNotEmpty)
+                        ? requestId
+                        : null,
+                    jsonMemory:
+                        (attachedJson != null && attachedJson.isNotEmpty)
+                        ? attachedJson
+                        : null,
                   );
+                  if (noReply && !role.showNoReply) return null;
                   return content;
                 }
               }
@@ -1112,11 +1164,15 @@ class ChatController extends ChangeNotifier {
     }
 
     // 仅通过 WebSocket 通信，无直连回退
-    debugPrint('ChatController: WebSocket chat failed: ${submitResponse.error}');
+    debugPrint(
+      'ChatController: WebSocket chat failed: ${submitResponse.error}',
+    );
     // 避免连续重复的错误消息：如果最后一条消息已经是错误，不再重复添加
     final lastMsg = MessageStore.instance.getLastMessage(chatId);
     if (lastMsg != null && lastMsg.senderId == 'error') {
-      debugPrint('ChatController: skipping duplicate error message for $chatId');
+      debugPrint(
+        'ChatController: skipping duplicate error message for $chatId',
+      );
       return null;
     }
     final errorMessage = createMessage(
@@ -1135,7 +1191,9 @@ class ChatController extends ChangeNotifier {
       final categories = await EmojiService.instance.getAiCategories(roleId);
       return StickerService.normalizeCategorySet(categories).toList();
     } catch (e) {
-      debugPrint('ChatController: load emoji categories failed for $roleId: $e');
+      debugPrint(
+        'ChatController: load emoji categories failed for $roleId: $e',
+      );
       return const <String>[];
     }
   }
@@ -1147,13 +1205,17 @@ class ChatController extends ChangeNotifier {
     required bool isGroup,
   }) async {
     final segments = SegmentSender.splitMessage(rawReply);
-    final availableEmojiCategories = await _loadAvailableEmojiCategories(roleId);
-    final preferredDefaultEmojiCategory = StickerService.resolveAvailableEmotion(
-      rawEmotion: 'neutral',
-      availableCategories: availableEmojiCategories,
-      defaultCategory: null,
+    final availableEmojiCategories = await _loadAvailableEmojiCategories(
+      roleId,
     );
-    final defaultEmojiCategory = preferredDefaultEmojiCategory ??
+    final preferredDefaultEmojiCategory =
+        StickerService.resolveAvailableEmotion(
+          rawEmotion: 'neutral',
+          availableCategories: availableEmojiCategories,
+          defaultCategory: null,
+        );
+    final defaultEmojiCategory =
+        preferredDefaultEmojiCategory ??
         (availableEmojiCategories.isNotEmpty
             ? availableEmojiCategories.first
             : null);
@@ -1173,12 +1235,14 @@ class ChatController extends ChangeNotifier {
       }
 
       // 解析情绪标签
-      final (cleanedText, emotion) =
-          StickerService.parseEmotionTagWithAvailableCategories(
-            segment,
-            availableCategories: availableEmojiCategories,
-            defaultCategory: defaultEmojiCategory,
-          );
+      final (
+        cleanedText,
+        emotion,
+      ) = StickerService.parseEmotionTagWithAvailableCategories(
+        segment,
+        availableCategories: availableEmojiCategories,
+        defaultCategory: defaultEmojiCategory,
+      );
       final displayText = cleanedText.isNotEmpty ? cleanedText : segment;
 
       final aiMessage = Message(
@@ -1196,12 +1260,19 @@ class ChatController extends ChangeNotifier {
         MessageStore.instance.incrementUnread(chatId);
         ChatListService.instance.incrementUnread(chatId);
 
-        // 发送本地通知
+        // 发送本地通知（去除格式标记，仅展示 AI 实际说出的内容）
         final role = RoleService.getRoleById(roleId);
+        final notificationParts = MessageParts.parse(
+          displayText,
+          allowFact: false,
+        );
+        final notifyDialogue = notificationParts.dialogue;
         NotificationService.instance.showMessageNotification(
           chatId: chatId,
           senderName: role?.name ?? 'AI',
-          message: segment,
+          message: notifyDialogue.trim().isNotEmpty
+              ? notifyDialogue
+              : notificationParts.plainText,
         );
 
         // 更新角标
@@ -1270,10 +1341,12 @@ class ChatController extends ChangeNotifier {
 
           for (final targetEmotion in orderedCandidates) {
             try {
-              final data = await SecureWebSocketClient.instance.request(
-                'emoji_random',
-                {'role_id': roleId, 'emotion': targetEmotion},
-              ).timeout(const Duration(seconds: 5));
+              final data = await SecureWebSocketClient.instance
+                  .request('emoji_random', {
+                    'role_id': roleId,
+                    'emotion': targetEmotion,
+                  })
+                  .timeout(const Duration(seconds: 5));
 
               final stickerUrl = resolveStickerUrl(data);
               if (stickerUrl != null) {
@@ -1292,33 +1365,32 @@ class ChatController extends ChangeNotifier {
         try {
           final stickerUrl = await fetchStickerUrlWithFallback();
           if (stickerUrl != null) {
-              // 延迟一小段时间再发表情包
-              await Future.delayed(
-                Duration(milliseconds: 300 + _random.nextInt(500)),
-              );
+            // 延迟一小段时间再发表情包
+            await Future.delayed(
+              Duration(milliseconds: 300 + _random.nextInt(500)),
+            );
 
-              final stickerContent = StickerService.createStickerMessageContent(
-                emotion,
-                stickerUrl,
-              );
-              await MessageStore.instance.updateMessage(
-                chatId,
-                placeholderStickerId,
-                content: stickerContent,
-                type: MessageType.sticker,
-              );
-              placeholderResolved = true;
-              debugPrint(
-                'ChatController: Replaced placeholder sticker for emotion: $emotion',
-              );
+            final stickerContent = StickerService.createStickerMessageContent(
+              emotion,
+              stickerUrl,
+            );
+            await MessageStore.instance.updateMessage(
+              chatId,
+              placeholderStickerId,
+              content: stickerContent,
+              type: MessageType.sticker,
+            );
+            placeholderResolved = true;
+            debugPrint(
+              'ChatController: Replaced placeholder sticker for emotion: $emotion',
+            );
           }
         } catch (e) {
           debugPrint('ChatController: Sticker fetch error: $e');
         }
 
         if (!placeholderResolved) {
-          final fallbackPlaceholderEmotion =
-              defaultEmojiCategory ?? emotion;
+          final fallbackPlaceholderEmotion = defaultEmojiCategory ?? emotion;
           await MessageStore.instance.updateMessage(
             chatId,
             placeholderStickerId,
@@ -1385,7 +1457,16 @@ class ChatController extends ChangeNotifier {
       case MessageType.image:
         return '[图片]';
       default:
-        return message.content;
+        // AI 预览优先只展示对话；用户事实消息展示事实正文而不是 XML 标签。
+        final isUserMessage = message.senderId == 'me';
+        final parts = MessageParts.parse(
+          message.content,
+          allowFact: isUserMessage,
+        );
+        final preview = isUserMessage || parts.dialogue.trim().isEmpty
+            ? parts.plainText
+            : parts.dialogue;
+        return preview.trim().isNotEmpty ? preview : message.content;
     }
   }
 }

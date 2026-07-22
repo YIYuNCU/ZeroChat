@@ -299,7 +299,7 @@ class ApiService {
         );
       }
       if (wsData['action']?.toString() == 'ignore') {
-        return ApiResponse.error('AI chose to ignore');
+        return ApiResponse.ignored();
       }
       final wsError = wsData['error']?.toString();
       if (wsError != null && wsError.isNotEmpty) {
@@ -564,12 +564,14 @@ class ApiService {
 /// API 响应封装
 class ApiResponse {
   final bool success;
+  final bool ignored;
   final String? content;
   final Map<String, dynamic>? metadata; // 后端返回的元信息（如 request_id）
   final String? error;
 
   ApiResponse._({
     required this.success,
+    this.ignored = false,
     this.content,
     this.metadata,
     this.error,
@@ -581,6 +583,10 @@ class ApiResponse {
 
   factory ApiResponse.error(String error) {
     return ApiResponse._(success: false, error: error);
+  }
+
+  factory ApiResponse.ignored() {
+    return ApiResponse._(success: false, ignored: true);
   }
 }
 
