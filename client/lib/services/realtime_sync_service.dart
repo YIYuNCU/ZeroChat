@@ -86,6 +86,9 @@ class RealtimeSyncService {
     _lastTaskSync = now;
     _lastMomentSync = now;
     try {
+      // 先排空发件箱，让离线期间未同步的用户消息到达服务端，
+      // 再做快照对比，避免快照把未同步消息判为差异并覆盖丢弃。
+      await MessageStore.instance.drainOutbox();
       await MessageStore.instance.syncFromBackendSnapshot();
       await TaskService.fetchFromBackend();
       await MomentsService.instance.fetchFromBackend();

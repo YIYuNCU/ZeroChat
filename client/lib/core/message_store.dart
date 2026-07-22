@@ -40,6 +40,12 @@ class MessageStore extends ChangeNotifier {
   final Map<String, Timer> _saveDebounceTimers = <String, Timer>{};
   static const Duration _saveDebounceWindow = Duration(milliseconds: 500);
 
+  /// 发件箱：用户消息后端同步的最大重试次数（首发之外）。
+  static const int _syncMaxRetry = 4;
+
+  /// 正在 drain 的标记，避免重连风暴时并发重复 drain。
+  bool _draining = false;
+
   /// 初始化（确保只执行一次）
   static Future<void> init() async {
     if (_instance._initialized) {
@@ -382,6 +388,28 @@ class MessageStore extends ChangeNotifier {
     for (final chatId in chatIds) {
       await _loadMessages(chatId);
     }
+    _reclassifyInterruptedOutbox();
+  }
+
+  /// 启动时把上次运行遗留的在途（sending）用户消息重分类为 failed：
+  /// 进程已重启，其同步循环不复存在，标记为 failed 以显示重发入口，
+  /// 并可被 drainOutbox() 自动重发。
+  void _reclassifyInterruptedOutbox() {
+    var reclassified = 0;
+    for (final list in _messages.values) {
+      for (var i = 0; i < list.length; i++) {
+        final m = list[i];
+        if (m.senderId == 'me' && m.sendStatus == MessageSendStatus.sending) {
+          list[i] = m.copyWith(sendStatus: MessageSendStatus.failed);
+          reclassified += 1;
+        }
+      }
+    }
+    if (reclassified > 0) {
+      debugPrint(
+        'MessageStore: reclassified $reclassified interrupted sending→failed',
+      );
+    }
   }
 
   /// 加载指定聊天的消息
@@ -546,6 +574,20 @@ class MessageStore extends ChangeNotifier {
           );
         }
 
+        // 合并而非整体替换：保留服务端列表中缺失、且仍未同步（sending/failed）
+        // 的本地用户消息，避免快照覆盖丢失离线期间产生的消息。
+        // 因 drainOutbox() 先于本方法执行，多数本地消息已在服务端并自然去重，
+        // 合并只兜底真正未同步的那些。
+        final serverIds = messages.map((m) => m.id).toSet();
+        final localOnly = (_messages[chatId] ?? const <Message>[]).where(
+          (m) =>
+              m.senderId == 'me' &&
+              (m.sendStatus == MessageSendStatus.sending ||
+                  m.sendStatus == MessageSendStatus.failed) &&
+              !serverIds.contains(m.id),
+        );
+        messages.addAll(localOnly);
+
         messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
         _messages[chatId] = messages;
         await _saveMessages(chatId);
@@ -571,6 +613,13 @@ class MessageStore extends ChangeNotifier {
       final list = _messages[chatId] ?? const <Message>[];
       final serialized =
           list
+              // 排除尚未同步到后端的本地用户消息（sending/failed）：MD5 只代表
+              // "服务端应有的内容"，纯本地未同步消息不再触发破坏性 need_sync。
+              .where(
+                (m) => !(m.senderId == 'me' &&
+                    (m.sendStatus == MessageSendStatus.sending ||
+                        m.sendStatus == MessageSendStatus.failed)),
+              )
               .map(
                 (m) => {
                   'id': m.id,
@@ -596,9 +645,31 @@ class MessageStore extends ChangeNotifier {
     return md5.convert(utf8.encode(jsonStr)).toString();
   }
 
-  /// 异步同步消息到后端（不阻塞 UI）
+  /// 异步同步消息到后端（不阻塞 UI）。
+  ///
+  /// 对用户消息（senderId=='me'）作为发件箱处理：入队即置 sending，
+  /// 有界退避重试，成功置 sent、最终失败置 failed（供 retryFailedMessage 手动重发）。
+  /// 服务端 save_chat_message 已按 message.id 幂等，重发不会重复。
+  /// AI/系统消息保持尽力而为，不跟踪发送状态。
   void _syncMessageToBackend(String chatId, Message message) {
-    Future(() async {
+    final tracked = message.senderId == 'me';
+    if (tracked) {
+      // 入队即标记在途，供 UI 显示"发送中"。
+      unawaited(
+        updateMessageSendStatus(chatId, message.id, MessageSendStatus.sending),
+      );
+    }
+
+    unawaited(_runOutboxSync(chatId, message, tracked: tracked));
+  }
+
+  Future<void> _runOutboxSync(
+    String chatId,
+    Message message, {
+    required bool tracked,
+  }) async {
+    Object? lastError;
+    for (int attempt = 0; attempt <= _syncMaxRetry; attempt += 1) {
       try {
         await SecureWebSocketClient.instance.request('save_chat_message', {
           'role_id': chatId,
@@ -614,10 +685,63 @@ class MessageStore extends ChangeNotifier {
         });
 
         debugPrint('MessageStore: Synced message ${message.id} via websocket ✓');
+        if (tracked) {
+          await updateMessageSendStatus(
+            chatId,
+            message.id,
+            MessageSendStatus.sent,
+          );
+        }
+        return;
       } catch (e) {
-        debugPrint('MessageStore: WebSocket sync error: $e');
+        lastError = e;
+        if (attempt < _syncMaxRetry) {
+          // 线性退避：400ms, 800ms, 1200ms ...；WS request() 已含 socket/timeout 层重试，
+          // 这里覆盖更长时间的中断。
+          await Future<void>.delayed(
+            Duration(milliseconds: 400 * (attempt + 1)),
+          );
+        }
       }
-    });
+    }
+
+    debugPrint(
+      'MessageStore: WebSocket sync failed for ${message.id} after retries: $lastError',
+    );
+    if (tracked) {
+      await updateMessageSendStatus(
+        chatId,
+        message.id,
+        MessageSendStatus.failed,
+      );
+    }
+  }
+
+  /// 发件箱排水：重发所有 senderId=='me' 且状态为 sending/failed 的用户消息。
+  /// 由重连后的全量对账调用，且必须在快照对比之前执行。
+  Future<void> drainOutbox() async {
+    if (_draining) return;
+    _draining = true;
+    try {
+      final pending = <MapEntry<String, Message>>[];
+      for (final entry in _messages.entries) {
+        for (final m in entry.value) {
+          if (m.senderId == 'me' &&
+              (m.sendStatus == MessageSendStatus.failed ||
+                  m.sendStatus == MessageSendStatus.sending)) {
+            pending.add(MapEntry(entry.key, m));
+          }
+        }
+      }
+
+      if (pending.isEmpty) return;
+      debugPrint('MessageStore: draining outbox (${pending.length} messages)');
+      for (final entry in pending) {
+        await _runOutboxSync(entry.key, entry.value, tracked: true);
+      }
+    } finally {
+      _draining = false;
+    }
   }
 
   // ========== 工具方法 ==========

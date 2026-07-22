@@ -36,7 +36,22 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
   @override
   void initState() {
     super.initState();
-    _resolvePath();
+    // 先同步查内存解析表：命中则首帧直接显示图片，消除回退图标闪烁。
+    final url = widget.remoteUrl;
+    if (url != null && url.isNotEmpty && url.startsWith('http')) {
+      _localPath = AvatarCacheService.peekResolvedPath(
+        cacheKey: widget.cacheKey,
+        remoteUrl: url,
+        backendHash: widget.backendHash,
+      );
+    }
+    // 仍需异步确认（刷新 LRU、处理首次未命中/hash 变化），但已避免闪烁。
+    if (_localPath == null) {
+      _resolvePath();
+    } else {
+      // 已有内存命中，仅在后台刷新 LRU 时间戳，不触发可见的加载态。
+      _resolvePath(silent: true);
+    }
   }
 
   @override
@@ -50,7 +65,8 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
     }
   }
 
-  Future<void> _resolvePath() async {
+  /// [silent] 为 true 时，已有内存命中路径，仅后台刷新，成功后若路径不变不重建。
+  Future<void> _resolvePath({bool silent = false}) async {
     final url = widget.remoteUrl;
     if (url == null || url.isEmpty || !url.startsWith('http')) {
       debugPrint('SmartAvatarImage: invalid remoteUrl=$url for cacheKey=${widget.cacheKey}');
@@ -70,6 +86,8 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
     );
 
     if (!mounted) return;
+    // 静默刷新且路径未变：无需 setState，避免多余重建。
+    if (silent && local == _localPath) return;
     setState(() {
       _localPath = local;
       _hasFailed = local == null;
@@ -87,6 +105,11 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
       return widget.fallbackBuilder?.call() ?? const SizedBox.shrink();
     }
 
+    // 按显示尺寸 × 设备像素比解码，避免把全分辨率位图塞进图片缓存。
+    final dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 1.0;
+    final cacheW = (widget.width * dpr).round();
+    final cacheH = (widget.height * dpr).round();
+
     if (!url.startsWith('http')) {
       debugPrint('SmartAvatarImage: treating non-http url as local file: $url');
       return Image.file(
@@ -94,6 +117,8 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
         width: widget.width,
         height: widget.height,
         fit: widget.fit,
+        cacheWidth: cacheW,
+        cacheHeight: cacheH,
         errorBuilder: (_, __, ___) =>
             widget.fallbackBuilder?.call() ?? const SizedBox.shrink(),
       );
@@ -105,6 +130,8 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
         width: widget.width,
         height: widget.height,
         fit: widget.fit,
+        cacheWidth: cacheW,
+        cacheHeight: cacheH,
         errorBuilder: (_, __, ___) =>
             widget.fallbackBuilder?.call() ?? const SizedBox.shrink(),
       );

@@ -183,6 +183,8 @@ class ApiService {
         '$_effectiveUrl/chat/completions',
         headers: {'Authorization': 'Bearer $apiKey'},
         includeAuth: false,
+        // LLM 延迟较高，放宽超时到 60s；非幂等，绝不自动重试（避免重复生成/计费）。
+        timeout: const Duration(seconds: 60),
         body: {
           'model': _effectiveModel,
           'messages': messages,

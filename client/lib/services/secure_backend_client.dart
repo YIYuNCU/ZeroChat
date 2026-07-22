@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 class SecureBackendResponse {
@@ -20,6 +22,53 @@ class SecureBackendClient {
 
   static String _authToken = defaultAuthToken;
   static String _encryptionSecret = defaultEncryptionSecret;
+
+  /// 常规请求（get/post/put/delete/getRaw/postRawJson）的读写超时。
+  static const Duration _connectReadTimeout = Duration(seconds: 15);
+
+  /// multipart 上传的超时（作用于 request.send()）。
+  static const Duration _multipartTimeout = Duration(seconds: 60);
+
+  /// 幂等请求的最大重试次数（首发之外）。
+  static const int _idempotentMaxRetries = 2;
+
+  static final Random _retryJitter = Random();
+
+  /// 仅在连接级异常时重试；HTTP 4xx/5xx 会返回响应而非抛异常，不在此列。
+  static bool _isRetryableError(Object error) {
+    return error is TimeoutException ||
+        error is SocketException ||
+        error is http.ClientException ||
+        error is HandshakeException;
+  }
+
+  /// 有界指数退避重试。仅用于幂等操作；非幂等调用不要传 maxRetries>0。
+  static Future<T> _withRetry<T>(
+    Future<T> Function() op, {
+    int maxRetries = 0,
+    String label = 'http',
+  }) async {
+    Object? lastError;
+    for (int attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        return await op();
+      } catch (e) {
+        lastError = e;
+        final shouldRetry = attempt < maxRetries && _isRetryableError(e);
+        if (!shouldRetry) {
+          rethrow;
+        }
+        final base = 300 * (1 << attempt); // 300ms, 600ms, ...
+        final jitter = _retryJitter.nextInt(150);
+        final delay = Duration(milliseconds: base + jitter);
+        debugPrint(
+          'SecureBackendClient: retry $label (attempt ${attempt + 2}/${maxRetries + 1}) after ${delay.inMilliseconds}ms, error: $e',
+        );
+        await Future<void>.delayed(delay);
+      }
+    }
+    throw lastError ?? Exception('SecureBackendClient request failed: $label');
+  }
 
   static void configureSecurity({
     required String authToken,
@@ -51,23 +100,33 @@ class SecureBackendClient {
   }
 
   static Future<SecureBackendResponse> get(String url) async {
-    final response = await http.get(
-      Uri.parse(url),
-      headers: _buildHeaders(headers: {'Accept': 'application/json'}),
+    return _withRetry(
+      () async {
+        final response = await http
+            .get(
+              Uri.parse(url),
+              headers: _buildHeaders(headers: {'Accept': 'application/json'}),
+            )
+            .timeout(_connectReadTimeout);
+        return _decodeResponse(response);
+      },
+      maxRetries: _idempotentMaxRetries,
+      label: 'GET $url',
     );
-
-    return _decodeResponse(response);
   }
 
   static Future<SecureBackendResponse> post(
     String url,
     Map<String, dynamic> body,
   ) async {
-    final response = await http.post(
-      Uri.parse(url),
-      headers: _buildHeaders(headers: {'Content-Type': 'application/json'}),
-      body: jsonEncode({'payload': _encryptPayload(body)}),
-    );
+    // 非幂等：单发，仅加超时，不自动重试。
+    final response = await http
+        .post(
+          Uri.parse(url),
+          headers: _buildHeaders(headers: {'Content-Type': 'application/json'}),
+          body: jsonEncode({'payload': _encryptPayload(body)}),
+        )
+        .timeout(_connectReadTimeout);
 
     return _decodeResponse(response);
   }
@@ -76,22 +135,38 @@ class SecureBackendClient {
     String url,
     Map<String, dynamic> body,
   ) async {
-    final response = await http.put(
-      Uri.parse(url),
-      headers: _buildHeaders(headers: {'Content-Type': 'application/json'}),
-      body: jsonEncode({'payload': _encryptPayload(body)}),
+    // PUT 为整资源替换，幂等，可重试。
+    return _withRetry(
+      () async {
+        final response = await http
+            .put(
+              Uri.parse(url),
+              headers:
+                  _buildHeaders(headers: {'Content-Type': 'application/json'}),
+              body: jsonEncode({'payload': _encryptPayload(body)}),
+            )
+            .timeout(_connectReadTimeout);
+        return _decodeResponse(response);
+      },
+      maxRetries: _idempotentMaxRetries,
+      label: 'PUT $url',
     );
-
-    return _decodeResponse(response);
   }
 
   static Future<SecureBackendResponse> delete(String url) async {
-    final response = await http.delete(
-      Uri.parse(url),
-      headers: _buildHeaders(headers: {'Accept': 'application/json'}),
+    return _withRetry(
+      () async {
+        final response = await http
+            .delete(
+              Uri.parse(url),
+              headers: _buildHeaders(headers: {'Accept': 'application/json'}),
+            )
+            .timeout(_connectReadTimeout);
+        return _decodeResponse(response);
+      },
+      maxRetries: _idempotentMaxRetries,
+      label: 'DELETE $url',
     );
-
-    return _decodeResponse(response);
   }
 
   static SecureBackendResponse _decodeResponse(http.Response response) {
@@ -144,28 +219,40 @@ class SecureBackendClient {
     String url, {
     Map<String, String>? headers,
     bool includeAuth = true,
+    Duration? timeout,
   }) async {
-    return http.get(
-      Uri.parse(url),
-      headers: _buildHeaders(headers: headers, includeAuth: includeAuth),
+    return _withRetry(
+      () => http
+          .get(
+            Uri.parse(url),
+            headers: _buildHeaders(headers: headers, includeAuth: includeAuth),
+          )
+          .timeout(timeout ?? _connectReadTimeout),
+      maxRetries: _idempotentMaxRetries,
+      label: 'GET(raw) $url',
     );
   }
 
+  /// 原始 JSON POST。非幂等，默认单发不重试。
+  /// [timeout] 允许调用方为 LLM 等长耗时请求放宽超时。
   static Future<http.Response> postRawJson(
     String url, {
     required Map<String, dynamic> body,
     Map<String, String>? headers,
     bool includeAuth = true,
+    Duration? timeout,
   }) async {
     final merged = <String, String>{'Content-Type': 'application/json'};
     if (headers != null) {
       merged.addAll(headers);
     }
-    return http.post(
-      Uri.parse(url),
-      headers: _buildHeaders(headers: merged, includeAuth: includeAuth),
-      body: jsonEncode(body),
-    );
+    return http
+        .post(
+          Uri.parse(url),
+          headers: _buildHeaders(headers: merged, includeAuth: includeAuth),
+          body: jsonEncode(body),
+        )
+        .timeout(timeout ?? _connectReadTimeout);
   }
 
   static Future<http.StreamedResponse> multipartPost(
@@ -185,7 +272,8 @@ class SecureBackendClient {
     if (files != null) {
       request.files.addAll(files);
     }
-    return request.send();
+    // 非幂等：单发，仅加超时。
+    return request.send().timeout(_multipartTimeout);
   }
 
   static Map<String, String> _encryptPayload(Map<String, dynamic> data) {

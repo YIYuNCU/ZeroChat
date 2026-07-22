@@ -143,6 +143,10 @@ enum MessageType {
 }
 
 enum MessageSendStatus {
+  /// 已写入本地、正在同步到后端（在途）。
+  sending,
+  /// 已成功同步到后端。
   sent,
+  /// 同步最终失败，可手动重发。
   failed,
 }

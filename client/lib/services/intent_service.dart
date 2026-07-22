@@ -165,6 +165,8 @@ class IntentService {
         '$_intentApiUrl/chat/completions',
         headers: {'Authorization': 'Bearer $_intentApiKey'},
         includeAuth: false,
+        // 意图识别为 LLM 调用，放宽超时到 30s 以免弱网下截断有效响应。
+        timeout: const Duration(seconds: 30),
         body: {
           'model': _intentModel,
           'messages': [

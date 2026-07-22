@@ -21,6 +21,9 @@ class SecureWebSocketClient {
   static const Duration _connectTimeout = Duration(seconds: 20);
   static const int _maxRequestRetries = 3;
   static const Duration _heartbeatInterval = Duration(seconds: 25);
+
+  /// 心跳发出后等待 heartbeat_ack 的最长时间；超时视为半掉线并重连。
+  static const Duration _heartbeatAckTimeout = Duration(seconds: 10);
   static const Duration _connectivityReconnectDebounce = Duration(seconds: 3);
   static const Duration _baseReconnectDelay = Duration(seconds: 1);
   static const Duration _maxReconnectDelay = Duration(seconds: 60);
@@ -35,6 +38,10 @@ class SecureWebSocketClient {
   int _reconnectBackoffCount = 0;
   int _heartbeatFailCount = 0;
   Timer? _reconnectTimer;
+
+  /// pong 看门狗：心跳发出后等待 heartbeat_ack 的定时器与状态。
+  Timer? _pongTimer;
+  bool _awaitingPong = false;
 
   final Map<String, Completer<Map<String, dynamic>>> _pending =
       <String, Completer<Map<String, dynamic>>>{};
@@ -77,13 +84,8 @@ class SecureWebSocketClient {
       }
     }
 
-    // Exponential backoff delay before attempting connection
-    final delay = _computeReconnectDelay();
-    if (delay > Duration.zero) {
-      debugPrint('SecureWebSocketClient: backoff waiting ${delay.inSeconds}s before reconnect');
-      await Future.delayed(delay);
-    }
-
+    // 退避延迟只在 _scheduleReconnect 的定时器里应用一次；这里不再重复等待，
+    // 避免经调度器进入时叠加两次退避。直接调用（如发送前保活）也应尽快连接。
     final completer = Completer<void>();
     _connectingCompleter = completer;
 
@@ -236,6 +238,7 @@ class SecureWebSocketClient {
   Future<void> close() async {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    _cancelPongWatchdog();
 
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
@@ -280,6 +283,9 @@ class SecureWebSocketClient {
       final data = Map<String, dynamic>.from(map);
       final event = data['event']?.toString() ?? '';
       if (event == 'heartbeat_ack') {
+        // 收到 ack：关闭看门狗，重置失败计数，随后仍丢弃 payload。
+        _cancelPongWatchdog();
+        _heartbeatFailCount = 0;
         return;
       }
 
@@ -356,6 +362,7 @@ class SecureWebSocketClient {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
+    _cancelPongWatchdog();
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (Timer timer) {
       unawaited(_sendHeartbeatFrame());
     });
@@ -366,6 +373,14 @@ class SecureWebSocketClient {
     if (socket == null) {
       return;
     }
+
+    // 上一轮心跳的 ack 仍未到达：连接已半掉线，主动断开重连。
+    if (_awaitingPong) {
+      _cancelPongWatchdog();
+      _handleDisconnect('heartbeat_ack missing (previous heartbeat not acked)');
+      return;
+    }
+
     try {
       await WakeLockService.acquireShort(
         duration: const Duration(seconds: 10),
@@ -378,6 +393,7 @@ class SecureWebSocketClient {
         }),
       );
       _heartbeatFailCount = 0;
+      _armPongWatchdog();
     } catch (e) {
       _heartbeatFailCount += 1;
       debugPrint('SecureWebSocketClient: heartbeat failed ($_heartbeatFailCount): $e');
@@ -387,11 +403,28 @@ class SecureWebSocketClient {
     }
   }
 
-  void _startConnectivityMonitor() {
-    if (!Platform.isAndroid) {
-      return;
-    }
+  /// 心跳发出后启动 pong 看门狗；到期仍未收到 heartbeat_ack 即判定半掉线。
+  void _armPongWatchdog() {
+    _awaitingPong = true;
+    _pongTimer?.cancel();
+    _pongTimer = Timer(_heartbeatAckTimeout, () {
+      _pongTimer = null;
+      if (_awaitingPong) {
+        _awaitingPong = false;
+        _handleDisconnect('heartbeat_ack timeout');
+      }
+    });
+  }
 
+  void _cancelPongWatchdog() {
+    _pongTimer?.cancel();
+    _pongTimer = null;
+    _awaitingPong = false;
+  }
+
+  void _startConnectivityMonitor() {
+    // connectivity_plus 支持 iOS/macOS/Windows/Linux；下游已做 3s 防抖 +
+    // health 探测优先于重连，桌面/VPN 的噪声事件不会误关健康连接。
     _connectivitySubscription?.cancel();
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
       (dynamic result) {
@@ -465,6 +498,7 @@ class SecureWebSocketClient {
   void _handleDisconnect(String reason) {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    _cancelPongWatchdog();
 
     _subscription?.cancel();
     _subscription = null;

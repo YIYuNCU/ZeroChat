@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -11,6 +12,60 @@ class AvatarCacheService {
   static const String _metaStorageKey = 'avatar_cache_meta_v1';
   static final Map<String, dynamic> _meta = {};
   static bool _initialized = false;
+
+  /// 已解析路径的内存缓存：cacheKey → (本地路径, 身份标识)。
+  /// 同一发送者的多个气泡命中此表即同步返回，免去平台通道/磁盘 exists()/prefs 写入。
+  /// 身份标识用 backendHash（若有）否则 normalizedUrl，头像更新（hash 变化）时自动失效。
+  static final Map<String, _ResolvedEntry> _resolvedPaths = {};
+
+  /// 缓存目录路径只解析一次，避免每次 resolve 都走平台通道。
+  static String? _avatarsDirPath;
+
+  /// LRU 时间戳更新用合并写：命中缓存只在内存里改 updated_at，
+  /// 3s 内合并成一次 SharedPreferences 写入，避免滚动时反复整表序列化。
+  static bool _metaDirty = false;
+  static Timer? _persistTimer;
+
+  static String _identityFor(String? backendHash, String normalizedUrl) {
+    return (backendHash != null && backendHash.isNotEmpty)
+        ? backendHash
+        : normalizedUrl;
+  }
+
+  /// 同步查已解析路径：内存命中即返回，供 UI 首帧直接显示、消除闪烁。
+  /// 不保证文件仍在（可能被 LRU 逐出）；调用方须有 errorBuilder 兜底。
+  static String? peekResolvedPath({
+    required String cacheKey,
+    required String remoteUrl,
+    String? backendHash,
+  }) {
+    if (remoteUrl.isEmpty || !remoteUrl.startsWith('http')) return null;
+    final entry = _resolvedPaths[cacheKey];
+    if (entry == null) return null;
+    final identity = _identityFor(backendHash, _normalizeUrl(remoteUrl));
+    return entry.identity == identity ? entry.path : null;
+  }
+
+  static Future<String> _avatarsDir() async {
+    final cached = _avatarsDirPath;
+    if (cached != null) return cached;
+    final docsDir = await getApplicationDocumentsDirectory();
+    final path = '${docsDir.path}${Platform.pathSeparator}avatar_cache';
+    _avatarsDirPath = path;
+    return path;
+  }
+
+  /// 标记 meta 变更并安排一次合并持久化（用于 LRU 时间戳等低价值高频更新）。
+  static void _schedulePersist() {
+    _metaDirty = true;
+    _persistTimer ??= Timer(const Duration(seconds: 3), () {
+      _persistTimer = null;
+      if (_metaDirty) {
+        _metaDirty = false;
+        _persistMeta();
+      }
+    });
+  }
 
   static Future<void> _ensureInitialized() async {
     if (_initialized) return;
@@ -86,11 +141,15 @@ class AvatarCacheService {
             ((backendHash == null || backendHash.isEmpty) && urlMatches));
 
     if (canReuse) {
-      // 命中缓存时刷新 updated_at，使 LRU 逐出可按最近使用排序。
+      // 命中缓存：更新内存解析表 + 刷新 updated_at（合并写，不每次落盘）。
+      _resolvedPaths[cacheKey] = _ResolvedEntry(
+        path: entryPath,
+        identity: _identityFor(backendHash, normalizedUrl),
+      );
       if (entry != null) {
         entry['updated_at'] = DateTime.now().toIso8601String();
         _meta[cacheKey] = entry;
-        await _persistMeta();
+        _schedulePersist();
       }
       return entryPath;
     }
@@ -122,6 +181,11 @@ class AvatarCacheService {
           'local_path': file.path,
           'updated_at': DateTime.now().toIso8601String(),
         };
+        _resolvedPaths[cacheKey] = _ResolvedEntry(
+          path: file.path,
+          identity: _identityFor(backendHash, normalizedUrl),
+        );
+        // 新下载是重要变更，立即落盘（不走合并写）。
         await _persistMeta();
         await _enforceCacheLimit();
         return file.path;
@@ -141,12 +205,9 @@ class AvatarCacheService {
   }
 
   static Future<File> _cachedFileFor(String cacheKey, String remoteUrl) async {
-    final docsDir = await getApplicationDocumentsDirectory();
-    final avatarsDir = Directory(
-      '${docsDir.path}${Platform.pathSeparator}avatar_cache',
-    );
+    final avatarsDirPath = await _avatarsDir();
     final ext = _pickExtension(remoteUrl);
-    return File('${avatarsDir.path}${Platform.pathSeparator}$cacheKey.$ext');
+    return File('$avatarsDirPath${Platform.pathSeparator}$cacheKey.$ext');
   }
 
   /// 逐出指定缓存项：删除本地文件 + 删除 meta 条目 + 持久化。
@@ -165,6 +226,7 @@ class AvatarCacheService {
         debugPrint('AvatarCacheService: evict failed to delete $entryPath: $e');
       }
     }
+    _resolvedPaths.remove(cacheKey);
     if (_meta.remove(cacheKey) != null) {
       await _persistMeta();
     }
@@ -190,6 +252,7 @@ class AvatarCacheService {
           debugPrint('AvatarCacheService: evictByPrefix delete failed $entryPath: $e');
         }
       }
+      _resolvedPaths.remove(key);
       if (_meta.remove(key) != null) {
         changed = true;
       }
@@ -247,6 +310,7 @@ class AvatarCacheService {
           debugPrint('AvatarCacheService: LRU delete failed ${e.path}: $err');
         }
         _meta.remove(e.key);
+        _resolvedPaths.remove(e.key);
         totalBytes -= e.size;
         fileCount -= 1;
         changed = true;
@@ -272,4 +336,12 @@ class _CacheEntry {
     required this.size,
     required this.updatedAt,
   });
+}
+
+/// 内存已解析路径条目：本地文件路径 + 身份标识（backendHash 或 normalizedUrl）。
+class _ResolvedEntry {
+  final String path;
+  final String identity;
+
+  const _ResolvedEntry({required this.path, required this.identity});
 }

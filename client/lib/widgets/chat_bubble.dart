@@ -85,6 +85,20 @@ class ChatBubble extends StatelessWidget {
                     ),
                   ),
 
+                if (isSender && message.sendStatus == MessageSendStatus.sending)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 8, top: 10),
+                    child: SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(Colors.grey),
+                      ),
+                    ),
+                  ),
+
                 // 气泡主体（长按菜单）
                 Flexible(
                   child: GestureDetector(
@@ -153,6 +167,9 @@ class ChatBubble extends StatelessWidget {
           child: Image.file(
             File(message.content),
             fit: BoxFit.cover,
+            // 缩略图按显示上限解码，避免把全分辨率原图（最高 1920px）塞进图片缓存。
+            cacheWidth:
+                (200 * MediaQuery.of(context).devicePixelRatio).round(),
             errorBuilder: (_, __, ___) => Container(
               width: 150,
               height: 100,
@@ -480,6 +497,8 @@ class ChatBubble extends StatelessWidget {
             ? Image.file(
                 File(resolvedPath),
                 fit: BoxFit.contain,
+                // 120px 显示上限 × 3（覆盖最高 DPR）解码，免全分辨率贴图。
+                cacheWidth: 360,
                 errorBuilder: (_, __, ___) => _buildStickerPlaceholder(emotion),
               )
             : _buildStickerPlaceholder(emotion),
@@ -514,6 +533,8 @@ class ChatBubble extends StatelessWidget {
       imageUrl: imageUrl,
       httpHeaders: SecureBackendClient.authHeaders,
       fit: BoxFit.contain,
+      // 120px 显示上限 × 3 解码，限制内存位图大小。
+      memCacheWidth: 360,
       placeholder: (_, __) => _buildStickerPlaceholder(emotion),
       errorWidget: (_, __, ___) {
         final retryUrl = _buildBaseRetryUrl(imageUrl);
@@ -525,6 +546,7 @@ class ChatBubble extends StatelessWidget {
           imageUrl: retryUrl,
           httpHeaders: SecureBackendClient.authHeaders,
           fit: BoxFit.contain,
+          memCacheWidth: 360,
           placeholder: (_, __) => _buildStickerPlaceholder(emotion),
           errorWidget: (_, __, ___) => _buildStickerPlaceholder(emotion),
           fadeInDuration: const Duration(milliseconds: 100),

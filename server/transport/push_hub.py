@@ -17,8 +17,8 @@ _logger = None
 # (keyed by message_id) so clients that were offline/backgrounded can recover
 # pushes that arrived while disconnected.
 _CHAT_PUSH_CACHE: dict[str, tuple[datetime, dict]] = {}
-_CHAT_PUSH_CACHE_TTL = 600  # seconds
-_CHAT_PUSH_CACHE_MAX = 200
+_CHAT_PUSH_CACHE_TTL = 1800  # seconds — cover longer offline/background windows
+_CHAT_PUSH_CACHE_MAX = 500
 
 # Event types whose payload carries a message_id and should be cached for recovery
 _MESSAGE_PUSH_EVENTS = ("task_message", "proactive_message")
@@ -134,6 +134,37 @@ def get_missed_chat_pushes(task_ids: list[str]) -> list[dict]:
         recovered.append(
             {
                 "task_id": tid,
+                "payload": push_data.get("payload", {}),
+            }
+        )
+    return recovered
+
+
+def get_missed_message_pushes(message_ids: list[str]) -> list[dict]:
+    """Return cached proactive/task message pushes for the given message_ids.
+
+    Mirror of get_missed_chat_pushes but for task_message/proactive_message
+    events, which are cached keyed by message_id (see _MESSAGE_PUSH_EVENTS).
+    Lets clients recover proactive/task pushes that arrived while disconnected.
+    """
+    if not message_ids:
+        return []
+
+    _prune_chat_push_cache()
+    now = datetime.now()
+    recovered: list[dict] = []
+    for mid in message_ids:
+        entry = _CHAT_PUSH_CACHE.get(mid)
+        if entry is None:
+            continue
+        ts, push_data = entry
+        if (now - ts).total_seconds() > _CHAT_PUSH_CACHE_TTL:
+            _CHAT_PUSH_CACHE.pop(mid, None)
+            continue
+        recovered.append(
+            {
+                "message_id": mid,
+                "event_type": push_data.get("event_type"),
                 "payload": push_data.get("payload", {}),
             }
         )
