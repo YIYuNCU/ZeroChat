@@ -15,6 +15,21 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  bool _batteryExempt = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshBatteryExemption();
+  }
+
+  Future<void> _refreshBatteryExemption() async {
+    final exempt = await BackgroundRuntimeService.isBatteryOptimizationExempt();
+    if (mounted) {
+      setState(() => _batteryExempt = exempt);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -71,6 +86,10 @@ class _SettingsPageState extends State<SettingsPage> {
             _buildBackgroundPollIntervalItem(),
             const Divider(height: 1, indent: 16),
             _buildBackgroundWatchdogIntervalItem(),
+            if (Platform.isAndroid) ...[
+              const Divider(height: 1, indent: 16),
+              _buildBatteryOptimizationItem(),
+            ],
           ]),
 
           const Padding(
@@ -309,6 +328,52 @@ class _SettingsPageState extends State<SettingsPage> {
                 style: TextStyle(color: Color(0xFF888888), fontSize: 12),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBatteryOptimizationItem() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('忽略电池优化', style: TextStyle(fontSize: 16)),
+              _batteryExempt
+                  ? const Text(
+                      '已允许',
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Color(0xFF07C160),
+                        fontWeight: FontWeight.w500,
+                      ),
+                    )
+                  : TextButton(
+                      onPressed: () async {
+                        await BackgroundRuntimeService
+                            .requestBatteryOptimizationExemption();
+                        await _refreshBatteryExemption();
+                      },
+                      child: const Text(
+                        '去允许',
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: Color(0xFF07C160),
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            '允许后系统不会因省电而杀死后台服务，可显著提升消息与任务的到达可靠性。',
+            style: TextStyle(color: Color(0xFF888888), fontSize: 12),
           ),
         ],
       ),

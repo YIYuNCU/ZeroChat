@@ -166,6 +166,6 @@ if __name__ == "__main__":
         port=CONFIG["port"],
         reload=False,
         log_level="info",
-        ws_ping_interval=25,
-        ws_ping_timeout=10,
+        ws_ping_interval=60,
+        ws_ping_timeout=30,
     )

@@ -232,6 +232,7 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     // App starts in foreground.
+    SecureWebSocketClient.instance.setForeground(true);
     BackgroundRuntimeService.notifyAppLifecycle(inForeground: true);
   }
 
@@ -244,6 +245,7 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      SecureWebSocketClient.instance.setForeground(true);
       BackgroundRuntimeService.notifyAppLifecycle(inForeground: true);
       // 回到前台后确保连接并做一次全量对账，补齐后台期间可能漏收的消息。
       unawaited(() async {
@@ -256,6 +258,7 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden) {
+      SecureWebSocketClient.instance.setForeground(false);
       BackgroundRuntimeService.notifyAppLifecycle(inForeground: false);
       // 进入后台前 flush 挂起的消息写入，避免防抖窗口内的数据丢失。
       unawaited(MessageStore.instance.flushPendingSaves());

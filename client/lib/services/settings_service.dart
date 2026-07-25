@@ -74,8 +74,13 @@ class SettingsService extends ChangeNotifier {
 
   // ========== 后台运行 ==========
   bool _backgroundRuntimeEnabled = true;
-  int _backgroundPollIntervalSeconds = 30;
+  int _backgroundPollIntervalSeconds = 120;
   int _backgroundWatchdogIntervalSeconds = 30;
+
+  // ========== WebSocket 心跳间隔 ==========
+  // 前台较短以保证实时性，后台较长以省电（服务端无应用级空闲超时）。
+  int _foregroundHeartbeatSeconds = 25;
+  int _backgroundHeartbeatSeconds = 60;
 
   // ========== Getters ==========
 
@@ -129,6 +134,8 @@ class SettingsService extends ChangeNotifier {
   bool get backgroundRuntimeEnabled => _backgroundRuntimeEnabled;
   int get backgroundPollIntervalSeconds => _backgroundPollIntervalSeconds;
   int get backgroundWatchdogIntervalSeconds => _backgroundWatchdogIntervalSeconds;
+  int get foregroundHeartbeatSeconds => _foregroundHeartbeatSeconds;
+  int get backgroundHeartbeatSeconds => _backgroundHeartbeatSeconds;
 
   /// 初始化
   static Future<void> init() async {
@@ -204,9 +211,15 @@ class SettingsService extends ChangeNotifier {
     _backgroundRuntimeEnabled =
         StorageService.getBool('background_runtime_enabled') ?? true;
     _backgroundPollIntervalSeconds =
-      StorageService.getInt('background_poll_interval_seconds') ?? 45;
+      StorageService.getInt('background_poll_interval_seconds') ?? 120;
     _backgroundWatchdogIntervalSeconds =
       StorageService.getInt('background_watchdog_interval_seconds') ?? 30;
+
+    // WebSocket 心跳间隔
+    _foregroundHeartbeatSeconds =
+      (StorageService.getInt('foreground_heartbeat_seconds') ?? 25).clamp(15, 60);
+    _backgroundHeartbeatSeconds =
+      (StorageService.getInt('background_heartbeat_seconds') ?? 60).clamp(30, 180);
   }
 
   // ========== 更新方法 ==========
@@ -276,6 +289,22 @@ class SettingsService extends ChangeNotifier {
     final normalized = seconds.clamp(10, 120);
     _backgroundWatchdogIntervalSeconds = normalized;
     await StorageService.setInt('background_watchdog_interval_seconds', normalized);
+    notifyListeners();
+  }
+
+  /// 更新前台 WebSocket 心跳间隔（秒）
+  Future<void> updateForegroundHeartbeatSeconds(int seconds) async {
+    final normalized = seconds.clamp(15, 60);
+    _foregroundHeartbeatSeconds = normalized;
+    await StorageService.setInt('foreground_heartbeat_seconds', normalized);
+    notifyListeners();
+  }
+
+  /// 更新后台 WebSocket 心跳间隔（秒）
+  Future<void> updateBackgroundHeartbeatSeconds(int seconds) async {
+    final normalized = seconds.clamp(30, 180);
+    _backgroundHeartbeatSeconds = normalized;
+    await StorageService.setInt('background_heartbeat_seconds', normalized);
     notifyListeners();
   }
 

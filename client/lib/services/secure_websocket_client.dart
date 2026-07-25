@@ -20,7 +20,13 @@ class SecureWebSocketClient {
   static const Duration _defaultRequestTimeout = Duration(seconds: 15);
   static const Duration _connectTimeout = Duration(seconds: 20);
   static const int _maxRequestRetries = 3;
-  static const Duration _heartbeatInterval = Duration(seconds: 25);
+
+  /// 前台/后台自适应心跳间隔。前台需要实时性，后台延长以省电；
+  /// 服务端 WS 端点无应用级空闲超时，延长后台心跳安全。
+  static const Duration _fallbackForegroundHeartbeatInterval =
+      Duration(seconds: 25);
+  static const Duration _fallbackBackgroundHeartbeatInterval =
+      Duration(seconds: 60);
 
   /// 心跳发出后等待 heartbeat_ack 的最长时间；超时视为半掉线并重连。
   static const Duration _heartbeatAckTimeout = Duration(seconds: 10);
@@ -38,6 +44,9 @@ class SecureWebSocketClient {
   int _reconnectBackoffCount = 0;
   int _heartbeatFailCount = 0;
   Timer? _reconnectTimer;
+
+  /// 应用是否处于前台。影响心跳间隔与请求唤醒锁策略。
+  bool _inForeground = true;
 
   /// pong 看门狗：心跳发出后等待 heartbeat_ack 的定时器与状态。
   Timer? _pongTimer;
@@ -188,10 +197,13 @@ class SecureWebSocketClient {
     };
 
     try {
-      await WakeLockService.acquireShort(
-        duration: _resolveRequestWakeLockDuration(timeout),
-        reason: 'request_$action',
-      );
+      // 仅在后台申请请求唤醒锁；前台 CPU 本就处于唤醒状态无需持锁。
+      if (!_inForeground) {
+        await WakeLockService.acquireShort(
+          duration: _resolveRequestWakeLockDuration(timeout),
+          reason: 'request_$action',
+        );
+      }
       final socket = _socket;
       if (socket == null) {
         throw const SocketException('WebSocket disconnected before send');
@@ -253,8 +265,8 @@ class SecureWebSocketClient {
   }
 
   Duration _resolveRequestWakeLockDuration(Duration timeout) {
-    final bounded = timeout.inSeconds.clamp(8, 90);
-    return Duration(seconds: bounded + 6);
+    final bounded = timeout.inSeconds.clamp(8, 60);
+    return Duration(seconds: bounded + 2);
   }
 
   Uri _buildWsUri({required String backendUrl}) {
@@ -360,10 +372,37 @@ class SecureWebSocketClient {
     }
   }
 
+  /// 从 SettingsService 读取当前应生效的心跳间隔（前台/后台不同）。
+  /// SettingsService 在主隔离与后台隔离都会初始化，故两处均可用。
+  Duration get _currentHeartbeatInterval {
+    try {
+      final seconds = _inForeground
+          ? SettingsService.instance.foregroundHeartbeatSeconds
+          : SettingsService.instance.backgroundHeartbeatSeconds;
+      return Duration(seconds: seconds);
+    } catch (_) {
+      return _inForeground
+          ? _fallbackForegroundHeartbeatInterval
+          : _fallbackBackgroundHeartbeatInterval;
+    }
+  }
+
+  /// 更新前台/后台状态。若心跳定时器在运行且状态发生变化，
+  /// 以新的间隔重建定时器。
+  void setForeground(bool value) {
+    if (_inForeground == value) {
+      return;
+    }
+    _inForeground = value;
+    if (_heartbeatTimer != null) {
+      _startHeartbeat();
+    }
+  }
+
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _cancelPongWatchdog();
-    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (Timer timer) {
+    _heartbeatTimer = Timer.periodic(_currentHeartbeatInterval, (Timer timer) {
       unawaited(_sendHeartbeatFrame());
     });
   }
@@ -382,10 +421,8 @@ class SecureWebSocketClient {
     }
 
     try {
-      await WakeLockService.acquireShort(
-        duration: const Duration(seconds: 10),
-        reason: 'heartbeat',
-      );
+      // 心跳发送是即时的 fire-and-forget：定时器触发时 CPU 已被调度唤醒，
+      // 无需为此持有唤醒锁（此前的 10s 心跳锁是后台耗电的主要来源）。
       socket.add(
         jsonEncode({
           'event': 'heartbeat',

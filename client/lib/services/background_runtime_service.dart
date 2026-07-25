@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:ui';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
@@ -28,8 +27,6 @@ class BackgroundRuntimeService {
   static const String _eventRequestStart = 'pendingRequestStart';
   static const String _eventRequestComplete = 'pendingRequestComplete';
   static const Duration _requestTimeout = Duration(seconds: 45);
-  static const Duration _backgroundWsKeepAliveInterval = Duration(minutes: 2);
-  static const Duration _networkSwitchReconnectDebounce = Duration(seconds: 2);
 
   static Duration _resolveServiceWatchdogInterval() {
     final seconds = SettingsService.instance.backgroundWatchdogIntervalSeconds;
@@ -212,6 +209,37 @@ class BackgroundRuntimeService {
     _service.invoke(_eventRequestComplete, {'request_id': requestId});
   }
 
+  /// 是否已获得电池优化豁免（Android）。非 Android 恒为 true。
+  static Future<bool> isBatteryOptimizationExempt() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return true;
+    }
+    try {
+      return await Permission.ignoreBatteryOptimizations.isGranted;
+    } catch (e) {
+      debugPrint('BackgroundRuntimeService: check battery exemption failed: $e');
+      return false;
+    }
+  }
+
+  /// 请求电池优化豁免（Android）。返回请求后是否处于已授予状态。
+  /// 该豁免可阻止 OEM 系统杀死前台服务，是保活可靠性的关键杠杆。
+  static Future<bool> requestBatteryOptimizationExemption() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return true;
+    }
+    try {
+      if (await Permission.ignoreBatteryOptimizations.isGranted) {
+        return true;
+      }
+      final status = await Permission.ignoreBatteryOptimizations.request();
+      return status.isGranted;
+    } catch (e) {
+      debugPrint('BackgroundRuntimeService: request battery exemption failed: $e');
+      return false;
+    }
+  }
+
   @pragma('vm:entry-point')
   static void _onStart(ServiceInstance service) {
     WidgetsFlutterBinding.ensureInitialized();
@@ -222,14 +250,47 @@ class BackgroundRuntimeService {
     final pendingRequests = <String, _PendingRequestState>{};
     Timer? requestWatchTimer;
     Timer? backgroundTaskPollTimer;
-    Timer? websocketKeepAliveTimer;
-    StreamSubscription<dynamic>? connectivitySubscription;
-    Timer? connectivityReconnectTimer;
+    StreamSubscription<Map<String, dynamic>>? serverPushSubscription;
     final notifiedTaskMessageIds = <String>{};
     var taskNotifyBaseline = DateTime.now();
 
     if (service is AndroidServiceInstance) {
       service.setAsForegroundService();
+    }
+
+    // 处理服务端实时推送：后台隔离直接把 task/proactive 消息转成通知，
+    // 无需等待轮询。与轮询共用 notifiedTaskMessageIds 去重。
+    Future<void> handleServerPush(Map<String, dynamic> event) async {
+      if (appInForeground || !bootstrapReady) {
+        return;
+      }
+      final type =
+          (event['event_type'] ?? event['type'] ?? '').toString().trim();
+      if (type != 'task_message' && type != 'proactive_message') {
+        return;
+      }
+
+      final chatId = (event['chat_id'] ?? event['role_id'] ?? '').toString();
+      final messageId = (event['message_id'] ?? event['id'] ?? '').toString();
+      final content = (event['content'] ?? '').toString();
+      final senderId = (event['sender_id'] ?? '').toString();
+
+      if (chatId.isEmpty || content.isEmpty || senderId == 'me') {
+        return;
+      }
+      if (messageId.isNotEmpty && notifiedTaskMessageIds.contains(messageId)) {
+        return;
+      }
+
+      final role = RoleService.getRoleById(chatId);
+      await NotificationService.instance.showMessageNotification(
+        chatId: chatId,
+        senderName: role?.name ?? 'AI',
+        message: content,
+      );
+      if (messageId.isNotEmpty) {
+        notifiedTaskMessageIds.add(messageId);
+      }
     }
 
     Future<void>(() async {
@@ -239,6 +300,14 @@ class BackgroundRuntimeService {
         await RoleService.init();
         await NotificationService.instance.init();
         bootstrapReady = true;
+
+        serverPushSubscription =
+            SecureWebSocketClient.instance.serverPushStream.listen(
+          (event) => unawaited(handleServerPush(event)),
+          onError: (Object e, StackTrace st) {
+            debugPrint('BackgroundRuntimeService: server push error: $e');
+          },
+        );
       } catch (e, st) {
         debugPrint('BackgroundRuntimeService: bootstrap failed: $e');
         debugPrint('$st');
@@ -278,123 +347,9 @@ class BackgroundRuntimeService {
       backgroundTaskPollTimer = null;
     }
 
-    void stopBackgroundWebsocketKeepAlive() {
-      websocketKeepAliveTimer?.cancel();
-      websocketKeepAliveTimer = null;
-    }
-
-    bool hasNetwork(dynamic result) {
-      if (result is ConnectivityResult) {
-        return result != ConnectivityResult.none;
-      }
-      if (result is List<ConnectivityResult>) {
-        return result.any((item) => item != ConnectivityResult.none);
-      }
-      if (result is Iterable) {
-        return result.any((item) => item != ConnectivityResult.none);
-      }
-      return true;
-    }
-
-    Future<void> checkAndReconnectWebsocketOnNetworkSwitch() async {
-      if (!bootstrapReady) {
-        return;
-      }
-
-      if (!SecureWebSocketClient.instance.isConnected) {
-        try {
-          await SecureWebSocketClient.instance.ensureConnected();
-        } catch (e) {
-          debugPrint(
-            'BackgroundRuntimeService: reconnect failed after network switch: $e',
-          );
-        }
-        return;
-      }
-
-      try {
-        await SecureWebSocketClient.instance.request(
-          'health',
-          const <String, dynamic>{},
-          timeout: const Duration(seconds: 4),
-        );
-      } catch (e) {
-        debugPrint(
-          'BackgroundRuntimeService: connection check failed after network switch, reconnecting: $e',
-        );
-        try {
-          // Try to recover in place first; avoid aggressive close loops.
-          await SecureWebSocketClient.instance.ensureConnected();
-          await SecureWebSocketClient.instance.request(
-            'health',
-            const <String, dynamic>{},
-            timeout: const Duration(seconds: 4),
-          );
-        } catch (e2) {
-          debugPrint(
-            'BackgroundRuntimeService: in-place reconnect failed after check, forcing reconnect: $e2',
-          );
-          try {
-            await SecureWebSocketClient.instance.recoverConnectionWithoutClose(
-              reason: 'background_network_switch',
-            );
-          } catch (e3) {
-            debugPrint(
-              'BackgroundRuntimeService: forced websocket reconnect failed after check: $e3',
-            );
-          }
-        }
-      }
-    }
-
-    void startConnectivityWatch() {
-      connectivitySubscription?.cancel();
-      connectivitySubscription = Connectivity().onConnectivityChanged.listen(
-        (result) {
-          if (!hasNetwork(result)) {
-            return;
-          }
-
-          connectivityReconnectTimer?.cancel();
-          connectivityReconnectTimer = Timer(
-            _networkSwitchReconnectDebounce,
-            () {
-              unawaited(checkAndReconnectWebsocketOnNetworkSwitch());
-            },
-          );
-        },
-        onError: (Object e, StackTrace st) {
-          debugPrint('BackgroundRuntimeService: connectivity watch error: $e');
-          debugPrint('$st');
-        },
-      );
-    }
-
-    void startBackgroundWebsocketKeepAliveIfNeeded() {
-      if (websocketKeepAliveTimer != null) {
-        return;
-      }
-
-      websocketKeepAliveTimer = Timer.periodic(
-        _backgroundWsKeepAliveInterval,
-        (timer) async {
-          if (appInForeground || !bootstrapReady) {
-            return;
-          }
-
-          try {
-            await SecureWebSocketClient.instance.ensureConnected();
-            await SecureWebSocketClient.instance.request(
-              'health',
-              const <String, dynamic>{},
-              timeout: const Duration(seconds: 6),
-            );
-          } catch (e) {
-            debugPrint('BackgroundRuntimeService: websocket keepalive failed: $e');
-          }
-        },
-      );
-    }
+    // 连接健康由 SecureWebSocketClient 自带的心跳 + pong 看门狗 +
+    // 重连退避 + connectivity 监听器负责（该客户端在此隔离同样运行），
+    // 后台服务不再重复维护连接性监听与独立保活定时器。
 
     void startBackgroundTaskPollIfNeeded() {
       if (backgroundTaskPollTimer != null) {
@@ -417,36 +372,30 @@ class BackgroundRuntimeService {
 
     service.on(_eventAppForeground).listen((event) {
       appInForeground = true;
+      SecureWebSocketClient.instance.setForeground(true);
       stopBackgroundTaskPoll();
-      stopBackgroundWebsocketKeepAlive();
     });
 
     service.on(_eventAppBackground).listen((event) {
       appInForeground = false;
-      // 切后台后开始持续检查后端任务消息，避免错过提醒
+      SecureWebSocketClient.instance.setForeground(false);
+      // 切后台后启动兜底轮询，覆盖 socket 断开（Doze）期间漏收的推送。
       taskNotifyBaseline = DateTime.now().subtract(
         _resolveBackgroundTaskPollInterval(),
       );
       startBackgroundTaskPollIfNeeded();
-      startBackgroundWebsocketKeepAliveIfNeeded();
+      // 立即确保连接就绪；连接健康随后由 WS 客户端自带机制维护。
       unawaited(() async {
         if (!bootstrapReady) {
           return;
         }
         try {
           await SecureWebSocketClient.instance.ensureConnected();
-          await SecureWebSocketClient.instance.request(
-            'health',
-            const <String, dynamic>{},
-            timeout: const Duration(seconds: 6),
-          );
         } catch (e) {
-          debugPrint('BackgroundRuntimeService: immediate keepalive failed: $e');
+          debugPrint('BackgroundRuntimeService: immediate reconnect failed: $e');
         }
       }());
     });
-
-    startConnectivityWatch();
 
     service.on(_eventRequestStart).listen((event) {
       final args = event ?? const <String, dynamic>{};
@@ -482,9 +431,7 @@ class BackgroundRuntimeService {
     service.on('stopService').listen((event) {
       requestWatchTimer?.cancel();
       backgroundTaskPollTimer?.cancel();
-      websocketKeepAliveTimer?.cancel();
-      connectivityReconnectTimer?.cancel();
-      connectivitySubscription?.cancel();
+      serverPushSubscription?.cancel();
       unawaited(SecureWebSocketClient.instance.close());
       service.stopSelf();
     });
