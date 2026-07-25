@@ -264,7 +264,6 @@ class ChatController extends ChangeNotifier {
     if (pendingMessages.isEmpty) return;
     if (_processingChats.contains(chatId)) {
       debugPrint('ChatController: Already processing $chatId, queueing');
-      // 重新加入队列
       _pendingMessages[chatId] = pendingMessages;
       return;
     }
@@ -513,6 +512,7 @@ class ChatController extends ChangeNotifier {
       _processingChats.remove(chatId);
       _completeBackgroundTrackedRequest(chatId);
       notifyListeners();
+      _flushPendingIfNeeded(chatId);
     }
   }
 
@@ -628,8 +628,16 @@ class ChatController extends ChangeNotifier {
         _completeBackgroundTrackedRequest(chatId);
         notifyListeners();
         _updateChatList(chatId);
+        _flushPendingIfNeeded(chatId);
       }
     });
+  }
+
+  /// AI 处理完成后，若还有排队中的消息则立即触发发送。
+  void _flushPendingIfNeeded(String chatId) {
+    if (_pendingMessages[chatId]?.isNotEmpty == true) {
+      _sendBatchedMessages(chatId);
+    }
   }
 
   void _beginBackgroundTrackedRequest(String chatId) {
