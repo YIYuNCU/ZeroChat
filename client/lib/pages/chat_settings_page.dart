@@ -1903,12 +1903,14 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   // ========== 主动消息配置方法 ==========
 
   void _toggleProactiveMessage(bool enabled) async {
-    _currentRole = _currentRole.copyWith(
-      proactiveConfig: _currentRole.proactiveConfig.copyWith(enabled: enabled),
-    );
+    // 先同步更新本地状态并重建，让开关立即响应；
+    // 后端同步在后台进行，避免网络往返阻塞 UI。
+    setState(() {
+      _currentRole = _currentRole.copyWith(
+        proactiveConfig: _currentRole.proactiveConfig.copyWith(enabled: enabled),
+      );
+    });
     await RoleService.updateRole(_currentRole);
-
-    setState(() {});
   }
 
   void _editProactivePrompt() async {
