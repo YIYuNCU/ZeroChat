@@ -330,13 +330,21 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
     role_payload = dict(payload.get("role") or {})
     role_model = roles.RoleCreate(**role_payload)
     existing = roles.load_role(role_model.id)
+    previous_proactive = dict((existing or {}).get("proactive_config") or {})
+    previous_archived = bool((existing or {}).get("archived", False))
 
     if existing:
-        for key, value in role_model.model_dump(exclude_none=True).items():
+        # Only apply fields sent by the client. RoleCreate has defaults for
+        # creation, and applying those defaults during an upsert would reset
+        # server-owned or older-client fields.
+        for key, value in role_model.model_dump(
+            exclude_unset=True,
+            exclude_none=True,
+        ).items():
             if key != "id" and value is not None:
                 # onebot_config 合并而非覆盖，保留已有的字段
-                if key == "onebot_config" and isinstance(value, dict) and isinstance(existing.get("onebot_config"), dict):
-                    merged = dict(existing["onebot_config"])
+                if key in {"onebot_config", "proactive_config"} and isinstance(value, dict):
+                    merged = dict(existing.get(key) or {})
                     merged.update({k: v for k, v in value.items() if v is not None})
                     existing[key] = merged
                 else:
@@ -442,6 +450,20 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
             from services.memory_service import load_memory
 
             load_memory(role_model.id)
+
+    current_proactive = dict(role_data.get("proactive_config") or {})
+    current_archived = bool(role_data.get("archived", False))
+    if (
+        existing is None
+        or current_proactive != previous_proactive
+        or current_archived != previous_archived
+    ):
+        from services import scheduler_service
+
+        scheduler_service.schedule_proactive_for_role(
+            role_model.id,
+            reset=True,
+        )
 
     role_copy = dict(role_data)
     role_id = str(role_copy.get("id", "")).strip()

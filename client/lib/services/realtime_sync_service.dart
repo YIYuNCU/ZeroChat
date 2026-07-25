@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../core/message_store.dart';
 import 'moments_service.dart';
+import 'role_service.dart';
 import 'secure_websocket_client.dart';
 import 'task_service.dart';
 
@@ -86,6 +87,11 @@ class RealtimeSyncService {
     _lastTaskSync = now;
     _lastMomentSync = now;
     try {
+      final proactiveMigrationComplete =
+          await RoleService.migrateProactiveConfigsToBackendIfNeeded();
+      if (proactiveMigrationComplete) {
+        await RoleService.syncIfHashMismatch(force: true);
+      }
       // 先排空发件箱，让离线期间未同步的用户消息到达服务端，
       // 再做快照对比，避免快照把未同步消息判为差异并覆盖丢弃。
       await MessageStore.instance.drainOutbox();

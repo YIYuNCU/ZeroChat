@@ -93,19 +93,21 @@ class ChatListService extends ChangeNotifier {
     String? lastMessage,
     DateTime? lastMessageTime,
     bool incrementUnread = false,
+    int unreadIncrement = 0,
   }) {
     final index = _chatList.indexWhere((c) => c.id == chatId);
     if (index == -1) return;
 
     final chat = _chatList[index];
+    final unreadDelta = unreadIncrement + (incrementUnread ? 1 : 0);
     _chatList[index] = chat.copyWith(
       lastMessage: lastMessage ?? chat.lastMessage,
       lastMessageTime: lastMessageTime ?? DateTime.now(),
-      unreadCount: incrementUnread ? chat.unreadCount + 1 : chat.unreadCount,
+      unreadCount: chat.unreadCount + unreadDelta,
     );
     _saveChatList();
     notifyListeners();
-    if (incrementUnread) _syncBadgeAfterChange();
+    if (unreadDelta > 0) _syncBadgeAfterChange();
   }
 
   /// 清除未读数

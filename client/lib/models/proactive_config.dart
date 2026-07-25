@@ -7,11 +7,11 @@ class ProactiveConfig {
   /// 自定义触发提示词（发送给 AI 让它生成主动消息）
   final String triggerPrompt;
 
-  /// 最小倒计时（小时）- UI 层使用
-  final double minCountdownHours;
+  /// 最小触发间隔（分钟）
+  final int minIntervalMinutes;
 
-  /// 最大倒计时（小时）- UI 层使用
-  final double maxCountdownHours;
+  /// 最大触发间隔（分钟）
+  final int maxIntervalMinutes;
 
   /// 下次触发时间（时间戳，持久化用）
   final DateTime? nextTriggerTime;
@@ -19,8 +19,8 @@ class ProactiveConfig {
   const ProactiveConfig({
     this.enabled = false,
     this.triggerPrompt = '请你模拟角色，给用户发消息，想知道用户在做什么',
-    this.minCountdownHours = 1.0,
-    this.maxCountdownHours = 4.0,
+    this.minIntervalMinutes = 60,
+    this.maxIntervalMinutes = 240,
     this.nextTriggerTime,
   });
 
@@ -29,14 +29,20 @@ class ProactiveConfig {
 
   /// 从 JSON 创建
   factory ProactiveConfig.fromJson(Map<String, dynamic> json) {
+    final minMinutes =
+        (json['min_interval_minutes'] as num?)?.round() ??
+        (((json['min_countdown_hours'] as num?)?.toDouble() ?? 1.0) * 60)
+            .round();
+    final maxMinutes =
+        (json['max_interval_minutes'] as num?)?.round() ??
+        (((json['max_countdown_hours'] as num?)?.toDouble() ?? 4.0) * 60)
+            .round();
     return ProactiveConfig(
       enabled: json['enabled'] as bool? ?? false,
       triggerPrompt:
           json['trigger_prompt'] as String? ?? '请你模拟角色，给用户发消息，想知道用户在做什么',
-      minCountdownHours:
-          (json['min_countdown_hours'] as num?)?.toDouble() ?? 1.0,
-      maxCountdownHours:
-          (json['max_countdown_hours'] as num?)?.toDouble() ?? 4.0,
+      minIntervalMinutes: minMinutes.clamp(1, 1440),
+      maxIntervalMinutes: maxMinutes.clamp(1, 1440),
       nextTriggerTime: json['next_trigger_time'] != null
           ? DateTime.parse(json['next_trigger_time'] as String)
           : null,
@@ -48,9 +54,19 @@ class ProactiveConfig {
     return {
       'enabled': enabled,
       'trigger_prompt': triggerPrompt,
-      'min_countdown_hours': minCountdownHours,
-      'max_countdown_hours': maxCountdownHours,
+      'min_interval_minutes': minIntervalMinutes,
+      'max_interval_minutes': maxIntervalMinutes,
       'next_trigger_time': nextTriggerTime?.toIso8601String(),
+    };
+  }
+
+  /// 转换为服务端配置。下次触发时间由服务端调度器维护。
+  Map<String, dynamic> toBackendJson() {
+    return {
+      'enabled': enabled,
+      'trigger_prompt': triggerPrompt,
+      'min_interval_minutes': minIntervalMinutes,
+      'max_interval_minutes': maxIntervalMinutes,
     };
   }
 
@@ -58,15 +74,15 @@ class ProactiveConfig {
   ProactiveConfig copyWith({
     bool? enabled,
     String? triggerPrompt,
-    double? minCountdownHours,
-    double? maxCountdownHours,
+    int? minIntervalMinutes,
+    int? maxIntervalMinutes,
     DateTime? nextTriggerTime,
   }) {
     return ProactiveConfig(
       enabled: enabled ?? this.enabled,
       triggerPrompt: triggerPrompt ?? this.triggerPrompt,
-      minCountdownHours: minCountdownHours ?? this.minCountdownHours,
-      maxCountdownHours: maxCountdownHours ?? this.maxCountdownHours,
+      minIntervalMinutes: minIntervalMinutes ?? this.minIntervalMinutes,
+      maxIntervalMinutes: maxIntervalMinutes ?? this.maxIntervalMinutes,
       nextTriggerTime: nextTriggerTime ?? this.nextTriggerTime,
     );
   }
@@ -76,8 +92,8 @@ class ProactiveConfig {
     return ProactiveConfig(
       enabled: enabled,
       triggerPrompt: triggerPrompt,
-      minCountdownHours: minCountdownHours,
-      maxCountdownHours: maxCountdownHours,
+      minIntervalMinutes: minIntervalMinutes,
+      maxIntervalMinutes: maxIntervalMinutes,
       nextTriggerTime: null,
     );
   }

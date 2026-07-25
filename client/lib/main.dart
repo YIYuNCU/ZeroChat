@@ -26,7 +26,6 @@ import 'services/intent_service.dart';
 import 'services/realtime_sync_service.dart';
 import 'services/secure_websocket_client.dart';
 import 'core/chat_controller.dart';
-import 'core/proactive_message_scheduler.dart';
 import 'core/moments_scheduler.dart';
 import 'core/message_store.dart';
 
@@ -48,9 +47,11 @@ void main() async {
   runApp(const ZeroChatApp());
 
   // ========== 权限请求（不阻塞启动） ==========
-  unawaited(_requestPermissions().then((_) {
-    debugPrint('✅ Permissions requested');
-  }));
+  unawaited(
+    _requestPermissions().then((_) {
+      debugPrint('✅ Permissions requested');
+    }),
+  );
 
   // ========== 后台初始化（不阻塞首帧渲染） ==========
   unawaited(_initServicesInBackground());
@@ -93,8 +94,11 @@ Future<void> _initServicesInBackground() async {
   await BackgroundRuntimeService.init(
     enabled: SettingsService.instance.backgroundRuntimeEnabled,
   );
+  final lifecycleState = WidgetsBinding.instance.lifecycleState;
+  BackgroundRuntimeService.notifyAppLifecycle(
+    inForeground: lifecycleState == AppLifecycleState.resumed,
+  );
   RealtimeSyncService.init();
-  await ProactiveMessageScheduler.instance.init();
   await MomentsScheduler.instance.init();
   unawaited(SecureWebSocketClient.instance.ensureConnected());
 
@@ -131,27 +135,15 @@ Future<void> _syncNetworkServices() async {
 Future<void> _syncWithBackendInBackground() async {
   // Let first frame render first, then start network sync.
   await Future<void>.delayed(const Duration(milliseconds: 100));
-  unawaited(_syncRolesFromBackendOnly());
   await _syncWithBackend();
-}
-
-Future<void> _syncRolesFromBackendOnly() async {
-  try {
-    final isAvailable = await ApiService.isBackendAvailable();
-    if (!isAvailable) return;
-    // hash gate：本地缓存已是最新时零往返；冷启动或有变化才全量拉取。
-    await RoleService.syncIfHashMismatch();
-    debugPrint('✅ Roles async preload complete');
-  } catch (e) {
-    debugPrint('⚠️ Roles async preload failed: $e');
-  }
 }
 
 /// 后端同步状态
 enum BackendSyncStatus { initial, syncing, success, fail }
 
-final ValueNotifier<BackendSyncStatus> backendSyncNotifier =
-    ValueNotifier(BackendSyncStatus.initial);
+final ValueNotifier<BackendSyncStatus> backendSyncNotifier = ValueNotifier(
+  BackendSyncStatus.initial,
+);
 
 bool _backendAvailable = false;
 bool get isBackendAvailable => _backendAvailable;
@@ -178,7 +170,14 @@ Future<void> _syncWithBackend() async {
     // 启动阶段仅同步公开设置，不默认拉取密钥
     await SettingsService.instance.syncPublicSettingsFromBackend();
 
-    // 同步角色数据（与 _syncRolesFromBackendOnly 共用 TTL 节流，避免重复拉取）
+    // 升级时先把旧客户端的本地主动消息配置迁移到服务端，再以下行为准。
+    final proactiveMigrationComplete =
+        await RoleService.migrateProactiveConfigsToBackendIfNeeded();
+    if (!proactiveMigrationComplete) {
+      throw StateError('主动消息配置迁移尚未完成');
+    }
+
+    // 同步角色数据
     await RoleService.syncIfHashMismatch();
 
     // 同步朋友圈数据
@@ -338,7 +337,9 @@ class _MainPageState extends State<MainPage> {
               return const SizedBox.shrink();
             },
           ),
-          Expanded(child: IndexedStack(index: _currentIndex, children: _pages)),
+          Expanded(
+            child: IndexedStack(index: _currentIndex, children: _pages),
+          ),
         ],
       ),
       bottomNavigationBar: AppBottomTabBar(

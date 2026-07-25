@@ -94,7 +94,6 @@ zerochat/
 │       │   ├── message_store.dart           # 消息存储（流订阅、持久化、后端同步）
 │       │   ├── group_scheduler.dart         # 群聊发言调度
 │       │   ├── moments_scheduler.dart       # 朋友圈调度（发布、互动、回复）
-│       │   ├── proactive_message_scheduler.dart  # 主动消息调度
 │       │   └── segment_sender.dart          # 分段发送工具
 │       ├── models/                  # 数据模型（12个）
 │       ├── pages/                   # UI 页面（19个）

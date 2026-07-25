@@ -67,7 +67,31 @@ def _init_proactive_jobs():
         if role_dir.is_dir():
             schedule_proactive_for_role(role_dir.name)
 
-def schedule_proactive_for_role(role_id: str):
+def _is_quiet_hour(hour: int, start: int, end: int) -> bool:
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def _persist_next_proactive_time(
+    profile_file: Path,
+    role: Dict,
+    next_run: Optional[datetime],
+):
+    proactive_config = dict(role.get("proactive_config") or {})
+    serialized = next_run.isoformat() if next_run else None
+    if proactive_config.get("next_trigger_time") == serialized:
+        return
+    proactive_config["next_trigger_time"] = serialized
+    role["proactive_config"] = proactive_config
+    role["updated_at"] = datetime.now().isoformat()
+    with open(profile_file, "w", encoding="utf-8") as f:
+        json.dump(role, f, ensure_ascii=False, indent=2)
+
+
+def schedule_proactive_for_role(role_id: str, *, reset: bool = False):
     """为角色调度主动消息"""
     if is_tool_role_id(role_id):
         return
@@ -89,29 +113,42 @@ def schedule_proactive_for_role(role_id: str):
 
     # 归档角色不发主动消息
     if role.get("archived", False):
+        _persist_next_proactive_time(profile_file, role, None)
         return
 
     proactive_config = role.get("proactive_config", {})
     if not proactive_config.get("enabled", False):
+        _persist_next_proactive_time(profile_file, role, None)
         return
-    
-    # 计算下次触发时间
-    min_minutes = proactive_config.get("min_interval_minutes", 30)
-    max_minutes = proactive_config.get("max_interval_minutes", 120)
-    interval_minutes = random.randint(min_minutes, max_minutes)
-    
-    next_run = datetime.now() + timedelta(minutes=interval_minutes)
+
+    now = datetime.now()
+    next_run = None
+    if not reset:
+        raw_next_run = proactive_config.get("next_trigger_time")
+        if raw_next_run:
+            try:
+                candidate = datetime.fromisoformat(str(raw_next_run))
+                if candidate > now:
+                    next_run = candidate
+            except (TypeError, ValueError):
+                pass
+
+    if next_run is None:
+        min_minutes = max(1, int(proactive_config.get("min_interval_minutes", 30)))
+        max_minutes = max(min_minutes, int(proactive_config.get("max_interval_minutes", 120)))
+        next_run = now + timedelta(minutes=random.randint(min_minutes, max_minutes))
     
     # 检查安静时间
     quiet_start = proactive_config.get("quiet_hours_start", 23)
     quiet_end = proactive_config.get("quiet_hours_end", 7)
     
-    current_hour = datetime.now().hour
-    if quiet_start <= current_hour or current_hour < quiet_end:
-        # 安静时间内，推迟到安静时间结束
-        next_run = datetime.now().replace(hour=quiet_end, minute=0, second=0)
-        if next_run < datetime.now():
+    if _is_quiet_hour(next_run.hour, quiet_start, quiet_end):
+        # 候选时间落在安静时段时，推迟到该时段结束。
+        next_run = next_run.replace(hour=quiet_end, minute=0, second=0, microsecond=0)
+        if next_run <= now:
             next_run += timedelta(days=1)
+
+    _persist_next_proactive_time(profile_file, role, next_run)
     
     scheduler.add_job(
         _trigger_proactive,
@@ -136,16 +173,21 @@ async def _trigger_proactive(role_id: str):
     """触发主动消息"""
     global _event_callback
     
-    if _event_callback:
-        await _event_callback({
-            "role_id": role_id,
-            "event_type": "proactive",
-            "content": "",
-            "context": {}
-        })
-    
-    # 重新调度下一次
-    schedule_proactive_for_role(role_id)
+    try:
+        if _event_callback:
+            await _event_callback({
+                "role_id": role_id,
+                "event_type": "proactive",
+                "content": "",
+                "context": {}
+            })
+        else:
+            logger.warning("Proactive trigger skipped: event callback is not set")
+    except Exception:
+        logger.exception("Proactive trigger failed for %s", role_id)
+    finally:
+        # 单次生成失败不能终止后续主动消息。
+        schedule_proactive_for_role(role_id, reset=True)
 
 # ========== 定时任务调度 ==========
 

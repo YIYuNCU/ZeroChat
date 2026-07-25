@@ -540,7 +540,7 @@ async def update_role(role_id: str, update: RoleUpdate, request: Request):
     if update.proactive_config is not None:
         from services import scheduler_service
         if update.proactive_config.enabled:
-            scheduler_service.schedule_proactive_for_role(role_id)
+            scheduler_service.schedule_proactive_for_role(role_id, reset=True)
         else:
             scheduler_service.unschedule_proactive_for_role(role_id)
     if update.core_memory is not None:

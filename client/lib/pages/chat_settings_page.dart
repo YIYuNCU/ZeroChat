@@ -3,13 +3,14 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import '../models/role.dart';
 import '../models/message.dart';
+import '../models/proactive_config.dart';
 import '../services/role_service.dart';
 import '../services/memory_service.dart';
 import '../services/settings_service.dart';
 import '../services/task_service.dart';
 import '../services/secure_websocket_client.dart';
 import '../core/message_store.dart';
-import '../core/proactive_message_scheduler.dart';
+import '../widgets/countdown_interval_dialog.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'role_settings_page.dart';
 import 'task_manager_page.dart';
@@ -209,10 +210,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 children: [
                   Text(
                     '对话历史',
-                    style: TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
+                    style: TextStyle(color: Color(0xFF888888), fontSize: 15),
                   ),
                   SizedBox(width: 4),
                   Icon(
@@ -265,10 +263,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 children: [
                   Text(
                     '用量与缓存',
-                    style: TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
+                    style: TextStyle(color: Color(0xFF888888), fontSize: 15),
                   ),
                   SizedBox(width: 4),
                   Icon(
@@ -314,7 +309,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               _buildItem(
                 title: '倒计时区间',
                 trailing: Text(
-                  '${_currentRole.proactiveConfig.minCountdownHours.toInt()}-${_currentRole.proactiveConfig.maxCountdownHours.toInt()} 小时',
+                  _formatProactiveInterval(_currentRole.proactiveConfig),
                   style: const TextStyle(color: Color(0xFF888888)),
                 ),
                 onTap: _editProactiveCountdown,
@@ -806,9 +801,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     }
     setState(() {});
     widget.onRoleChanged?.call();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已设置角色专属聊天背景')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('已设置角色专属聊天背景')));
   }
 
   Future<void> _clearRoleBackground() async {
@@ -816,9 +811,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('当前已是全局背景')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('当前已是全局背景')));
       return;
     }
 
@@ -831,9 +826,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     widget.onRoleChanged?.call();
     final globalBg = SettingsService.instance.chatBackgroundUrl;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(globalBg.isEmpty ? '已恢复默认背景' : '已恢复为全局背景'),
-      ),
+      SnackBar(content: Text(globalBg.isEmpty ? '已恢复默认背景' : '已恢复为全局背景')),
     );
   }
 
@@ -1138,8 +1131,10 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
         : '—';
 
     final widgets = <Widget>[
-      const Text('累计',
-          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+      const Text(
+        '累计',
+        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+      ),
       const SizedBox(height: 8),
       _usageRow('请求次数', '${asInt(cumulative, 'request_count')}'),
       _usageRow('输入 tokens', '${asInt(cumulative, 'prompt_tokens')}'),
@@ -1153,8 +1148,10 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     if (last != null) {
       widgets.addAll([
         const SizedBox(height: 20),
-        const Text('最近一次',
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+        const Text(
+          '最近一次',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
         const SizedBox(height: 8),
         _usageRow('输入 tokens', '${asInt(last, 'prompt_tokens')}'),
         _usageRow('输出 tokens', '${asInt(last, 'completion_tokens')}'),
@@ -1164,7 +1161,10 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
         if ('${last['model'] ?? ''}'.isNotEmpty)
           _usageRow('模型', '${last['model']}'),
         if ('${last['timestamp'] ?? ''}'.isNotEmpty)
-          _usageRow('时间', '${last['timestamp']}'.replaceFirst('T', ' ').split('.').first),
+          _usageRow(
+            '时间',
+            '${last['timestamp']}'.replaceFirst('T', ' ').split('.').first,
+          ),
       ]);
     }
 
@@ -1177,8 +1177,10 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label,
-              style: const TextStyle(fontSize: 14, color: Color(0xFF888888))),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 14, color: Color(0xFF888888)),
+          ),
           Flexible(
             child: Text(
               value,
@@ -1267,22 +1269,22 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                       child: loading
                           ? const Center(child: CircularProgressIndicator())
                           : items.isEmpty
-                              ? const Center(
-                                  child: Text(
-                                    '暂无短期记忆',
-                                    style: TextStyle(color: Color(0xFF888888)),
-                                  ),
-                                )
-                              : ListView.builder(
-                                  controller: scrollController,
-                                  itemCount: items.length,
-                                  itemBuilder: (context, index) {
-                                    return _buildShortTermTile(
-                                      items[index],
-                                      reload,
-                                    );
-                                  },
-                                ),
+                          ? const Center(
+                              child: Text(
+                                '暂无短期记忆',
+                                style: TextStyle(color: Color(0xFF888888)),
+                              ),
+                            )
+                          : ListView.builder(
+                              controller: scrollController,
+                              itemCount: items.length,
+                              itemBuilder: (context, index) {
+                                return _buildShortTermTile(
+                                  items[index],
+                                  reload,
+                                );
+                              },
+                            ),
                     ),
                   ],
                 );
@@ -1310,18 +1312,15 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     return ListTile(
       leading: CircleAvatar(
         radius: 16,
-        backgroundColor:
-            isUser ? const Color(0xFF07C160) : const Color(0xFFBBBBBB),
+        backgroundColor: isUser
+            ? const Color(0xFF07C160)
+            : const Color(0xFFBBBBBB),
         child: Text(
           roleLabel,
           style: const TextStyle(fontSize: 11, color: Colors.white),
         ),
       ),
-      title: Text(
-        message,
-        maxLines: 4,
-        overflow: TextOverflow.ellipsis,
-      ),
+      title: Text(message, maxLines: 4, overflow: TextOverflow.ellipsis),
       subtitle: origin.isNotEmpty && origin != 'zerochat'
           ? Text(
               origin,
@@ -1336,8 +1335,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
             onPressed: id < 0
                 ? null
                 : () async {
-                    final edited =
-                        await _editTextDialog('编辑短期记忆', message);
+                    final edited = await _editTextDialog('编辑短期记忆', message);
                     if (edited != null &&
                         edited.isNotEmpty &&
                         edited != message) {
@@ -1443,86 +1441,87 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                       child: loading
                           ? const Center(child: CircularProgressIndicator())
                           : items.isEmpty
-                              ? const Center(
-                                  child: Text(
-                                    'AI 会在对话中自动生成语义记忆\n暂无向量记忆',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: Color(0xFF888888)),
+                          ? const Center(
+                              child: Text(
+                                'AI 会在对话中自动生成语义记忆\n暂无向量记忆',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: Color(0xFF888888)),
+                              ),
+                            )
+                          : ListView.builder(
+                              controller: scrollController,
+                              itemCount: items.length,
+                              itemBuilder: (context, index) {
+                                final item = items[index];
+                                final id = item['id'] is int
+                                    ? item['id'] as int
+                                    : int.tryParse('${item['id']}') ?? -1;
+                                final text = '${item['text'] ?? ''}';
+                                final source = '${item['source'] ?? ''}';
+                                return ListTile(
+                                  title: Text(
+                                    text,
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                )
-                              : ListView.builder(
-                                  controller: scrollController,
-                                  itemCount: items.length,
-                                  itemBuilder: (context, index) {
-                                    final item = items[index];
-                                    final id = item['id'] is int
-                                        ? item['id'] as int
-                                        : int.tryParse('${item['id']}') ?? -1;
-                                    final text = '${item['text'] ?? ''}';
-                                    final source = '${item['source'] ?? ''}';
-                                    return ListTile(
-                                      title: Text(
-                                        text,
-                                        maxLines: 3,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      subtitle: source.isNotEmpty
-                                          ? Text(
-                                              source,
-                                              style: const TextStyle(
-                                                fontSize: 12,
-                                                color: Color(0xFFAAAAAA),
-                                              ),
-                                            )
-                                          : null,
-                                      trailing: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          IconButton(
-                                            icon: const Icon(
-                                              Icons.edit_outlined,
-                                              color: Color(0xFF888888),
-                                            ),
-                                            onPressed: id < 0
-                                                ? null
-                                                : () async {
-                                                    final edited =
-                                                        await _editTextDialog(
+                                  subtitle: source.isNotEmpty
+                                      ? Text(
+                                          source,
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            color: Color(0xFFAAAAAA),
+                                          ),
+                                        )
+                                      : null,
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        icon: const Icon(
+                                          Icons.edit_outlined,
+                                          color: Color(0xFF888888),
+                                        ),
+                                        onPressed: id < 0
+                                            ? null
+                                            : () async {
+                                                final edited =
+                                                    await _editTextDialog(
                                                       '编辑向量记忆',
                                                       text,
                                                     );
-                                                    if (edited != null &&
-                                                        edited.isNotEmpty &&
-                                                        edited != text) {
-                                                      final ok = await MemoryService
-                                                          .updateVectorMemory(
-                                                              id, edited,
-                                                              roleId:
-                                                                  _currentRole.id);
-                                                      if (ok) await reload();
-                                                    }
-                                                  },
-                                          ),
-                                          IconButton(
-                                            icon: const Icon(
-                                              Icons.delete_outline,
-                                              color: Colors.red,
-                                            ),
-                                            onPressed: id < 0
-                                                ? null
-                                                : () async {
-                                                    await MemoryService
-                                                        .deleteVectorMemory(id,
-                                                            roleId:
-                                                                _currentRole.id);
-                                                    await reload();
-                                                  },
-                                          ),
-                                        ],
+                                                if (edited != null &&
+                                                    edited.isNotEmpty &&
+                                                    edited != text) {
+                                                  final ok =
+                                                      await MemoryService.updateVectorMemory(
+                                                        id,
+                                                        edited,
+                                                        roleId: _currentRole.id,
+                                                      );
+                                                  if (ok) await reload();
+                                                }
+                                              },
                                       ),
-                                    );
-                                  },
-                                ),
+                                      IconButton(
+                                        icon: const Icon(
+                                          Icons.delete_outline,
+                                          color: Colors.red,
+                                        ),
+                                        onPressed: id < 0
+                                            ? null
+                                            : () async {
+                                                await MemoryService.deleteVectorMemory(
+                                                  id,
+                                                  roleId: _currentRole.id,
+                                                );
+                                                await reload();
+                                              },
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
                     ),
                   ],
                 );
@@ -1675,7 +1674,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                                           color: Colors.red,
                                         ),
                                         onPressed: () async {
-                                          final newMemories = List<String>.from(memories)..removeAt(index);
+                                          final newMemories = List<String>.from(
+                                            memories,
+                                          )..removeAt(index);
                                           await _persistCoreMemory(newMemories);
                                           setModalState(() {});
                                           setState(() {});
@@ -1907,9 +1908,6 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     );
     await RoleService.updateRole(_currentRole);
 
-    // 通知调度器
-    ProactiveMessageScheduler.instance.onRoleConfigChanged(_currentRole.id);
-
     setState(() {});
   }
 
@@ -1955,81 +1953,43 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   void _editProactiveCountdown() async {
-    double min = _currentRole.proactiveConfig.minCountdownHours;
-    double max = _currentRole.proactiveConfig.maxCountdownHours;
-
-    final result = await showDialog<Map<String, double>>(
+    final result = await showDialog<CountdownIntervalResult>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setState) => AlertDialog(
-          title: const Text('倒计时区间'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('AI 在此区间内随机选择触发时间'),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  const Text('最小：'),
-                  Expanded(
-                    child: Slider(
-                      value: min,
-                      min: 0.5,
-                      max: 12,
-                      divisions: 23,
-                      label: '${min.toStringAsFixed(1)} 小时',
-                      onChanged: (v) => setState(() {
-                        min = v;
-                        if (max < min) max = min;
-                      }),
-                    ),
-                  ),
-                  Text('${min.toStringAsFixed(1)}h'),
-                ],
-              ),
-              Row(
-                children: [
-                  const Text('最大：'),
-                  Expanded(
-                    child: Slider(
-                      value: max,
-                      min: min,
-                      max: 24,
-                      divisions: 47,
-                      label: '${max.toStringAsFixed(1)} 小时',
-                      onChanged: (v) => setState(() => max = v),
-                    ),
-                  ),
-                  Text('${max.toStringAsFixed(1)}h'),
-                ],
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, {'min': min, 'max': max}),
-              child: const Text('保存'),
-            ),
-          ],
-        ),
+      builder: (context) => CountdownIntervalDialog(
+        initialMinMinutes: _currentRole.proactiveConfig.minIntervalMinutes,
+        initialMaxMinutes: _currentRole.proactiveConfig.maxIntervalMinutes,
       ),
     );
 
     if (result != null) {
       _currentRole = _currentRole.copyWith(
         proactiveConfig: _currentRole.proactiveConfig.copyWith(
-          minCountdownHours: result['min'],
-          maxCountdownHours: result['max'],
+          minIntervalMinutes: result.minMinutes,
+          maxIntervalMinutes: result.maxMinutes,
         ),
       );
       await RoleService.updateRole(_currentRole);
-      ProactiveMessageScheduler.instance.onRoleConfigChanged(_currentRole.id);
       setState(() {});
     }
+  }
+
+  String _formatProactiveInterval(ProactiveConfig config) {
+    final minMinutes = config.minIntervalMinutes;
+    final maxMinutes = config.maxIntervalMinutes;
+    if (minMinutes >= 60 &&
+        maxMinutes >= 60 &&
+        minMinutes % 6 == 0 &&
+        maxMinutes % 6 == 0) {
+      String formatHours(int minutes) {
+        final value = minutes / 60;
+        return value == value.roundToDouble()
+            ? value.toInt().toString()
+            : value.toStringAsFixed(1);
+      }
+
+      return '${formatHours(minMinutes)}-${formatHours(maxMinutes)} 小时';
+    }
+    return '$minMinutes-$maxMinutes 分钟';
   }
 
   /// 导入外挂 JSON 文件

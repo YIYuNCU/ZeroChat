@@ -175,7 +175,7 @@ async def execute_set_proactive(role_data: Dict, enabled: bool, reason: str = ""
 
         from services import scheduler_service
         if enabled:
-            scheduler_service.schedule_proactive_for_role(role_id)
+            scheduler_service.schedule_proactive_for_role(role_id, reset=True)
         else:
             scheduler_service.unschedule_proactive_for_role(role_id)
 

@@ -34,7 +34,6 @@ client/
 │   │   ├── chat_controller.dart      # Central chat logic hub
 │   │   ├── memory_manager.dart       # Memory management (core + short-term)
 │   │   ├── moments_scheduler.dart    # Moments (朋友圈) scheduler
-│   │   ├── proactive_message_scheduler.dart  # AI proactive messaging
 │   │   ├── group_scheduler.dart      # Group chat scheduling
 │   │   ├── message_store.dart        # Message persistence
 │   │   └── segment_sender.dart       # Segmented message sending

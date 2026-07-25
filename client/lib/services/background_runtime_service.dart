@@ -424,7 +424,9 @@ class BackgroundRuntimeService {
     service.on(_eventAppBackground).listen((event) {
       appInForeground = false;
       // 切后台后开始持续检查后端任务消息，避免错过提醒
-      taskNotifyBaseline = DateTime.now();
+      taskNotifyBaseline = DateTime.now().subtract(
+        _resolveBackgroundTaskPollInterval(),
+      );
       startBackgroundTaskPollIfNeeded();
       startBackgroundWebsocketKeepAliveIfNeeded();
       unawaited(() async {

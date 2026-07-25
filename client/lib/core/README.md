@@ -324,7 +324,7 @@
   - 参数：chatId、message
   - 作用：追加消息、保存、广播更新并后台同步
   - 返回：Future<void>
-  - 调用者：ChatController、ProactiveMessageScheduler、外部模块
+  - 调用者：ChatController、外部模块
 
 - MessageStore.addMessages(String chatId, List<Message> messages)
   - 参数：chatId、messages
@@ -396,7 +396,7 @@
   - 参数：chatId、count
   - 作用：增加未读数
   - 返回：void
-  - 调用者：ChatController._sendSegmentsQueued()、ProactiveMessageScheduler._sendAsRoleMessage()
+  - 调用者：ChatController._sendSegmentsQueued()
 
 - MessageStore.clearUnread(String chatId)
   - 参数：chatId
@@ -548,78 +548,6 @@
   - 返回：void
   - 调用者：框架生命周期/外部管理逻辑
 
-## proactive_message_scheduler.dart
-
-功能说明：按角色配置调度主动消息，支持冷启动补偿、静默时间避让与分段发送。
-
-### Functions
-
-- ProactiveMessageScheduler.init()
-  - 参数：无
-  - 作用：冷启动补偿并为所有角色排程
-  - 返回：Future<void>
-  - 调用者：应用初始化流程
-
-- ProactiveMessageScheduler._checkAndCompensate()
-  - 参数：无
-  - 作用：补偿已过期触发时间
-  - 返回：Future<void>
-  - 调用者：init()
-
-- ProactiveMessageScheduler._scheduleAllRoles()
-  - 参数：无
-  - 作用：遍历并调度启用角色
-  - 返回：void
-  - 调用者：init()
-
-- ProactiveMessageScheduler.scheduleForRole(String roleId)
-  - 参数：roleId
-  - 作用：为角色计算/保存触发时间并设置计时器
-  - 返回：void
-  - 调用者：_scheduleAllRoles()、onRoleConfigChanged()、_triggerProactiveMessage()后续重排
-
-- ProactiveMessageScheduler.cancelForRole(String roleId)
-  - 参数：roleId
-  - 作用：取消指定角色计时器
-  - 返回：void
-  - 调用者：scheduleForRole()、onRoleConfigChanged()
-
-- ProactiveMessageScheduler.cancelAll()
-  - 参数：无
-  - 作用：取消全部计时器
-  - 返回：void
-  - 调用者：外部模块（退出/重置）
-
-- ProactiveMessageScheduler._generateNextTriggerTime(ProactiveConfig config)
-  - 参数：config
-  - 作用：生成随机触发时间
-  - 返回：DateTime
-  - 调用者：scheduleForRole()
-
-- ProactiveMessageScheduler._saveNextTriggerTime(String roleId, DateTime triggerTime)
-  - 参数：roleId、triggerTime
-  - 作用：保存触发时间到角色配置
-  - 返回：Future<void>
-  - 调用者：scheduleForRole()
-
-- ProactiveMessageScheduler._triggerProactiveMessage(String roleId)
-  - 参数：roleId
-  - 作用：检查安静时间后调用 AI 生成并发送
-  - 返回：Future<void>
-  - 调用者：_checkAndCompensate()、scheduleForRole()计时器回调
-
-- ProactiveMessageScheduler._sendAsRoleMessage(String chatId, Role role, String content)
-  - 参数：chatId、role、content
-  - 作用：按分段写入消息并更新未读
-  - 返回：Future<void>
-  - 调用者：_triggerProactiveMessage()
-
-- ProactiveMessageScheduler.onRoleConfigChanged(String roleId)
-  - 参数：roleId
-  - 作用：角色配置变化时重新随机倒计时
-  - 返回：void
-  - 调用者：外部模块（角色设置页）
-
 ## segment_sender.dart
 
 功能说明：分段发送工具，按 "$" 分割并模拟真人聊天延迟。
@@ -630,13 +558,13 @@
   - 参数：content
   - 作用：按 "$" 分段并清理空片段
   - 返回：List<String>
-  - 调用者：ChatController._sendSegmentsQueued()、ProactiveMessageScheduler._sendAsRoleMessage()、sendInSegments()
+  - 调用者：ChatController._sendSegmentsQueued()、sendInSegments()
 
 - SegmentSender.getRandomDelay()
   - 参数：无
   - 作用：生成 300–1199ms 的随机延迟
   - 返回：int
-  - 调用者：sendInSegments()、ProactiveMessageScheduler._sendAsRoleMessage()
+  - 调用者：sendInSegments()
 
 - SegmentSender.sendInSegments({required String content, required Future<void> Function(String segment, bool isLast) onSegment, void Function(bool isTyping)? onTypingChange})
   - 参数：content、onSegment、onTypingChange

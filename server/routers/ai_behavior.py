@@ -809,7 +809,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     # 用户发消息后重置主动消息冷却计时
     if str(event_context.get("sender") or "user") == "user":
         from services import scheduler_service
-        scheduler_service.schedule_proactive_for_role(role_id)
+        scheduler_service.schedule_proactive_for_role(role_id, reset=True)
     no_reply = pipeline_result.get("no_reply") is True
     # 情绪表情已封装为 send_emotion_emoji 工具，由 AI 主动调用
     return AIResponse(

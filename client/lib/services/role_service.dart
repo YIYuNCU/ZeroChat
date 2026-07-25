@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import '../models/onebot_config.dart';
+import '../models/proactive_config.dart';
 import '../models/role.dart';
 import '../models/stats_config.dart';
 import '../core/message_store.dart';
@@ -19,6 +20,8 @@ class RoleService {
   static final List<Role> _roles = [];
   static String _currentRoleId = 'default';
   static const String _toolRolePrefix = '1000000000';
+  static const String _proactiveConfigMigrationKey =
+      'proactive_config_server_sync_v1';
 
   /// 本地角色列表 hash（与后端 roles_hash 比对，避免无变化时全量拉取）
   static String _localRolesHash = '';
@@ -33,7 +36,9 @@ class RoleService {
   static String _normalizeAvatarUrl(String value) {
     final trimmed = value.trim();
     if (trimmed.startsWith('/api/roles/') && trimmed.endsWith('/avatar/file')) {
-      return trimmed.replaceFirst('/api/roles/', '/files/roles/').replaceFirst('/avatar/file', '/avatar');
+      return trimmed
+          .replaceFirst('/api/roles/', '/files/roles/')
+          .replaceFirst('/avatar/file', '/avatar');
     }
     return trimmed;
   }
@@ -58,9 +63,7 @@ class RoleService {
         try {
           final role = Role.fromJson(json);
           _roles.add(
-            role.copyWith(
-              avatarUrl: _normalizeAvatarUrl(role.avatarUrl ?? ''),
-            ),
+            role.copyWith(avatarUrl: _normalizeAvatarUrl(role.avatarUrl ?? '')),
           );
         } catch (e) {
           debugPrint('Error loading role: $e');
@@ -248,14 +251,12 @@ class RoleService {
   /// 成功返回新角色，失败返回 null。
   static Future<Role?> cloneRole(String sourceId, {String? newName}) async {
     try {
-      final response = await SecureWebSocketClient.instance.request(
-        'roles_clone',
-        {
-          'role_id': sourceId,
-          if (newName != null && newName.trim().isNotEmpty)
-            'new_name': newName.trim(),
-        },
-      );
+      final response = await SecureWebSocketClient.instance
+          .request('roles_clone', {
+            'role_id': sourceId,
+            if (newName != null && newName.trim().isNotEmpty)
+              'new_name': newName.trim(),
+          });
       final roleJson = response['role'];
       if (roleJson is! Map) {
         debugPrint('RoleService: cloneRole returned no role');
@@ -330,7 +331,9 @@ class RoleService {
               name: json['name'] ?? '',
               description: json['description'] ?? '',
               systemPrompt: json['system_prompt'] ?? '',
-              avatarUrl: _normalizeAvatarUrl(json['avatar_url']?.toString() ?? ''),
+              avatarUrl: _normalizeAvatarUrl(
+                json['avatar_url']?.toString() ?? '',
+              ),
               avatarHash: json['avatar_hash'] ?? '',
               chatBackgroundUrl: json['chat_background_url'] ?? '',
               aiModel: json['ai_model'] ?? 'deepseek-chat',
@@ -370,6 +373,13 @@ class RoleService {
               showStats: json['show_stats'] as bool? ?? true,
               showNoReply: json['show_no_reply'] as bool? ?? false,
               archived: json['archived'] as bool? ?? false,
+              proactiveConfig: json['proactive_config'] is Map
+                  ? ProactiveConfig.fromJson(
+                      Map<String, dynamic>.from(
+                        json['proactive_config'] as Map,
+                      ),
+                    )
+                  : const ProactiveConfig(),
             );
 
             // 更新或添加角色（保留本地专有字段）
@@ -387,8 +397,8 @@ class RoleService {
                 avatarUrl: backendRole.avatarUrl,
                 avatarHash: backendRole.avatarHash,
                 chatBackgroundUrl: backendRole.chatBackgroundUrl.isNotEmpty
-                  ? backendRole.chatBackgroundUrl
-                  : existing.chatBackgroundUrl,
+                    ? backendRole.chatBackgroundUrl
+                    : existing.chatBackgroundUrl,
                 coreMemory: backendRole.coreMemory,
                 aiModel: backendRole.aiModel,
                 aiApiUrl: backendRole.aiApiUrl,
@@ -404,6 +414,7 @@ class RoleService {
                 showStats: backendRole.showStats,
                 showNoReply: backendRole.showNoReply,
                 archived: backendRole.archived,
+                proactiveConfig: backendRole.proactiveConfig,
               );
             } else {
               _roles.add(backendRole);
@@ -465,7 +476,9 @@ class RoleService {
       }
     } catch (e) {
       // hash 探测失败则退回到全量拉取（保持原有行为）
-      debugPrint('RoleService: roles_hash probe failed, fallback to full fetch: $e');
+      debugPrint(
+        'RoleService: roles_hash probe failed, fallback to full fetch: $e',
+      );
     }
     return fetchFromBackend();
   }
@@ -475,37 +488,66 @@ class RoleService {
     try {
       await SecureWebSocketClient.instance.request('roles_upsert', {
         'role': {
-            'id': role.id,
-            'name': role.name,
-            'description': role.description,
-            'system_prompt': role.systemPrompt,
-            'avatar_url': role.avatarUrl,
-            'chat_background_url': role.chatBackgroundUrl,
-            'persona': role.description,
-            'core_memory': role.coreMemory,
-            'ai_model': role.aiModel,
-            'ai_api_url': role.aiApiUrl,
-            'ai_api_key': role.aiApiKey,
-            'ai_temperature': role.aiTemperature,
-            'gender': role.gender,
-            'menstruation_cycle': role.menstruationCycle,
-            'temperature': role.temperature,
-            'onebot_config': role.onebotConfig.toJson(),
-            'stats_config': role.statsConfig.toJson(),
-            'show_action': role.showAction,
-            'show_psychology': role.showPsychology,
-            'show_stats': role.showStats,
-            'show_no_reply': role.showNoReply,
-            'archived': role.archived,
-            'max_context_rounds': role.maxContextRounds,
-            'allow_web_search': role.allowWebSearch,
-          },
+          'id': role.id,
+          'name': role.name,
+          'description': role.description,
+          'system_prompt': role.systemPrompt,
+          'avatar_url': role.avatarUrl,
+          'chat_background_url': role.chatBackgroundUrl,
+          'persona': role.description,
+          'core_memory': role.coreMemory,
+          'ai_model': role.aiModel,
+          'ai_api_url': role.aiApiUrl,
+          'ai_api_key': role.aiApiKey,
+          'ai_temperature': role.aiTemperature,
+          'gender': role.gender,
+          'menstruation_cycle': role.menstruationCycle,
+          'temperature': role.temperature,
+          'onebot_config': role.onebotConfig.toJson(),
+          'stats_config': role.statsConfig.toJson(),
+          'show_action': role.showAction,
+          'show_psychology': role.showPsychology,
+          'show_stats': role.showStats,
+          'show_no_reply': role.showNoReply,
+          'archived': role.archived,
+          'max_context_rounds': role.maxContextRounds,
+          'allow_web_search': role.allowWebSearch,
+          'proactive_config': role.proactiveConfig.toBackendJson(),
+        },
       });
       return true;
     } catch (e) {
       debugPrint('RoleService: Sync to backend failed: $e');
       return false;
     }
+  }
+
+  /// 首次升级时以旧客户端的本地配置为准，避免服务端默认关闭状态覆盖用户设置。
+  static Future<bool> migrateProactiveConfigsToBackendIfNeeded() async {
+    if (StorageService.getBool(_proactiveConfigMigrationKey) == true) {
+      return true;
+    }
+
+    for (final role in _roles.where((item) => !isToolRoleId(item.id))) {
+      try {
+        await SecureWebSocketClient.instance.request('roles_upsert', {
+          'role': {
+            'id': role.id,
+            'name': role.name,
+            'proactive_config': role.proactiveConfig.toBackendJson(),
+          },
+        });
+      } catch (e) {
+        debugPrint(
+          'RoleService: proactive config migration deferred for ${role.id}: $e',
+        );
+        return false;
+      }
+    }
+
+    await StorageService.setBool(_proactiveConfigMigrationKey, true);
+    debugPrint('RoleService: proactive configs migrated to backend');
+    return true;
   }
 
   /// 同步所有角色到后端

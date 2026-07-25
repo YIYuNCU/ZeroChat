@@ -6,6 +6,7 @@ import '../models/message.dart';
 import '../services/sticker_service.dart';
 import '../services/storage_service.dart';
 import '../services/secure_websocket_client.dart';
+import '../services/chat_list_service.dart';
 
 /// 消息存储层
 /// 聊天记录的唯一真实来源（Single Source of Truth）
@@ -265,10 +266,12 @@ class MessageStore extends ChangeNotifier {
           : msg.senderId;
 
       try {
-        final data = await SecureWebSocketClient.instance.request(
-          'emoji_random',
-          {'role_id': roleId, 'emotion': safeEmotion},
-        ).timeout(const Duration(seconds: 5));
+        final data = await SecureWebSocketClient.instance
+            .request('emoji_random', {
+              'role_id': roleId,
+              'emotion': safeEmotion,
+            })
+            .timeout(const Duration(seconds: 5));
         if (data['found'] != true || data['url'] == null) {
           continue;
         }
@@ -493,9 +496,11 @@ class MessageStore extends ChangeNotifier {
     _saveDebounceTimers[chatId] = Timer(_saveDebounceWindow, () {
       _saveDebounceTimers.remove(chatId);
       // fire-and-forget：落盘失败仅记录日志，内存仍是权威来源。
-      unawaited(_saveMessages(chatId).catchError((Object e) {
-        debugPrint('MessageStore: debounced save failed for $chatId: $e');
-      }));
+      unawaited(
+        _saveMessages(chatId).catchError((Object e) {
+          debugPrint('MessageStore: debounced save failed for $chatId: $e');
+        }),
+      );
     });
   }
 
@@ -517,9 +522,10 @@ class MessageStore extends ChangeNotifier {
   Future<void> _syncAllChatsFromBackendIfNeeded() async {
     try {
       final localMd5 = _calculateLocalChatsMd5();
-      final data = await SecureWebSocketClient.instance.request('chat_snapshot', {
-        'client_md5': localMd5,
-      });
+      final data = await SecureWebSocketClient.instance.request(
+        'chat_snapshot',
+        {'client_md5': localMd5},
+      );
       final needSync = data['need_sync'] == true;
       if (!needSync) {
         debugPrint('MessageStore: Chat snapshot MD5 matched, skip full sync');
@@ -539,6 +545,9 @@ class MessageStore extends ChangeNotifier {
           continue;
         }
 
+        final previousIds = (_messages[chatId] ?? const <Message>[])
+            .map((message) => message.id)
+            .toSet();
         final messages = <Message>[];
         for (final item in rawMessages) {
           if (item is! Map) {
@@ -589,8 +598,30 @@ class MessageStore extends ChangeNotifier {
         messages.addAll(localOnly);
 
         messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        final newBackgroundMessages = messages.where(
+          (message) =>
+              message.senderId != 'me' &&
+              !previousIds.contains(message.id) &&
+              (message.id.contains('_proactive') ||
+                  message.id.contains('_task_')),
+        );
+        final newUnreadCount = newBackgroundMessages.length;
         _messages[chatId] = messages;
         await _saveMessages(chatId);
+        if (messages.isNotEmpty) {
+          final lastMessage = messages.last;
+          ChatListService.instance.updateChat(
+            chatId: chatId,
+            lastMessage: lastMessage.type == MessageType.text
+                ? lastMessage.content
+                : '[图片]',
+            lastMessageTime: lastMessage.timestamp,
+            unreadIncrement: newUnreadCount,
+          );
+        }
+        if (newUnreadCount > 0) {
+          incrementUnread(chatId, count: newUnreadCount);
+        }
         _notifyMessageUpdate(chatId);
         syncedChats += 1;
       }
@@ -616,9 +647,10 @@ class MessageStore extends ChangeNotifier {
               // 排除尚未同步到后端的本地用户消息（sending/failed）：MD5 只代表
               // "服务端应有的内容"，纯本地未同步消息不再触发破坏性 need_sync。
               .where(
-                (m) => !(m.senderId == 'me' &&
-                    (m.sendStatus == MessageSendStatus.sending ||
-                        m.sendStatus == MessageSendStatus.failed)),
+                (m) =>
+                    !(m.senderId == 'me' &&
+                        (m.sendStatus == MessageSendStatus.sending ||
+                            m.sendStatus == MessageSendStatus.failed)),
               )
               .map(
                 (m) => {
@@ -684,7 +716,9 @@ class MessageStore extends ChangeNotifier {
           },
         });
 
-        debugPrint('MessageStore: Synced message ${message.id} via websocket ✓');
+        debugPrint(
+          'MessageStore: Synced message ${message.id} via websocket ✓',
+        );
         if (tracked) {
           await updateMessageSendStatus(
             chatId,
@@ -754,17 +788,18 @@ class MessageStore extends ChangeNotifier {
               !(m.senderId == 'me' && m.sendStatus == MessageSendStatus.failed),
         )
         .map((m) {
-      final buffer = StringBuffer();
-      // 添加引用内容
-      if (m.hasQuote && m.quotedPreviewText != null) {
-        buffer.writeln('[引用: ${m.quotedPreviewText}]');
-      }
-      buffer.write(m.content);
-      return {
-        'role': m.senderId == 'me' ? 'user' : 'assistant',
-        'content': buffer.toString(),
-      };
-    }).toList();
+          final buffer = StringBuffer();
+          // 添加引用内容
+          if (m.hasQuote && m.quotedPreviewText != null) {
+            buffer.writeln('[引用: ${m.quotedPreviewText}]');
+          }
+          buffer.write(m.content);
+          return {
+            'role': m.senderId == 'me' ? 'user' : 'assistant',
+            'content': buffer.toString(),
+          };
+        })
+        .toList();
   }
 
   /// 释放资源
