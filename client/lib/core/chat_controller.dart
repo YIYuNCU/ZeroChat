@@ -215,26 +215,16 @@ class ChatController extends ChangeNotifier {
     // 获取等待时间配置
     final waitSeconds = SettingsService.instance.messageWaitSeconds;
 
-    // 如果正在等待，重置定时器
-    if (_waitTimers.containsKey(chatId)) {
-      _waitTimers[chatId]?.cancel();
-    }
-
     // 添加到待发送队列
     _pendingMessages.putIfAbsent(chatId, () => []);
     _pendingMessages[chatId]!.add(
       _PendingTextMessage(messageId: userMessage.id, content: content),
     );
 
-    // 如果等待时间为 0，立即发送
-    if (waitSeconds == 0) {
-      await _sendBatchedMessages(chatId);
-      return;
-    }
-
-    // 设置定时器
+    // 重置定时器（无论是否已有定时器，统一重置）
+    _waitTimers[chatId]?.cancel();
     _waitTimers[chatId] = Timer(
-      Duration(seconds: waitSeconds),
+      waitSeconds > 0 ? Duration(seconds: waitSeconds) : Duration.zero,
       () => _sendBatchedMessages(chatId),
     );
   }
