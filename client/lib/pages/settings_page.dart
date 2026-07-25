@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../services/settings_service.dart';
 import '../services/image_service.dart';
 import '../services/background_runtime_service.dart';
@@ -345,13 +346,32 @@ class _SettingsPageState extends State<SettingsPage> {
             children: [
               const Text('忽略电池优化', style: TextStyle(fontSize: 16)),
               _batteryExempt
-                  ? const Text(
-                      '已允许',
-                      style: TextStyle(
-                        fontSize: 16,
-                        color: Color(0xFF07C160),
-                        fontWeight: FontWeight.w500,
-                      ),
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          '已允许',
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: Color(0xFF07C160),
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton(
+                          onPressed: () async {
+                            await openAppSettings();
+                            await _refreshBatteryExemption();
+                          },
+                          child: const Text(
+                            '关闭',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Color(0xFF888888),
+                            ),
+                          ),
+                        ),
+                      ],
                     )
                   : TextButton(
                       onPressed: () async {

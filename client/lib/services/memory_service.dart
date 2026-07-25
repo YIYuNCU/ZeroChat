@@ -444,26 +444,85 @@ class MemoryService {
 
   // ========== 后端短期记忆（对话历史）管理 ==========
 
-  /// 从后端拉取短期记忆条目（含 id / role / content / origin / timestamp）
-  static Future<List<Map<String, dynamic>>> getShortTermFromBackend({String? roleId}) async {
+  /// 每个 roleId 的短期记忆本地缓存（内存中）
+  static final Map<String, List<Map<String, dynamic>>> _shortTermCache = {};
+
+  /// 每个 roleId 已知的最大条目 id（用于增量拉取）
+  static final Map<String, int> _shortTermLastId = {};
+
+  /// 从后端拉取短期记忆（首次全量，之后增量）
+  /// 返回合并后的完整列表（倒序：最新的在最前）
+  static Future<List<Map<String, dynamic>>> getShortTermFromBackend({
+    String? roleId,
+    bool forceFullRefresh = false,
+  }) async {
     try {
       final rid = roleId ?? RoleService.getCurrentRole().id;
+      final lastId = forceFullRefresh ? null : _shortTermLastId[rid];
+      final payload = <String, dynamic>{'role_id': rid};
+      if (lastId != null) {
+        payload['since_id'] = lastId;
+      }
+
       final response = await SecureWebSocketClient.instance.request(
         'roles_memory_get',
-        {'role_id': rid},
+        payload,
       );
+
       final raw = response['short_term'];
-      if (raw is List) {
-        return raw
-            .whereType<Map>()
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
+      if (raw is! List) {
+        return List.unmodifiable(_shortTermCache[rid] ?? []);
       }
-      return [];
+
+      final newEntries = raw
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+
+      final isIncremental = response['incremental'] == true;
+      if (isIncremental && _shortTermCache.containsKey(rid)) {
+        // 追加新条目到缓存
+        _shortTermCache[rid]!.addAll(newEntries);
+      } else {
+        // 全量替换缓存
+        _shortTermCache[rid] = newEntries;
+      }
+
+      // 更新已知的最大 id
+      for (final entry in newEntries) {
+        final id = entry['id'];
+        if (id is int) {
+          final current = _shortTermLastId[rid] ?? 0;
+          if (id > current) _shortTermLastId[rid] = id;
+        }
+      }
+
+      // 按 id 倒序返回（最新的在最前）
+      final cached = List<Map<String, dynamic>>.from(_shortTermCache[rid] ?? []);
+      cached.sort((a, b) {
+        final ia = a['id'] is int ? a['id'] as int : 0;
+        final ib = b['id'] is int ? b['id'] as int : 0;
+        return ib.compareTo(ia);
+      });
+      return cached;
     } catch (e) {
       debugPrint('MemoryService: Get short-term from backend failed: $e');
-      return [];
+      // 失败时返回已缓存数据
+      final rid = roleId ?? RoleService.getCurrentRole().id;
+      final cached = List<Map<String, dynamic>>.from(_shortTermCache[rid] ?? []);
+      cached.sort((a, b) {
+        final ia = a['id'] is int ? a['id'] as int : 0;
+        final ib = b['id'] is int ? b['id'] as int : 0;
+        return ib.compareTo(ia);
+      });
+      return cached;
     }
+  }
+
+  /// 清除指定 roleId 的短期记忆本地缓存（在清空后端记忆后调用）
+  static void clearShortTermCache(String roleId) {
+    _shortTermCache.remove(roleId);
+    _shortTermLastId.remove(roleId);
   }
 
   /// 更新单条短期记忆内容
@@ -474,7 +533,19 @@ class MemoryService {
         'short_term_update',
         {'role_id': rid, 'entry_id': entryId, 'message': message},
       );
-      return response['success'] == true;
+      if (response['success'] == true) {
+        final cache = _shortTermCache[rid];
+        if (cache != null) {
+          for (final entry in cache) {
+            if (entry['id'] == entryId) {
+              entry['content'] = message;
+              break;
+            }
+          }
+        }
+        return true;
+      }
+      return false;
     } catch (e) {
       debugPrint('MemoryService: Update short-term entry failed: $e');
       return false;
@@ -489,7 +560,11 @@ class MemoryService {
         'short_term_delete',
         {'role_id': rid, 'entry_id': entryId},
       );
-      return response['success'] == true;
+      if (response['success'] == true) {
+        _shortTermCache[rid]?.removeWhere((e) => e['id'] == entryId);
+        return true;
+      }
+      return false;
     } catch (e) {
       debugPrint('MemoryService: Delete short-term entry failed: $e');
       return false;
@@ -504,7 +579,11 @@ class MemoryService {
         'short_term_clear',
         {'role_id': rid},
       );
-      return response['success'] == true;
+      if (response['success'] == true) {
+        clearShortTermCache(rid);
+        return true;
+      }
+      return false;
     } catch (e) {
       debugPrint('MemoryService: Clear short-term backend failed: $e');
       return false;

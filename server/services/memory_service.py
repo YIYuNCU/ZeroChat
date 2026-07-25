@@ -638,7 +638,44 @@ def load_memory(role_id: str) -> Dict:
     }
 
 
-def _get_vector_memory_count(role_id: str) -> int:
+def load_short_term_since(role_id: str, since_id: int) -> list:
+    """增量获取短期记忆：只返回 id > since_id 的条目。"""
+    if is_tool_role_id(role_id):
+        return []
+    with _get_connection(role_id) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, role, content, timestamp, task_id, request_id, json_memory, origin, sender, sender_id, group_id
+            FROM short_term
+            WHERE id > ?
+            ORDER BY id ASC
+            """,
+            (since_id,),
+        ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "role": row[1] or "assistant",
+            "content": ensure_structured_memory_message(
+                content=row[2],
+                role=row[1] or "assistant",
+                timestamp=row[3],
+                origin=row[7] or DEFAULT_MEMORY_ORIGIN,
+                sender=row[8] or row[1] or "assistant",
+            ),
+            "timestamp": row[3],
+            "task_id": row[4],
+            "request_id": row[5],
+            "json_memory": row[6],
+            "origin": row[7] or DEFAULT_MEMORY_ORIGIN,
+            "sender": row[8] or row[1] or "assistant",
+            "sender_id": row[9] or "",
+            "group_id": row[10] or "",
+        }
+        for row in rows
+    ]
+
+
     try:
         from services.vector_memory import VectorMemoryStore
         return VectorMemoryStore(role_id).count()

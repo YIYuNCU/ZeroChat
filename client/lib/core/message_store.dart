@@ -65,6 +65,7 @@ class MessageStore extends ChangeNotifier {
   Future<void> ensureLoaded(String chatId) async {
     if (!_messages.containsKey(chatId)) {
       await _loadMessages(chatId);
+      _notifyMessageUpdate(chatId);
       debugPrint('MessageStore: Loaded messages for $chatId');
     }
   }

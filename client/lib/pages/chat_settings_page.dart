@@ -181,7 +181,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    '${_currentRole.coreMemory.length} 条',
+                    '${_backendCoreMemory.length} 条',
                     style: const TextStyle(
                       color: Color(0xFF888888),
                       fontSize: 15,
@@ -841,10 +841,11 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            // 使用 MessageStore 获取消息
-            final currentMessages = MessageStore.instance.getMessages(
-              widget.chatId,
-            );
+            // 使用 MessageStore 获取消息，倒序显示（最新在最前）
+            final currentMessages = MessageStore.instance
+                .getMessages(widget.chatId)
+                .reversed
+                .toList();
 
             return DraggableScrollableSheet(
               initialChildSize: 0.7,
@@ -968,7 +969,26 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
           '${msg.timestamp.hour}:${msg.timestamp.minute.toString().padLeft(2, '0')}',
           style: const TextStyle(fontSize: 12),
         ),
-        trailing: const Icon(Icons.chevron_right, color: Color(0xFFCCCCCC)),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.edit_outlined, size: 18, color: Color(0xFF888888)),
+              onPressed: () async {
+                final edited = await _editTextDialog('编辑消息', msg.content);
+                if (edited != null && edited.isNotEmpty && edited != msg.content) {
+                  await MessageStore.instance.updateMessage(
+                    widget.chatId,
+                    msg.id,
+                    content: edited,
+                  );
+                  setModalState(() {});
+                }
+              },
+            ),
+            const Icon(Icons.chevron_right, color: Color(0xFFCCCCCC)),
+          ],
+        ),
       ),
     );
   }
@@ -1207,13 +1227,14 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            Future<void> reload() async {
+            Future<void> reload({bool forceFullRefresh = false}) async {
               final list = await MemoryService.getShortTermFromBackend(
                 roleId: _currentRole.id,
+                forceFullRefresh: forceFullRefresh,
               );
               if (!mounted) return;
               setModalState(() {
-                items = _sortMemoryDesc(list);
+                items = list;
                 loading = false;
               });
             }
@@ -1242,25 +1263,35 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                               fontWeight: FontWeight.w500,
                             ),
                           ),
-                          if (items.isNotEmpty)
-                            TextButton(
-                              onPressed: () async {
-                                final confirm = await _confirmDialog(
-                                  '清空短期记忆',
-                                  '确定要清空所有短期对话记忆吗？这会删除后端保存的对话历史，AI 将失去近期上下文。',
-                                );
-                                if (confirm == true) {
-                                  await MemoryService.clearShortTermBackend(
-                                    roleId: _currentRole.id,
-                                  );
-                                  await reload();
-                                }
-                              },
-                              child: const Text(
-                                '清空',
-                                style: TextStyle(color: Colors.red),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.refresh, size: 20, color: Color(0xFF888888)),
+                                tooltip: '增量刷新',
+                                onPressed: () => reload(),
                               ),
-                            ),
+                              if (items.isNotEmpty)
+                                TextButton(
+                                  onPressed: () async {
+                                    final confirm = await _confirmDialog(
+                                      '清空短期记忆',
+                                      '确定要清空所有短期对话记忆吗？这会删除后端保存的对话历史，AI 将失去近期上下文。',
+                                    );
+                                    if (confirm == true) {
+                                      await MemoryService.clearShortTermBackend(
+                                        roleId: _currentRole.id,
+                                      );
+                                      await reload(forceFullRefresh: true);
+                                    }
+                                  },
+                                  child: const Text(
+                                    '清空',
+                                    style: TextStyle(color: Colors.red),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ],
                       ),
                     ),
@@ -1281,7 +1312,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                               itemBuilder: (context, index) {
                                 return _buildShortTermTile(
                                   items[index],
-                                  reload,
+                                  () => reload(),
                                 );
                               },
                             ),

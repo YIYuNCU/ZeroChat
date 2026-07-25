@@ -992,7 +992,9 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         role_id = str(payload.get("role_id") or "").strip()
         if not role_id:
             raise ValueError("role_id missing")
-        return await roles.get_memory(role_id)
+        since_id_raw = payload.get("since_id")
+        since_id = int(since_id_raw) if since_id_raw is not None else None
+        return await roles.get_memory(role_id, since_id=since_id)
 
     if action == "usage_stats_get":
         role_id = str(payload.get("role_id") or "").strip()

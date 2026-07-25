@@ -607,15 +607,20 @@ def _normalize_short_term(items: List[Any]) -> List[Dict[str, Any]]:
     return normalized
 
 @router.get("/roles/{role_id}/memory")
-async def get_memory(role_id: str):
-    """获取角色记忆"""
-    from services.memory_service import load_memory
+async def get_memory(role_id: str, since_id: int | None = None):
+    """获取角色记忆。since_id 不为 None 时只返回 id > since_id 的短期记忆条目（增量）。"""
+    from services.memory_service import load_memory, load_short_term_since
 
     memory = load_memory(role_id)
+    if since_id is not None:
+        short_term = load_short_term_since(role_id, since_id)
+    else:
+        short_term = memory.get("short_term", [])
     return {
         "core_memory": _core_memory_to_lines(memory.get("core_memory", "")),
-        "short_term": memory.get("short_term", []),
+        "short_term": short_term,
         "vector_memory_count": memory.get("vector_memory_count", 0),
+        "incremental": since_id is not None,
     }
 
 @router.put("/roles/{role_id}/memory")
