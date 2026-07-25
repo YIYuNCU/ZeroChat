@@ -676,6 +676,7 @@ def load_short_term_since(role_id: str, since_id: int) -> list:
     ]
 
 
+def _get_vector_memory_count(role_id: str) -> int:
     try:
         from services.vector_memory import VectorMemoryStore
         return VectorMemoryStore(role_id).count()
