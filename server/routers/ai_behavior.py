@@ -709,6 +709,47 @@ append_short_term,
         "emojis_called": result.get("_emojis_called", []),
     }
 
+def _resolve_vision_uploads(upload_ids: List[str]) -> tuple[List[str], List[Path]]:
+    """把分块上传的 upload_id 列表解析为 data URL 列表 + 待清理目录列表。
+
+    读取 data/vision/<id>/merged.bin 与 meta.json（取 mime_type），
+    组装 data:<mime>;base64,... 形式的 URL，供聚合流程（tool 模式）
+    随 ai_event 一并交给聊天模型的 recognize_image 工具使用。
+    无法读取的 upload_id 会被跳过。
+    """
+    import base64 as _base64
+
+    data_urls: List[str] = []
+    cleanup_dirs: List[Path] = []
+    for raw_id in upload_ids:
+        upload_id = str(raw_id or "").strip()
+        if not upload_id:
+            continue
+        upload_dir = VISION_UPLOADS_DIR / upload_id
+        merged_file = upload_dir / "merged.bin"
+        if not merged_file.exists():
+            continue
+        cleanup_dirs.append(upload_dir)
+        try:
+            image_bytes = merged_file.read_bytes()
+            if not image_bytes:
+                continue
+            mime_type = "image/jpeg"
+            meta_file = upload_dir / "meta.json"
+            if meta_file.exists():
+                try:
+                    with open(meta_file, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    mime_type = str(meta.get("mime_type") or mime_type)
+                except Exception:
+                    pass
+            b64 = _base64.b64encode(image_bytes).decode("utf-8")
+            data_urls.append(f"data:{mime_type};base64,{b64}")
+        except Exception as e:
+            print(f"解析识图上传失败 upload_id={upload_id}: {e}")
+    return data_urls, cleanup_dirs
+
+
 async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     """处理用户聊天消息"""
     from services.memory_service import (
@@ -776,22 +817,45 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         extra_parts.append(f"[外挂记录]\n{attached_json}")
     request_id = str(event_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
 
-    pipeline_result = await _run_memory_ai_pipeline(
-        role=role,
-        role_id=role_id,
-        user_message=user_message,
-        event_context=event_context,
-        extra_parts=extra_parts,
-        request_id=request_id,
-        attached_json=attached_json or None,
-        origin=str(event_context.get("origin") or "zerochat").strip() or "zerochat",
-        user_sender=str(event_context.get("sender") or "user").strip() or "user",
-        sender_id=str(event_context.get("sender_id") or "").strip(),
-        group_id=str(event_context.get("onebot_group_id") or event_context.get("group_id") or "").strip(),
-        include_user_memory=True,
-        include_assistant_memory=True,
-        trigger_summary_after_reply=True,
-    )
+    # 图片聚合（tool 模式）：客户端把图片以 vision_upload_ids 随本次 ai_event 传来，
+    # 这里解析为 data URL 组成 vision_context，交给管道 → generate_with_role
+    # 会在存在图片时暴露 recognize_image 工具，由 AI 自主决定是否识图（不做前置识别）。
+    vision_context: Optional[Dict[str, Any]] = None
+    vision_cleanup_dirs: List[Path] = []
+    upload_ids = event_context.get("vision_upload_ids") or []
+    if isinstance(upload_ids, list) and upload_ids:
+        data_urls, vision_cleanup_dirs = _resolve_vision_uploads(upload_ids)
+        if data_urls:
+            vision_context = {"image_data_urls": data_urls}
+            extra_parts.append(
+                f"[图片附件] 用户本次发送了 {len(data_urls)} 张图片。若需了解图片内容以更好地回复，"
+                "请调用 recognize_image 工具，并可在 focus 中说明你想重点关注的细节。"
+            )
+            if not user_message.strip():
+                user_message = "用户发送了图片"
+
+    try:
+        pipeline_result = await _run_memory_ai_pipeline(
+            role=role,
+            role_id=role_id,
+            user_message=user_message,
+            event_context=event_context,
+            extra_parts=extra_parts,
+            request_id=request_id,
+            attached_json=attached_json or None,
+            origin=str(event_context.get("origin") or "zerochat").strip() or "zerochat",
+            user_sender=str(event_context.get("sender") or "user").strip() or "user",
+            sender_id=str(event_context.get("sender_id") or "").strip(),
+            group_id=str(event_context.get("onebot_group_id") or event_context.get("group_id") or "").strip(),
+            include_user_memory=True,
+            include_assistant_memory=True,
+            trigger_summary_after_reply=True,
+            vision_context=vision_context,
+        )
+    finally:
+        # 识图工具在管道内执行，必须等管道返回后再清理图片目录
+        for upload_dir in vision_cleanup_dirs:
+            shutil.rmtree(upload_dir, ignore_errors=True)
     if not pipeline_result.get("success"):
         return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
 

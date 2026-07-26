@@ -400,6 +400,17 @@ class ApiService {
     }
   }
 
+  /// 读取、压缩并分块上传一张图片，返回 upload_id（不触发 chat_vision）。
+  /// 供聚合流程（tool 模式）将图片随 ai_event 一起提交时复用。
+  static Future<String> uploadVisionImage({required String imagePath}) async {
+    final file = await _readImageFile(imagePath);
+    final compressed = _compressImageBytes(file, imagePath);
+    return _uploadVisionImageInChunks(
+      imageBytes: compressed.$1,
+      mimeType: compressed.$2,
+    );
+  }
+
   /// 图片识别聊天（通过后端调用 vision API）
   static Future<String> chatWithImage({
     required String imagePath,

@@ -793,7 +793,12 @@ class MessageStore extends ChangeNotifier {
           if (m.hasQuote && m.quotedPreviewText != null) {
             buffer.writeln('[引用: ${m.quotedPreviewText}]');
           }
-          buffer.write(m.content);
+          // 图片消息的 content 是本地文件路径，喂给模型无意义，用占位符替代
+          if (m.type == MessageType.image) {
+            buffer.write('[图片]');
+          } else {
+            buffer.write(m.content);
+          }
           return {
             'role': m.senderId == 'me' ? 'user' : 'assistant',
             'content': buffer.toString(),

@@ -26,11 +26,20 @@ import '../services/task_service.dart';
 import '../services/emoji_service.dart';
 import '../services/storage_service.dart';
 
-class _PendingTextMessage {
+/// 待发送聚合项：文本项（text 非空）或图片项（imagePath 非空）。
+/// 同一等待窗口内的文本与图片会被合并成一次请求。
+class _PendingChatItem {
   final String messageId;
-  final String content;
+  final String? text;
+  final String? imagePath;
 
-  const _PendingTextMessage({required this.messageId, required this.content});
+  const _PendingChatItem({
+    required this.messageId,
+    this.text,
+    this.imagePath,
+  });
+
+  bool get isImage => imagePath != null;
 }
 
 /// 聊天核心引擎
@@ -79,8 +88,8 @@ class ChatController extends ChangeNotifier {
   /// 异步聊天任务推送订阅
   StreamSubscription<Map<String, dynamic>>? _chatPushSubscription;
 
-  /// 待发送消息队列（用于消息合并等待）
-  final Map<String, List<_PendingTextMessage>> _pendingMessages = {};
+  /// 待发送消息队列（用于消息合并等待，文本与图片统一入此缓冲）
+  final Map<String, List<_PendingChatItem>> _pendingMessages = {};
 
   /// 等待定时器（用于消息合并）
   final Map<String, Timer> _waitTimers = {};
@@ -243,7 +252,7 @@ class ChatController extends ChangeNotifier {
     // 添加到待发送队列
     _pendingMessages.putIfAbsent(chatId, () => []);
     _pendingMessages[chatId]!.add(
-      _PendingTextMessage(messageId: userMessage.id, content: content),
+      _PendingChatItem(messageId: userMessage.id, text: content),
     );
 
     // 重置定时器（无论是否已有定时器，统一重置）
@@ -283,11 +292,18 @@ class ChatController extends ChangeNotifier {
       return;
     }
 
-    // 合并消息（用换行连接）
-    final combinedContent = pendingMessages.map((m) => m.content).join('\n');
+    // 拆分文本项与图片项：文本按换行合并，图片保留有序路径列表（支持多图）
+    final combinedContent = pendingMessages
+        .where((m) => m.text != null)
+        .map((m) => m.text!)
+        .join('\n');
+    final imagePaths = pendingMessages
+        .where((m) => m.isImage)
+        .map((m) => m.imagePath!)
+        .toList();
 
     debugPrint(
-      'ChatController: Sending batched messages (${pendingMessages.length} msgs) to $chatId',
+      'ChatController: Sending batched messages (${pendingMessages.length} msgs, ${imagePaths.length} images) to $chatId',
     );
 
     final ready = await _ensureConnectionBeforeSend(chatId);
@@ -318,18 +334,30 @@ class ChatController extends ChangeNotifier {
     notifyListeners();
 
     // 根据聊天类型处理（后台执行）
-    _processMessageInBackground(chatId, combinedContent, context.isGroup);
+    _processMessageInBackground(
+      chatId,
+      combinedContent,
+      context.isGroup,
+      imagePaths: imagePaths,
+    );
   }
 
   /// 发送用户图片消息
+  ///
+  /// tool 识图模式：图片进入与文本一致的聚合缓冲区，等待窗口后合并成一次
+  /// ai_event 请求，由聊天模型自主决定是否调用 recognize_image（不立即识别）。
+  /// 其余模式（standalone/pre_model）：保持原即时 chat_vision 路径。
   Future<void> sendUserImageMessage(String chatId, String imagePath) async {
-    if (_processingChats.contains(chatId)) {
+    final aggregateViaTool = SettingsService.instance.visionMode == 'tool';
+
+    // 非 tool 模式沿用旧的即时路径：处理中直接忽略
+    if (!aggregateViaTool && _processingChats.contains(chatId)) {
       debugPrint('ChatController: Already processing $chatId, ignoring image');
       return;
     }
 
     debugPrint(
-      'ChatController: sendUserImageMessage to $chatId, path=$imagePath',
+      'ChatController: sendUserImageMessage to $chatId, path=$imagePath, aggregate=$aggregateViaTool',
     );
 
     // 1. 创建图片消息（使用 image 类型）
@@ -368,7 +396,22 @@ class ChatController extends ChangeNotifier {
       lastMessageTime: DateTime.now(),
     );
 
-    // 标记正在处理
+    // tool 模式：图片进入聚合缓冲区，与文本共用等待定时器
+    if (aggregateViaTool) {
+      final waitSeconds = SettingsService.instance.messageWaitSeconds;
+      _pendingMessages.putIfAbsent(chatId, () => []);
+      _pendingMessages[chatId]!.add(
+        _PendingChatItem(messageId: imageMessage.id, imagePath: imagePath),
+      );
+      _waitTimers[chatId]?.cancel();
+      _waitTimers[chatId] = Timer(
+        waitSeconds > 0 ? Duration(seconds: waitSeconds) : Duration.zero,
+        () => _sendBatchedMessages(chatId),
+      );
+      return;
+    }
+
+    // 非 tool 模式：标记正在处理，走即时 vision 路径
     _processingChats.add(chatId);
     _beginBackgroundTrackedRequest(chatId);
     notifyListeners();
@@ -627,14 +670,15 @@ class ChatController extends ChangeNotifier {
   void _processMessageInBackground(
     String chatId,
     String content,
-    bool isGroup,
-  ) {
+    bool isGroup, {
+    List<String> imagePaths = const [],
+  }) {
     Future(() async {
       try {
         if (isGroup) {
-          await _handleGroupChat(chatId, content);
+          await _handleGroupChat(chatId, content, imagePaths: imagePaths);
         } else {
-          await _handleSingleChat(chatId, content);
+          await _handleSingleChat(chatId, content, imagePaths: imagePaths);
         }
       } catch (e) {
         debugPrint('ChatController: Error processing message: $e');
@@ -797,16 +841,23 @@ class ChatController extends ChangeNotifier {
 
   // ========== 单聊处理 ==========
 
-  Future<void> _handleSingleChat(String chatId, String userMessage) async {
+  Future<void> _handleSingleChat(
+    String chatId,
+    String userMessage, {
+    List<String> imagePaths = const [],
+  }) async {
     final role =
         RoleService.getRoleById(chatId) ?? RoleService.getCurrentRole();
 
-    // 意图识别
-    final intent = await IntentService.detectIntent(userMessage);
-    debugPrint('ChatController: Intent detected: ${intent.type}');
+    // 意图识别（纯图片批次无文本时跳过，避免空串误判）
+    final intent = userMessage.trim().isEmpty
+        ? null
+        : await IntentService.detectIntent(userMessage);
+    debugPrint('ChatController: Intent detected: ${intent?.type}');
 
     // 根据意图类型执行副作用（不直接回复，交给 AI 自然回复）
-    switch (intent.type) {
+    if (intent != null) {
+      switch (intent.type) {
       case IntentType.setMemory:
         // 保存到核心记忆
         await MemoryService.addToCoreMemory(
@@ -868,6 +919,7 @@ class ChatController extends ChangeNotifier {
 
       case IntentType.normalChat:
         break;
+      }
     }
 
     // 单聊显示"正在输入"
@@ -878,6 +930,7 @@ class ChatController extends ChangeNotifier {
       role: role,
       userMessage: userMessage,
       isGroup: false,
+      imagePaths: imagePaths,
     );
 
     if (rawReply != null) {
@@ -889,9 +942,16 @@ class ChatController extends ChangeNotifier {
 
   // ========== 群聊处理 ==========
 
-  Future<void> _handleGroupChat(String chatId, String userMessage) async {
+  Future<void> _handleGroupChat(
+    String chatId,
+    String userMessage, {
+    List<String> imagePaths = const [],
+  }) async {
     final context = _contexts[chatId];
     if (context == null) return;
+
+    // 图片只归属用户本轮消息，AI↔AI 后续轮次不再携带
+    var pendingImagePaths = imagePaths;
 
     // 获取群聊设置
     final group = GroupChatService.getGroup(chatId);
@@ -939,7 +999,10 @@ class ChatController extends ChangeNotifier {
           role: role,
           userMessage: lastMessage,
           isGroup: true,
+          imagePaths: pendingImagePaths,
         );
+        // 图片已随首个应答角色发出，后续角色/轮次不再重复携带
+        pendingImagePaths = const [];
 
         if (rawReply != null) {
           // 群聊分段发送也不显示 typing
@@ -1207,6 +1270,7 @@ class ChatController extends ChangeNotifier {
     required Role role,
     required String userMessage,
     required bool isGroup,
+    List<String> imagePaths = const [],
   }) async {
     String? asyncPushError;
     final recentMessages = MessageStore.instance.getRecentRounds(
@@ -1227,10 +1291,27 @@ class ChatController extends ChangeNotifier {
     // 注入外挂 JSON 记录（后端优先使用自身配置，此处作为兜底透传）
     final attachedJson = role.attachedJsonContent;
 
+    // 图片（tool 模式聚合）：逐张上传得到 upload_id，随 ai_event 一并提交，
+    // 由服务端组装 vision_context 并把 recognize_image 工具交给聊天模型。
+    final visionUploadIds = <String>[];
+    for (final path in imagePaths) {
+      try {
+        final uploadId = await ApiService.uploadVisionImage(imagePath: path);
+        if (uploadId.isNotEmpty) visionUploadIds.add(uploadId);
+      } catch (e) {
+        debugPrint('ChatController: vision upload failed ($path): $e');
+      }
+    }
+
+    // 纯图片批次（无文本）给一个中性提示，避免空消息
+    final baseMessage = userMessage.trim().isEmpty && visionUploadIds.isNotEmpty
+        ? '用户发送了图片'
+        : userMessage;
+
     // 如果有朋友圈上下文，附加到消息后面
     final finalMessage = momentsContext != null
-        ? '$userMessage\n\n$momentsContext'
-        : userMessage;
+        ? '$baseMessage\n\n$momentsContext'
+        : baseMessage;
 
     // 优先尝试后端 API（异步任务机制）
     _ensureChatPushListener();
@@ -1245,6 +1326,7 @@ class ChatController extends ChangeNotifier {
         'core_memory': coreMemory,
         'moments_context': momentsContext,
         'attached_json': attachedJson,
+        if (visionUploadIds.isNotEmpty) 'vision_upload_ids': visionUploadIds,
       },
     );
 
