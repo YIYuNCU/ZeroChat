@@ -63,7 +63,12 @@ class _MomentsPageState extends State<MomentsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final posts = MomentsService.instance.posts;
+    // 归档角色的动态不在朋友圈显示（用户本人 authorId == 'me' 始终保留）。
+    final posts = MomentsService.instance.posts
+        .where((p) =>
+            p.authorId == 'me' ||
+            !(RoleService.getRoleById(p.authorId)?.archived ?? false))
+        .toList();
     final statusBarHeight = MediaQuery.of(context).padding.top;
 
     return Scaffold(

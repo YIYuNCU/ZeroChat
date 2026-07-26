@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/chat_info.dart';
+import '../core/message_parts.dart';
 import '../services/chat_list_service.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
@@ -96,6 +97,7 @@ class _ChatListPageState extends State<ChatListPage> {
   }
 
   /// 获取消息的显示文本（表情包和图片显示为 [图片]）
+  /// 首屏预览只渲染对话，不渲染动作/心理/数值等格式化片段。
   String _getDisplayText(Message message) {
     switch (message.type) {
       case MessageType.sticker:
@@ -103,15 +105,30 @@ class _ChatListPageState extends State<ChatListPage> {
       case MessageType.image:
         return '[图片]';
       default:
-        return message.content;
+        // 用户侧事实消息允许解析事实块；AI 侧仅取对话。
+        final isUserMessage = message.senderId == 'me';
+        final parts = MessageParts.parse(
+          message.content,
+          allowFact: isUserMessage,
+        );
+        final dialogue = parts.dialogue.trim();
+        if (dialogue.isNotEmpty) return dialogue;
+        // AI 侧无对话（纯动作等）时预览留空，避免泄露原始标签；
+        // 用户侧回退到事实/纯文本正文，避免丢失用户输入的展示。
+        if (isUserMessage) {
+          final fallback = parts.plainText.trim();
+          return fallback.isNotEmpty ? fallback : message.content;
+        }
+        return '';
     }
   }
 
   /// 获取有效的聊天列表（过滤掉孤立聊天）
   List<ChatInfo> _getValidChatList() {
     final allChats = ChatListService.instance.chatList;
+    // 归档角色不在首屏聊天列表中显示。
     final roleIds = RoleService.getAllRoles()
-        .where((r) => !RoleService.isToolRoleId(r.id))
+        .where((r) => !RoleService.isToolRoleId(r.id) && !r.archived)
         .map((r) => r.id)
         .toSet();
     final groupIds = GroupChatService.getAllGroups().map((g) => g.id).toSet();

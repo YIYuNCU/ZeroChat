@@ -548,6 +548,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                 onTap: _dismissInputControls,
                 child: StreamBuilder<List<Message>>(
                   stream: MessageStore.instance.watchMessages(widget.chatId),
+                  // 首帧直接使用本地记录渲染，避免出现"暂无消息"闪烁后再拉取重绘。
+                  initialData: MessageStore.instance.getMessages(widget.chatId),
                   builder: (context, snapshot) {
                     final messages = snapshot.data ?? [];
                     final totalMessagesCount = messages.length;
