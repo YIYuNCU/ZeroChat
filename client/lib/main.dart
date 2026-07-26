@@ -100,7 +100,14 @@ Future<void> _initServicesInBackground() async {
   );
   RealtimeSyncService.init();
   await MomentsScheduler.instance.init();
-  unawaited(SecureWebSocketClient.instance.ensureConnected());
+  unawaited(
+    SecureWebSocketClient.instance.ensureConnected().then((_) {
+      // 连接就绪后补齐上次会话遗留（弱网漏收/进程被杀）的异步聊天回复。
+      return ChatController.instance.startPushRecovery();
+    }).catchError((Object e) {
+      debugPrint('⚠️ startPushRecovery failed: $e');
+    }),
+  );
 
   // ===== 网络同步（静默后台，不阻塞任何 UI） =====
   unawaited(_syncWithBackendInBackground());

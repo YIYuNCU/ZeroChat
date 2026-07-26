@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../core/chat_controller.dart';
 import '../core/message_store.dart';
 import 'moments_service.dart';
 import 'role_service.dart';
@@ -96,6 +97,10 @@ class RealtimeSyncService {
       // 再做快照对比，避免快照把未同步消息判为差异并覆盖丢弃。
       await MessageStore.instance.drainOutbox();
       await MessageStore.instance.syncFromBackendSnapshot();
+      // 快照对账之后再补齐弱网/后台/重启期间生成成功却漏收的异步聊天回复：
+      // 凭持久化的 pending task_id 向服务端恢复缓存推送并渲染。放在快照之后，
+      // 避免刚渲染、尚未回传服务端的 AI 分段被快照合并判为差异而覆盖丢弃。
+      await ChatController.instance.recoverPendingChatTasks();
       await TaskService.fetchFromBackend();
       await MomentsService.instance.fetchFromBackend();
       debugPrint('RealtimeSyncService: full resync completed');

@@ -98,6 +98,7 @@ app = FastAPI(
 configure_push_hub(
     encryption_secret=CONFIG.get("encryption_secret", ""),
     logger=logger,
+    cache_path=RUNTIME_DIR / "chat_push_cache.json",
 )
 
 app.add_middleware(RequestLoggingMiddleware, logger=logger)

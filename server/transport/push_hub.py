@@ -1,5 +1,7 @@
 import asyncio
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import WebSocket
@@ -16,20 +18,83 @@ _logger = None
 # Covers chat_response (keyed by task_id) plus proactive/task messages
 # (keyed by message_id) so clients that were offline/backgrounded can recover
 # pushes that arrived while disconnected.
+#
+# Persisted to disk so recovery survives a server restart: an async chat reply
+# that was generated but never acknowledged by the client would otherwise be
+# lost the moment the process recycled. Keyed cache entries are flushed to
+# _CACHE_FILE on every mutation and reloaded on startup.
 _CHAT_PUSH_CACHE: dict[str, tuple[datetime, dict]] = {}
-_CHAT_PUSH_CACHE_TTL = 1800  # seconds — cover longer offline/background windows
-_CHAT_PUSH_CACHE_MAX = 500
+_CHAT_PUSH_CACHE_TTL = 86400  # seconds (24h) — survive long offline/restart windows
+_CHAT_PUSH_CACHE_MAX = 2000
 
 # Event types whose payload carries a message_id and should be cached for recovery
 _MESSAGE_PUSH_EVENTS = ("task_message", "proactive_message")
 
+# On-disk backing file for the recovery cache (set via configure_push_hub).
+_CACHE_FILE: Path | None = None
 
-def configure_push_hub(*, encryption_secret: str | None = None, logger=None):
-    global _encryption_secret, _logger
+
+def _load_cache_from_disk():
+    """Load the persisted recovery cache on startup. Best-effort."""
+    if _CACHE_FILE is None or not _CACHE_FILE.exists():
+        return
+    try:
+        raw = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        if _logger is not None:
+            _logger.warning(f"push cache load failed: {exc}")
+        return
+    if not isinstance(raw, dict):
+        return
+    now = datetime.now()
+    for key, entry in raw.items():
+        try:
+            ts = datetime.fromisoformat(entry["ts"])
+            data = entry["data"]
+        except Exception:
+            continue
+        if (now - ts).total_seconds() > _CHAT_PUSH_CACHE_TTL:
+            continue
+        _CHAT_PUSH_CACHE[str(key)] = (ts, data)
+    if _logger is not None:
+        _logger.info(f"push cache loaded: {len(_CHAT_PUSH_CACHE)} entries")
+
+
+def _save_cache_to_disk():
+    """Flush the recovery cache to disk. Best-effort, synchronous atomic write."""
+    if _CACHE_FILE is None:
+        return
+    try:
+        serializable = {
+            key: {"ts": ts.isoformat(), "data": data}
+            for key, (ts, data) in _CHAT_PUSH_CACHE.items()
+        }
+        _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CACHE_FILE.with_suffix(_CACHE_FILE.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(serializable, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tmp.replace(_CACHE_FILE)
+    except Exception as exc:
+        if _logger is not None:
+            _logger.warning(f"push cache save failed: {exc}")
+
+
+def configure_push_hub(
+    *,
+    encryption_secret: str | None = None,
+    logger=None,
+    cache_path: Path | str | None = None,
+):
+    global _encryption_secret, _logger, _CACHE_FILE
     secret = (encryption_secret or "").strip()
     if secret:
         _encryption_secret = secret
     _logger = logger
+    if cache_path is not None:
+        _CACHE_FILE = Path(cache_path)
+        _load_cache_from_disk()
 
 
 async def register_client(websocket: WebSocket):
@@ -88,6 +153,7 @@ async def publish_server_push(event_type: str, payload: dict[str, Any] | None = 
     if cache_key:
         _prune_chat_push_cache()
         _CHAT_PUSH_CACHE[cache_key] = (datetime.now(), data)
+        _save_cache_to_disk()
 
     async with _clients_lock:
         clients = list(_clients)

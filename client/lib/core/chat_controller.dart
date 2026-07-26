@@ -24,6 +24,7 @@ import '../services/sticker_service.dart';
 import '../services/secure_websocket_client.dart';
 import '../services/task_service.dart';
 import '../services/emoji_service.dart';
+import '../services/storage_service.dart';
 
 class _PendingTextMessage {
   final String messageId;
@@ -56,8 +57,24 @@ class ChatController extends ChangeNotifier {
   /// "正在输入"状态回调（按 chatId）- 仅用于单聊
   final Map<String, void Function(bool)> _typingCallbacks = {};
 
-  /// 异步聊天任务等待（按 task_id）
+  /// 异步聊天任务等待（按 task_id）—— 仅内存，用于当次请求的活跃 await 关联。
   final Map<String, Completer<Map<String, dynamic>>> _pendingChatTasks = {};
+
+  /// 已渲染的任务 id 集合（内存镜像，落盘见 [_kRenderedTasksKey]）。
+  /// 用于跨"实时推送 / 超时恢复 / 重启恢复"多路径去重，避免同一回复重复渲染。
+  final Set<String> _renderedTaskIds = <String>{};
+  bool _persistedStateLoaded = false;
+
+  /// 持久化待处理任务的存储键：task_id -> 渲染所需的上下文快照。
+  /// 使 pending 任务在 App 重启后仍可恢复（内存 completer 会丢失）。
+  static const String _kPendingTasksKey = 'pending_chat_tasks_v1';
+
+  /// 已渲染任务 id 的存储键（FIFO 截断，防止无限增长）。
+  static const String _kRenderedTasksKey = 'rendered_chat_tasks_v1';
+  static const int _kRenderedTasksMax = 800;
+
+  /// 恢复去重：避免并发（重连 + 前台恢复 + 启动）触发多次恢复请求。
+  bool _recoveringPersistedTasks = false;
 
   /// 异步聊天任务推送订阅
   StreamSubscription<Map<String, dynamic>>? _chatPushSubscription;
@@ -72,6 +89,14 @@ class ChatController extends ChangeNotifier {
   static Future<void> init() async {
     await MessageStore.init();
     debugPrint('ChatController initialized');
+  }
+
+  /// 启动异步聊天回复的恢复机制：注册推送监听器并做一次补偿恢复。
+  /// 在 WebSocket 就绪后调用，用于补齐上次会话遗留（弱网漏收/进程被杀）的回复。
+  Future<void> startPushRecovery() async {
+    _ensureChatPushListener();
+    await _ensurePersistedStateLoaded();
+    await recoverPendingChatTasks();
   }
 
   // ========== 公开接口 ==========
@@ -957,35 +982,54 @@ class ChatController extends ChangeNotifier {
             if (taskId.isEmpty) return;
 
             final completer = _pendingChatTasks.remove(taskId);
-            if (completer == null || completer.isCompleted) return;
+            if (completer != null && !completer.isCompleted) {
+              // 活跃 await 命中：交回 _callAI 走正常渲染路径。
+              completer.complete(payload);
+              return;
+            }
 
-            completer.complete(payload);
+            // 无活跃 await（已超时移除，或 App 重启后 completer 丢失）：
+            // 该推送若被丢弃则回复永久丢失，这里直接落地渲染。
+            unawaited(_deliverRecoveredReply(taskId, payload));
           },
           onError: (Object error, StackTrace stackTrace) {
             debugPrint('ChatController: chat push stream error: $error');
           },
         );
 
-    // Register reconnection recovery
+    // 重连后主动向服务端补偿拉取错过的推送。
     SecureWebSocketClient.instance.onReconnected = () {
-      unawaited(_recoverPendingChatTasks());
+      unawaited(recoverPendingChatTasks());
     };
 
     debugPrint('ChatController: chat push listener initialized');
   }
 
-  /// Recover missed chat pushes after WebSocket reconnection.
-  /// The server caches recent chat_response pushes; on reconnect we query
-  /// for any pushes that arrived while we were disconnected.
-  Future<void> _recoverPendingChatTasks() async {
-    if (_pendingChatTasks.isEmpty) return;
-
-    final taskIds = _pendingChatTasks.keys.toList();
-    debugPrint(
-      'ChatController: recovering ${taskIds.length} pending chat tasks',
-    );
-
+  /// 恢复所有待处理的异步聊天任务。
+  ///
+  /// 在 App 启动、WebSocket 重连、前台恢复时调用。先加载持久化的 pending 任务，
+  /// 再向服务端 `recover_chat_push` 查询缓存的 chat_response 推送；命中即渲染。
+  /// 服务端缓存已持久化（跨重启，TTL 24h），因此弱网/重启期间生成成功却漏收的
+  /// 回复可在此补齐。
+  Future<void> recoverPendingChatTasks() async {
+    if (_recoveringPersistedTasks) return;
+    _recoveringPersistedTasks = true;
     try {
+      await _ensurePersistedStateLoaded();
+
+      // 合并内存中活跃 await 与持久化 pending 的 task_id。
+      final pendingMap = _loadPersistedPendingTasks();
+      final taskIds = <String>{
+        ..._pendingChatTasks.keys,
+        ...pendingMap.keys,
+      }.where((id) => id.isNotEmpty && !_renderedTaskIds.contains(id)).toList();
+
+      if (taskIds.isEmpty) return;
+
+      debugPrint(
+        'ChatController: recovering ${taskIds.length} pending chat tasks',
+      );
+
       final result = await SecureWebSocketClient.instance.request(
         'recover_chat_push',
         {'task_ids': taskIds},
@@ -993,23 +1037,169 @@ class ChatController extends ChangeNotifier {
       );
 
       final recovered = result['recovered'];
-      if (recovered is List) {
-        for (final item in recovered) {
-          if (item is! Map) continue;
-          final taskId = item['task_id']?.toString() ?? '';
-          final pushPayload = item['payload'];
-          if (taskId.isEmpty || pushPayload is! Map) continue;
+      if (recovered is! List) return;
 
-          final completer = _pendingChatTasks.remove(taskId);
-          if (completer == null || completer.isCompleted) continue;
+      for (final item in recovered) {
+        if (item is! Map) continue;
+        final taskId = item['task_id']?.toString() ?? '';
+        final pushPayload = item['payload'];
+        if (taskId.isEmpty || pushPayload is! Map) continue;
 
-          completer.complete(Map<String, dynamic>.from(pushPayload));
-          debugPrint('ChatController: recovered push for task $taskId');
+        final payload = Map<String, dynamic>.from(pushPayload);
+        final completer = _pendingChatTasks.remove(taskId);
+        if (completer != null && !completer.isCompleted) {
+          // 活跃 await 命中：走正常渲染路径。
+          completer.complete(payload);
+          continue;
         }
+        // 无活跃 await：直接落地渲染（重启/超时场景）。
+        await _deliverRecoveredReply(taskId, payload);
       }
     } catch (e) {
       debugPrint('ChatController: recover missed pushes failed: $e');
+    } finally {
+      _recoveringPersistedTasks = false;
     }
+  }
+
+  /// 将一条恢复到的回复直接渲染到会话（用于无活跃 await 的补偿路径）。
+  /// 通过 [_renderedTaskIds] 去重，保证同一 task 只渲染一次。
+  Future<void> _deliverRecoveredReply(
+    String taskId,
+    Map<String, dynamic> payload,
+  ) async {
+    if (taskId.isEmpty) return;
+    await _ensurePersistedStateLoaded();
+    if (_renderedTaskIds.contains(taskId)) return;
+    // 先占位（同步，await 之前）防止并发补偿路径重复渲染。
+    _renderedTaskIds.add(taskId);
+
+    final record = _loadPersistedPendingTasks()[taskId];
+    if (record == null) {
+      // 没有渲染所需的上下文（如老版本遗留任务），无法落地，仅记为已处理。
+      await _persistRenderedTaskIds();
+      return;
+    }
+
+    final chatId = record['chat_id']?.toString() ?? '';
+    final roleId = record['role_id']?.toString() ?? '';
+    final isGroup = record['is_group'] == true;
+    final userMessage = record['user_message']?.toString() ?? '';
+    final attachedJson = record['attached_json']?.toString();
+
+    try {
+      final success = payload['success'] == true;
+      final content = payload['content']?.toString();
+      if (!success || content == null || chatId.isEmpty || roleId.isEmpty) {
+        // 终态失败或上下文缺失：丢弃 pending，不渲染。
+        await _removePersistedPendingTask(taskId);
+        await _persistRenderedTaskIds();
+        return;
+      }
+
+      final metadata = payload['metadata'] is Map
+          ? Map<String, dynamic>.from(payload['metadata'])
+          : null;
+      final noReply = metadata?['no_reply'] == true ||
+          MessageParts.isNoReplyDirective(content);
+      final requestId = metadata?['request_id']?.toString().trim();
+
+      await MemoryService.appendJsonMemoryPair(
+        roleId: roleId,
+        userContent: userMessage,
+        assistantContent: noReply ? null : content,
+        requestId: (requestId != null && requestId.isNotEmpty) ? requestId : null,
+        jsonMemory: (attachedJson != null && attachedJson.isNotEmpty)
+            ? attachedJson
+            : null,
+      );
+
+      final role = RoleService.getRoleById(roleId);
+      final showNoReply = role?.showNoReply ?? false;
+      if (!(noReply && !showNoReply)) {
+        await MessageStore.instance.ensureLoaded(chatId);
+        await _sendSegmentsQueued(chatId, roleId, content, isGroup: isGroup);
+        debugPrint('ChatController: recovered reply rendered for task $taskId');
+      }
+
+      await _removePersistedPendingTask(taskId);
+      await _persistRenderedTaskIds();
+    } catch (e) {
+      // 渲染失败：撤销占位，保留 pending，留待下次恢复重试。
+      _renderedTaskIds.remove(taskId);
+      debugPrint('ChatController: deliver recovered reply failed ($taskId): $e');
+    }
+  }
+
+  // ========== 待处理任务持久化 ==========
+
+  Future<void> _ensurePersistedStateLoaded() async {
+    if (_persistedStateLoaded) return;
+    final rendered = StorageService.getStringList(_kRenderedTasksKey);
+    if (rendered != null) {
+      _renderedTaskIds.addAll(rendered);
+    }
+    _persistedStateLoaded = true;
+  }
+
+  Map<String, dynamic> _loadPersistedPendingTasks() {
+    return StorageService.getJson(_kPendingTasksKey) ?? <String, dynamic>{};
+  }
+
+  Future<void> _savePersistedPendingTask(
+    String taskId, {
+    required String chatId,
+    required String roleId,
+    required bool isGroup,
+    required String userMessage,
+    String? attachedJson,
+  }) async {
+    final map = _loadPersistedPendingTasks();
+    map[taskId] = {
+      'chat_id': chatId,
+      'role_id': roleId,
+      'is_group': isGroup,
+      'user_message': userMessage,
+      'attached_json': attachedJson,
+      'created_at': DateTime.now().toIso8601String(),
+    };
+    await StorageService.setJson(
+      _kPendingTasksKey,
+      Map<String, dynamic>.from(map),
+    );
+  }
+
+  Future<void> _removePersistedPendingTask(String taskId) async {
+    final map = _loadPersistedPendingTasks();
+    if (map.remove(taskId) != null) {
+      await StorageService.setJson(
+        _kPendingTasksKey,
+        Map<String, dynamic>.from(map),
+      );
+    }
+  }
+
+  Future<void> _markTaskRendered(String taskId) async {
+    if (taskId.isEmpty) return;
+    await _ensurePersistedStateLoaded();
+    _renderedTaskIds.add(taskId);
+    await _persistRenderedTaskIds();
+    await _removePersistedPendingTask(taskId);
+  }
+
+  Future<void> _persistRenderedTaskIds() async {
+    // FIFO 截断，避免无限增长。
+    if (_renderedTaskIds.length > _kRenderedTasksMax) {
+      final excess = _renderedTaskIds.length - _kRenderedTasksMax;
+      final trimmed = _renderedTaskIds.skip(excess).toSet();
+      _renderedTaskIds
+        ..clear()
+        ..addAll(trimmed);
+    }
+    await StorageService.setStringList(
+      _kRenderedTasksKey,
+      _renderedTaskIds.toList(),
+    );
   }
 
   Future<String?> _callAI({
@@ -1064,6 +1254,20 @@ class ChatController extends ChangeNotifier {
       final completer = Completer<Map<String, dynamic>>();
       _pendingChatTasks[taskId] = completer;
 
+      // 持久化 pending 任务上下文：即使 App 在等待期间被杀死/重启，
+      // 恢复路径仍可凭 task_id 从服务端缓存补齐并渲染这条回复。
+      await _ensurePersistedStateLoaded();
+      await _savePersistedPendingTask(
+        taskId,
+        chatId: chatId,
+        roleId: role.id,
+        isGroup: isGroup,
+        userMessage: userMessage,
+        attachedJson: (attachedJson != null && attachedJson.isNotEmpty)
+            ? attachedJson
+            : null,
+      );
+
       try {
         final pushPayload = await completer.future.timeout(
           const Duration(seconds: 120),
@@ -1083,6 +1287,8 @@ class ChatController extends ChangeNotifier {
             : null;
 
         if (success && content != null) {
+          // 由本次 await 负责渲染：立刻标记已渲染，避免并发恢复路径重复落地。
+          _renderedTaskIds.add(taskId);
           final noReply = metadata?['no_reply'] == true ||
               MessageParts.isNoReplyDirective(content);
           debugPrint('ChatController: AI response via backend (async push)');
@@ -1101,10 +1307,13 @@ class ChatController extends ChangeNotifier {
           if (metadata != null) {
             debugPrint('ChatController: Metadata from async push: $metadata');
           }
+          await _markTaskRendered(taskId);
           if (noReply && !role.showNoReply) return null;
           return content;
         }
 
+        // 终态失败：不再需要恢复，清除持久化 pending。
+        await _removePersistedPendingTask(taskId);
         asyncPushError = pushPayload['error']?.toString();
         debugPrint('ChatController: Async chat failed: $asyncPushError');
       } catch (e) {
@@ -1129,7 +1338,10 @@ class ChatController extends ChangeNotifier {
               if (pushPayload is Map) {
                 final success = pushPayload['success'] == true;
                 final content = pushPayload['content']?.toString();
-                if (success && content != null) {
+                // 若期间到达的迟推送已由监听器落地渲染，则此处不再重复。
+                if (success && content != null &&
+                    !_renderedTaskIds.contains(taskId)) {
+                  _renderedTaskIds.add(taskId);
                   debugPrint('ChatController: AI response via recovery push');
                   final metadata = pushPayload['metadata'] is Map
                       ? Map<String, dynamic>.from(pushPayload['metadata'])
@@ -1149,6 +1361,7 @@ class ChatController extends ChangeNotifier {
                         ? attachedJson
                         : null,
                   );
+                  await _markTaskRendered(taskId);
                   if (noReply && !role.showNoReply) return null;
                   return content;
                 }
@@ -1158,6 +1371,8 @@ class ChatController extends ChangeNotifier {
             debugPrint('ChatController: push recovery failed: $recoveryError');
           }
         }
+        // 超时且即时恢复未命中：保留持久化 pending，留待后续
+        // 重连/前台恢复/重启时经 recoverPendingChatTasks 补齐渲染。
       }
     }
 
