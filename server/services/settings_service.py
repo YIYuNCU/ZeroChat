@@ -125,7 +125,7 @@ def get_vision_config() -> Dict[str, Any]:
     """获取图像识别配置（全角色）"""
     settings = load_settings()
     mode = str(settings.get("vision_mode", "standalone") or "standalone").strip().lower()
-    if mode not in {"standalone", "pre_model"}:
+    if mode not in {"standalone", "pre_model", "tool"}:
         mode = "standalone"
     return {
         "enabled": bool(settings.get("vision_enabled", False)),

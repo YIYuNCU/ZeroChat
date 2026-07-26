@@ -79,7 +79,7 @@ async def update_settings(update: SettingsUpdate):
         updates["vision_model"] = update.vision_model
     if update.vision_mode is not None:
         mode = update.vision_mode.strip().lower()
-        updates["vision_mode"] = mode if mode in {"standalone", "pre_model"} else "standalone"
+        updates["vision_mode"] = mode if mode in {"standalone", "pre_model", "tool"} else "standalone"
     if update.host is not None:
         updates["host"] = update.host
     if update.port is not None:

@@ -51,33 +51,6 @@ _SCHEDULE_TASK_TOOL = [{
 }]
 
 """
-主动回复开关工具：允许 AI 自主开启或关闭主动回复功能。
-对所有场景开放。
-"""
-_SET_PROACTIVE_TOOL = [{
-    "type": "function",
-    "function": {
-        "name": "set_proactive",
-        "description": "开启或关闭主动回复功能。当你需要休息、不想被消息打扰时可以关闭它；当你想重新开始主动联系用户时可以开启它。只有在你确实想改变主动回复状态时才调用此工具。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "enabled": {
-                    "type": "boolean",
-                    "description": "true 开启主动回复，false 关闭主动回复"
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "开启或关闭的原因说明"
-                }
-            },
-            "required": ["enabled"]
-        }
-    }
-}]
-
-
-"""
 屏蔽用户工具：允许 AI 屏蔽第三方用户的骚扰消息。
 仅对 OneBot 第三方用户消息场景开放。
 """
@@ -149,43 +122,6 @@ async def execute_schedule_task(role_data: Dict, message: str, trigger_time: str
         return f"定时任务已创建：在 {trigger_time} 提醒「{message}」{repeat_hint}"
     except Exception as e:
         return f"创建失败：{e}"
-
-
-async def execute_set_proactive(role_data: Dict, enabled: bool, reason: str = "") -> str:
-    """开启/关闭主动回复，返回结果描述"""
-    role_id = role_data.get("id", "")
-    profile_file = DATA_DIR / "roles" / role_id / "profile.json"
-
-    try:
-        with open(profile_file, "r", encoding="utf-8") as f:
-            role_content = json.load(f)
-
-        # 服务端调度器 proactive_config
-        proactive_config = role_content.setdefault("proactive_config", {})
-        proactive_config["enabled"] = enabled
-
-        # OneBot 主动回复配置（全部会话）
-        onebot_config = role_content.get("onebot_config") or {}
-        scenes = onebot_config.setdefault("proactive_config", {})
-        for conv_key in scenes:
-            scenes[conv_key]["enabled"] = enabled
-
-        with open(profile_file, "w", encoding="utf-8") as f:
-            json.dump(role_content, f, ensure_ascii=False, indent=2)
-
-        from services import scheduler_service
-        if enabled:
-            scheduler_service.schedule_proactive_for_role(role_id, reset=True)
-        else:
-            scheduler_service.unschedule_proactive_for_role(role_id)
-
-        action = "开启" if enabled else "关闭"
-        reason_txt = f"，原因：{reason}" if reason else ""
-        logger.info(f"AI主动{action}主动回复: role={role_id}{reason_txt}")
-        return f"已{action}主动回复功能{reason_txt}"
-    except Exception as e:
-        logger.error(f"主动回复设置失败 role={role_id}: {e}")
-        return f"操作失败：{e}"
 
 
 async def execute_block_user(role_data: Dict, user_id: str, reason: str) -> str:
@@ -354,6 +290,80 @@ _WRITE_MEMORY_TOOL = [{
         }
     }
 }]
+
+
+# ========== 工具：识图 ==========
+
+"""
+识图工具：允许 AI 在用户发送图片时，自主决定是否识别图片、并指定识别的重点细节。
+仅在「工具模式」识图（vision_mode=tool）且本次消息附带图片时对聊天模型开放。
+"""
+_RECOGNIZE_IMAGE_TOOL = [{
+    "type": "function",
+    "function": {
+        "name": "recognize_image",
+        "description": "识别并理解用户发来的图片内容。当用户本次消息附带了图片、且你需要了解图片里有什么才能更好地回复时，调用此工具。可以通过 focus 说明你想重点关注的细节（例如「图片里的文字」「人物的表情」「场景氛围」）。如果图片与对话无关或无需查看即可自然回复，则不必调用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "description": "你想重点识别的细节要求，用自然语言描述，例如「重点识别图中的文字内容」「描述人物的穿着和表情」。留空则做整体描述。"
+                },
+                "image_index": {
+                    "type": "integer",
+                    "description": "要识别第几张图片（从 0 开始）。通常只有一张图片时省略即可，默认 0。",
+                    "default": 0
+                }
+            },
+            "required": []
+        }
+    }
+}]
+
+
+async def execute_recognize_image(
+    image_data_urls: List[str],
+    focus: str = "",
+    image_index: int = 0,
+) -> str:
+    """识别指定图片的内容，返回识别文本。失败/无配置时返回友好错误串（不抛异常）。
+
+    image_data_urls: 本次消息携带的图片 data URL 列表（为将来多图预留，当前通常只有一张）。
+    """
+    from services import vision_service
+
+    if not image_data_urls:
+        return "识图失败：本次没有可识别的图片"
+
+    # 越界回退到第 0 张
+    idx = image_index if isinstance(image_index, int) else 0
+    if idx < 0 or idx >= len(image_data_urls):
+        idx = 0
+    image_data_url = image_data_urls[idx]
+
+    vision_cfg = vision_service.resolve_vision_config()
+    api_url = vision_cfg.get("api_url", "")
+    api_key = vision_cfg.get("api_key", "")
+    model = vision_cfg.get("model", "gpt-4o")
+    if not api_url or not api_key:
+        return "识图失败：未配置识图模型（Vision API）"
+
+    prompt = (focus or "").strip() or "请描述这张图片的关键内容"
+    messages = vision_service.build_vision_messages(image_data_url, prompt)
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": 1024,
+    }
+    try:
+        result = await vision_service.call_vision_api(api_url, api_key, body)
+        if not result:
+            return "识图失败：识图模型未返回内容，请稍后重试"
+        return result
+    except Exception as e:
+        logger.error(f"识图工具执行失败: {e}")
+        return f"识图失败：{e}"
 
 
 async def execute_write_memory(

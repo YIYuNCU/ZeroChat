@@ -1069,8 +1069,12 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               reload();
             }
 
-            final cumulative =
-                (stats?['cumulative'] as Map?)?.cast<String, dynamic>() ?? {};
+            final byModel =
+                (stats?['by_model'] as List?)
+                    ?.whereType<Map>()
+                    .map((e) => e.cast<String, dynamic>())
+                    .toList() ??
+                <Map<String, dynamic>>[];
             final last = (stats?['last'] as Map?)?.cast<String, dynamic>();
 
             return DraggableScrollableSheet(
@@ -1121,7 +1125,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                           : ListView(
                               controller: scrollController,
                               padding: const EdgeInsets.all(16),
-                              children: _buildUsageContent(cumulative, last),
+                              children: _buildUsageContent(byModel, last),
                             ),
                     ),
                   ],
@@ -1135,7 +1139,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   List<Widget> _buildUsageContent(
-    Map<String, dynamic> cumulative,
+    List<Map<String, dynamic>> byModel,
     Map<String, dynamic>? last,
   ) {
     int asInt(Map<String, dynamic> m, String k) {
@@ -1144,26 +1148,54 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       return int.tryParse('$v') ?? 0;
     }
 
-    final hit = asInt(cumulative, 'cache_hit_tokens');
-    final miss = asInt(cumulative, 'cache_miss_tokens');
-    final hitRate = (hit + miss) > 0
-        ? '${(hit * 100 / (hit + miss)).toStringAsFixed(1)}%'
-        : '—';
+    // 平均值：字段 / 请求次数，向上四舍五入取整；次数为 0 时显示 —
+    String avg(Map<String, dynamic> m, String field) {
+      final count = asInt(m, 'request_count');
+      if (count <= 0) return '—';
+      return '${(asInt(m, field) / count).round()}';
+    }
 
-    final widgets = <Widget>[
-      const Text(
-        '累计',
-        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-      ),
-      const SizedBox(height: 8),
-      _usageRow('请求次数', '${asInt(cumulative, 'request_count')}'),
-      _usageRow('输入 tokens', '${asInt(cumulative, 'prompt_tokens')}'),
-      _usageRow('输出 tokens', '${asInt(cumulative, 'completion_tokens')}'),
-      _usageRow('总 tokens', '${asInt(cumulative, 'total_tokens')}'),
-      _usageRow('缓存命中 tokens', '$hit'),
-      _usageRow('缓存未命中 tokens', '$miss'),
-      _usageRow('缓存命中率', hitRate),
-    ];
+    final widgets = <Widget>[];
+
+    if (byModel.isEmpty) {
+      widgets.add(
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: Text(
+              '暂无用量数据',
+              style: TextStyle(fontSize: 14, color: Color(0xFF888888)),
+            ),
+          ),
+        ),
+      );
+    }
+
+    for (var i = 0; i < byModel.length; i++) {
+      final m = byModel[i];
+      final model = '${m['model'] ?? ''}'.trim();
+      final hit = asInt(m, 'cache_hit_tokens');
+      final miss = asInt(m, 'cache_miss_tokens');
+      final hitRate = (hit + miss) > 0
+          ? '${(hit * 100 / (hit + miss)).toStringAsFixed(1)}%'
+          : '—';
+
+      if (i > 0) widgets.add(const SizedBox(height: 20));
+      widgets.addAll([
+        Text(
+          model.isEmpty ? '未知' : model,
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 8),
+        _usageRow('请求次数', '${asInt(m, 'request_count')}'),
+        _usageRow('总 tokens', '${asInt(m, 'total_tokens')}'),
+        _usageRow('缓存命中率', hitRate),
+        _usageRow('平均总 tokens', avg(m, 'total_tokens')),
+        _usageRow('平均输入 tokens', avg(m, 'prompt_tokens')),
+        _usageRow('平均输出 tokens', avg(m, 'completion_tokens')),
+        _usageRow('平均缓存 tokens', avg(m, 'cache_hit_tokens')),
+      ]);
+    }
 
     if (last != null) {
       widgets.addAll([

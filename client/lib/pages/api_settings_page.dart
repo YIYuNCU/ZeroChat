@@ -415,7 +415,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
           ),
           Expanded(
             child: DropdownButtonFormField<String>(
-              value: _visionMode == 'pre_model' ? 'pre_model' : 'standalone',
+              value: const {'standalone', 'pre_model', 'tool'}.contains(_visionMode)
+                  ? _visionMode
+                  : 'standalone',
               decoration: const InputDecoration(
                 border: InputBorder.none,
                 isDense: true,
@@ -428,6 +430,10 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                 DropdownMenuItem(
                   value: 'pre_model',
                   child: Text('前置模型（识图后交给聊天模型）', style: TextStyle(fontSize: 14)),
+                ),
+                DropdownMenuItem(
+                  value: 'tool',
+                  child: Text('工具模式（AI 自主决定识图）', style: TextStyle(fontSize: 14)),
                 ),
               ],
               onChanged: (value) {

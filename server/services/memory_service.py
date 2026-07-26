@@ -1351,6 +1351,15 @@ _USAGE_TOTAL_KEYS = {
     "request_count": "usage_request_count",
 }
 
+# 分模型累计的 token 字段（不含 request_count，后者单独累加）
+_PER_MODEL_TOKEN_FIELDS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "cache_hit_tokens",
+    "cache_miss_tokens",
+)
+
 def _parse_usage_fields(usage: Dict[str, Any]) -> Dict[str, int]:
     """从 API 返回的 usage 中兼容解析 token 与缓存命中/未命中量。
 
@@ -1411,6 +1420,30 @@ def record_usage(role_id: str, usage: Optional[Dict[str, Any]], model: Optional[
                 count_int = 0
             _set_meta(conn, _USAGE_TOTAL_KEYS["request_count"], str(count_int + 1))
 
+            # 按模型累计（用量最大排前）
+            model_key = (model or "").strip() or "未知"
+            by_model_raw = _get_meta(conn, "usage_by_model_json", None)
+            try:
+                by_model = json.loads(by_model_raw) if by_model_raw else {}
+                if not isinstance(by_model, dict):
+                    by_model = {}
+            except Exception:
+                by_model = {}
+            bucket = by_model.get(model_key)
+            if not isinstance(bucket, dict):
+                bucket = {}
+            for field in _PER_MODEL_TOKEN_FIELDS:
+                try:
+                    bucket[field] = int(bucket.get(field, 0)) + parsed[field]
+                except (TypeError, ValueError):
+                    bucket[field] = parsed[field]
+            try:
+                bucket["request_count"] = int(bucket.get("request_count", 0)) + 1
+            except (TypeError, ValueError):
+                bucket["request_count"] = 1
+            by_model[model_key] = bucket
+            _set_meta(conn, "usage_by_model_json", json.dumps(by_model, ensure_ascii=False))
+
             last = dict(parsed)
             last["model"] = model or ""
             last["timestamp"] = datetime.now().isoformat()
@@ -1419,20 +1452,15 @@ def record_usage(role_id: str, usage: Optional[Dict[str, Any]], model: Optional[
         logger.warning(f"record_usage failed for role={role_id}: {exc}")
 
 def get_usage_stats(role_id: str) -> Dict[str, Any]:
-    """读取某角色的累计用量与最近一次用量。"""
-    empty_cumulative = {field: 0 for field in _USAGE_TOTAL_KEYS}
+    """读取某角色的分模型用量与最近一次用量。
+
+    返回 {"by_model": [ {model, prompt_tokens, ..., request_count}, ... ], "last": {...} | None}，
+    列表按 total_tokens 降序（用量最大的排前面）。
+    """
     if is_tool_role_id(role_id):
-        return {"cumulative": empty_cumulative, "last": None}
+        return {"by_model": [], "last": None}
     try:
         with _get_connection(role_id) as conn:
-            cumulative: Dict[str, int] = {}
-            for field, key in _USAGE_TOTAL_KEYS.items():
-                value = _get_meta(conn, key, "0")
-                try:
-                    cumulative[field] = int(value)
-                except (TypeError, ValueError):
-                    cumulative[field] = 0
-
             last_raw = _get_meta(conn, "usage_last_json", None)
             last = None
             if last_raw:
@@ -1440,10 +1468,52 @@ def get_usage_stats(role_id: str) -> Dict[str, Any]:
                     last = json.loads(last_raw)
                 except Exception:
                     last = None
-            return {"cumulative": cumulative, "last": last}
+
+            by_model_raw = _get_meta(conn, "usage_by_model_json", None)
+            by_model_map: Dict[str, Any] = {}
+            if by_model_raw:
+                try:
+                    parsed_map = json.loads(by_model_raw)
+                    if isinstance(parsed_map, dict):
+                        by_model_map = parsed_map
+                except Exception:
+                    by_model_map = {}
+
+            # 迁移兼容：无分模型数据但存在旧扁平累计，合成一个历史桶
+            if not by_model_map:
+                legacy = {}
+                for field, key in _USAGE_TOTAL_KEYS.items():
+                    try:
+                        legacy[field] = int(_get_meta(conn, key, "0"))
+                    except (TypeError, ValueError):
+                        legacy[field] = 0
+                if legacy.get("total_tokens", 0) > 0 or legacy.get("request_count", 0) > 0:
+                    model_name = ""
+                    if isinstance(last, dict):
+                        model_name = str(last.get("model") or "").strip()
+                    by_model_map[model_name or "（历史合计）"] = legacy
+
+            by_model: List[Dict[str, Any]] = []
+            for model_name, bucket in by_model_map.items():
+                if not isinstance(bucket, dict):
+                    continue
+                entry: Dict[str, Any] = {"model": model_name}
+                for field in _PER_MODEL_TOKEN_FIELDS:
+                    try:
+                        entry[field] = int(bucket.get(field, 0))
+                    except (TypeError, ValueError):
+                        entry[field] = 0
+                try:
+                    entry["request_count"] = int(bucket.get("request_count", 0))
+                except (TypeError, ValueError):
+                    entry["request_count"] = 0
+                by_model.append(entry)
+
+            by_model.sort(key=lambda e: e.get("total_tokens", 0), reverse=True)
+            return {"by_model": by_model, "last": last}
     except Exception as exc:
         logger.warning(f"get_usage_stats failed for role={role_id}: {exc}")
-        return {"cumulative": empty_cumulative, "last": None}
+        return {"by_model": [], "last": None}
 
 def reset_usage_stats(role_id: str) -> bool:
     """清零某角色的用量统计。"""
@@ -1454,6 +1524,7 @@ def reset_usage_stats(role_id: str) -> bool:
             for key in _USAGE_TOTAL_KEYS.values():
                 _set_meta(conn, key, "0")
             _set_meta(conn, "usage_last_json", None)
+            _set_meta(conn, "usage_by_model_json", None)
         return True
     except Exception as exc:
         logger.warning(f"reset_usage_stats failed for role={role_id}: {exc}")

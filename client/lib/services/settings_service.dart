@@ -646,7 +646,9 @@ class SettingsService extends ChangeNotifier {
           : (server['vision_model']?.toString() ?? _visionModel).trim();
         final visionModeRaw =
           (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
-        final visionMode = visionModeRaw == 'pre_model' ? 'pre_model' : 'standalone';
+        final visionMode = const {'standalone', 'pre_model', 'tool'}.contains(visionModeRaw)
+          ? visionModeRaw
+          : 'standalone';
 
       final embeddingEnabled = server['embedding_enabled'] == true;
       final embeddingUrl = (server['embedding_api_url']?.toString() ?? '').trim();
@@ -720,7 +722,9 @@ class SettingsService extends ChangeNotifier {
           : (server['vision_model']?.toString() ?? _visionModel).trim();
         final visionModeRaw =
           (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
-        final visionMode = visionModeRaw == 'pre_model' ? 'pre_model' : 'standalone';
+        final visionMode = const {'standalone', 'pre_model', 'tool'}.contains(visionModeRaw)
+          ? visionModeRaw
+          : 'standalone';
 
       final embeddingEnabled = server['embedding_enabled'] == true;
       final embeddingUrl = (server['embedding_api_url']?.toString() ?? '').trim();

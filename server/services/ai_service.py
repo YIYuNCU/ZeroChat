@@ -500,37 +500,22 @@ def _build_system_prompt(
     # 通用工具能力（所有场景可用）
     parts.append(
         "【工具调用规则】\n"
-        "你拥有以下工具能力。在生成回复之前，请主动判断是否需要调用工具，不要等用户明确要求才行动。\n\n"
-        "1. search_memory（历史记忆搜索）—— 回忆过去的唯一手段，必须频繁使用：\n"
-        "  - 用户提到任何人名、地名、事件、偏好、约定 → 立即搜索确认细节\n"
-        "  - 对话涉及\"上次\"\"之前\"\"以前\"\"你说过\"等词 → 立即搜索\n"
-        "  - 你感觉当前话题与过去可能有关联 → 立即搜索验证\n"
-        "  - 你\"隐约记得\"但不确定 → 必须搜索而非模糊猜测\n"
-        "  - 用户问\"你还记得吗\"\"你不会忘了吧\" → 你应该在此之前就已经搜索过\n"
-        "  - 核心原则：宁可多搜一次，不可假装记得。记忆窗口内没有相关内容 = 必须搜索\n\n"
-        "2. send_emotion_emoji（情绪表情发送）—— 在合适的时机表达情绪：\n"
-        "  - 回复带有明显情绪倾向时，调用此工具发送表情\n"
-        "  - 开心/有趣 → happy 或 excited | 关心/撒娇 → love | 难过 → sad\n"
-        "  - 惊讶 → surprised | 困惑 → confused | 疲惫 → tired | 生气 → angry\n"
-        "  - 不需要每句话都用，选择有情绪表达的回复即可\n"
-        "  - 注意：严禁在文本回复中直接插入 emoji 表情符号（如 😀❤️😭🙏😂😡等），"
-        "情绪表达统一通过调用本工具完成，不要在正文中使用 Unicode emoji\n\n"
-        "3. schedule_task（定时任务）—— 涉及未来时间点时考虑创建：\n"
-        "  - 用户明确说\"提醒我...\"\"别忘了...\" → 创建定时任务\n"
-        "  - 你自己主动承诺\"到时候我提醒你\" → 落实为定时任务\n"
-        "  - 创建时需指定提醒内容、触发时间（ISO 8601 格式，24小时制）和可选重复模式\n\n"
-        "4. web_search（联网搜索）—— 需要外部实时信息时使用：\n"
-        "  - 用户询问新闻、天气、股价、汇率、赛事结果等实时信息 → 立即搜索\n"
-        "  - 用户询问你不确定的最新事件、产品发布、版本更新 → 搜索确认\n"
-        "  - 你的知识中没有相关信息或信息可能已过期 → 搜索而非猜测\n"
-        "  - 不要对主观问题或已有足够知识的问题使用搜索\n\n"
-        "5. write_memory（记忆写入）—— 重要信息主动保存：\n"
-        "  - 用户分享了个人信息（生日、喜好、习惯、约定、目标等） → 主动保存\n"
-        "  - 对话中达成了重要共识或决定 → 保存以便未来引用\n"
-        "  - 必须先综合人物、事件、结果、上下文与发生时间，写成简洁客观的摘要，禁止复制聊天原文\n"
-        "  - 能确定事件发生时间时传 occurred_at；无法确定时省略，由系统使用当前消息时间\n"
-        "  - 不要对每句话都保存，只保存真正重要的、未来会用到的信息\n"
-        "  - 保存后可配合 search_memory 验证是否写入成功\n"
+        "回复前先判断需要哪些工具，主动调用、不必等用户明确要求；需要时可在同一轮组合调用多个工具。"
+        "凡能用工具确认的事实，一律查证而非凭记忆或知识猜测。\n\n"
+        "1. search_memory（历史记忆搜索）—— 回忆过去的唯一手段：\n"
+        "  - 出现人名/地名/事件/偏好/约定，或\"上次/之前/你说过/还记得吗\"等指涉过去的话，立即搜索；\"隐约记得\"也必须搜。\n"
+        "  - 原则：宁可多搜一次，不可假装记得；记忆窗口里没有 ≠ 不存在，仍需搜索。\n\n"
+        "2. send_emotion_emoji（情绪表情）—— 回复带明显情绪时调用，不必每句都用：\n"
+        "  - 情绪标签：happy/excited（开心有趣）、love（关心撒娇）、sad（难过）、surprised（惊讶）、confused（困惑）、tired（疲惫）、angry（生气）。\n"
+        "  - 硬性约束：严禁在正文直接插入 Unicode emoji（😀❤️😭 等），情绪一律通过本工具表达。\n\n"
+        "3. schedule_task（定时任务）—— 用户要求提醒、或你承诺将来做某事时创建：\n"
+        "  - 需指定提醒内容、触发时间（ISO 8601，24 小时制）及可选重复模式。\n\n"
+        "4. web_search（联网搜索）—— 需要实时/外部信息时使用：\n"
+        "  - 新闻、天气、行情、赛事、最新事件或版本等你不确定、可能已过期的信息 → 搜索确认。\n"
+        "  - 主观问题或已有足够把握的内容不要搜。\n\n"
+        "5. write_memory（记忆写入）—— 保存未来会用到的重要信息（个人信息、共识、决定等）：\n"
+        "  - 必须先综合人物/事件/结果/时间写成简洁客观的摘要，禁止复制聊天原文；不要逐句保存。\n"
+        "  - 能确定发生时间就传 occurred_at，否则省略（由系统用当前消息时间）。\n"
     )
     # 角色人设（优先级低于系统级指令）
     persona = role_data.get("persona", "")
@@ -553,34 +538,25 @@ def _build_system_prompt(
             )
             parts.append(
                 "【消息格式标记】\n"
-                "你的回复可由以下部分组成，每部分用对应的中文标签包裹：\n"
-                "  - 对话：<对话>...</对话> —— 你实际说出口的话，这是主体内容\n"
-                "  - 动作：<动作>...</动作> —— 描述你正在做的动作/行为（可选）\n"
-                "  - 心理：<心理>...</心理> —— 你的内心想法或情绪波动（可选）\n"
+                "回复由以下中文标签包裹的内容组成，按实际发生顺序自由排列，不套固定顺序：\n"
+                "  - <对话>...</对话>：你说出口的话，主体内容，除无回复外必不可少\n"
+                "  - <动作>...</动作>：你正在做的动作/行为（可选）\n"
+                "  - <心理>...</心理>：内心想法或情绪波动（可选）\n"
                 "规则：\n"
-                "  - 除无回复指令外，对话部分必不可少；动作、心理按需使用，不要每句都用\n"
-                "  - 灵活组合各种类型，按内容实际发生/生成的顺序输出；不得套用固定顺序\n"
-                "  - 同一种类型在一次回复中可以出现多次，例如："
-                "<对话>...</对话><动作>...</动作><对话>...</对话>"
-                "<心理>...</心理><动作>...</动作>\n"
-                "  - 同类内容出现在不同位置时必须保留为多个标签块，不得跨位置合并\n"
-                "  - 未被标签包裹的散文本会被当作对话处理，但推荐显式使用 <对话> 标签\n"
-                "  - 标签内只写对应类型的内容，不要在一个标签里混入其他类型\n"
-                "  - 不要使用【】、『』、() 等其他符号来表达动作或心理\n"
-                "  - <事实>...</事实> 是用户专属格式，表示已经发生的客观事件。"
-                "看到用户消息中的事实块时按已发生事件理解，但你绝对不能输出 <事实> 标签"
+                "  - 动作、心理按需使用，不要每句都用；每种标签一次回复可多次出现，"
+                "不同位置的同类内容必须各自成块，不得跨位置合并\n"
+                "  - 标签内只写对应类型内容，不得混入其他类型；未包裹的散文本按对话处理，但推荐显式用 <对话>\n"
+                "  - 不要用【】、『』、() 等符号表达动作或心理\n"
+                "  - <事实>...</事实> 是用户专属只读标签（已发生的客观事件），按已发生理解，但你绝不能输出该标签"
             )
             parts.append(
                 "【无回复指令】\n"
-                f"当你结合上下文判断确实无需回复时，可以返回 {NO_REPLY_DIRECTIVE}。\n"
-                "规则：\n"
-                "  - 仅在回应会显得多余、打扰或没有实际内容时使用；用户提出问题、表达情绪或期待互动时应正常回复\n"
-                f"  - 使用时整条回复必须且只能是 {NO_REPLY_DIRECTIVE}，不得与对话、动作、心理、数值、$ 分段或其他文本混用\n"
-                "  - 无回复时不要调用发送表情等面向用户的输出工具"
+                f"确实无需回复（回应会多余、打扰或无实际内容）时，整条回复必须且只能是 {NO_REPLY_DIRECTIVE}，"
+                "不得与对话/动作/心理/数值/$ 分段等任何内容混用，且此时不调用表情等面向用户的工具。"
+                "用户提问、表达情绪或期待互动时应正常回复。"
             )
         parts.append(
-            "在回复中适当使用$字符进行分段操作，在改变对话内容时进行分段，"
-            "以使回复内容更易读，但不要每句话都分段，不要每句话都转换内容。"
+            "适当用 $ 字符分段以便阅读：在对话内容切换时分段，但不要每句都分段。"
         )
         if not is_onebot:
             stats_instruction = _build_stats_instruction(role_data, stats_current)
@@ -629,16 +605,16 @@ from services.ai_tools import (
     _BLOCK_USER_TOOL,
     _SEARCH_MEMORY_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
-    _SET_PROACTIVE_TOOL,
     _WEB_SEARCH_TOOL,
     _WRITE_MEMORY_TOOL,
+    _RECOGNIZE_IMAGE_TOOL,
     execute_schedule_task,
     execute_block_user,
     execute_search_memory,
     execute_send_emotion_emoji,
-    execute_set_proactive,
     execute_web_search,
     execute_write_memory,
+    execute_recognize_image,
 )
 
 
@@ -651,9 +627,13 @@ async def generate_with_role(
     origin: str = "zerochat",
     sender: str = "user",
     stats_current: Optional[Dict[str, Any]] = None,
+    vision_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     以角色身份生成回复
+
+    vision_context: 「工具模式」识图专用。形如 {"image_data_urls": [<data url>, ...]}，
+    非空时向聊天模型开放 recognize_image 工具，由 AI 自主决定是否识图。
     """
     messages = []
     is_onebot = origin.startswith("onebot")
@@ -679,22 +659,27 @@ async def generate_with_role(
         ),
     })
 
-    # 工具配置：schedule_task、search_memory、send_emotion_emoji、set_proactive、
+    # 工具配置：schedule_task、search_memory、send_emotion_emoji、
     # web_search、write_memory 对所有场景开放；block_user 仅对第三方用户开放
     active_tools = list(_SCHEDULE_TASK_TOOL)
     active_tools.extend(_SEARCH_MEMORY_TOOL)
     active_tools.extend(_SEND_EMOTION_EMOJI_TOOL)
-    active_tools.extend(_SET_PROACTIVE_TOOL)
     active_tools.extend(_WEB_SEARCH_TOOL)
     active_tools.extend(_WRITE_MEMORY_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
+    # 工具模式识图：本次消息附带图片时开放 recognize_image，由 AI 自主决定是否识图
+    image_data_urls = list((vision_context or {}).get("image_data_urls") or [])
+    if image_data_urls:
+        active_tools.extend(_RECOGNIZE_IMAGE_TOOL)
     tools = active_tools if active_tools else None
     result = await _call_with_role_config(role_data, messages, default_temp=1.2, tools=tools)
 
     # 处理 tool_calls
     if result.get("tool_calls"):
-        result = await _handle_tool_calls(result, messages, role_data, tools)
+        result = await _handle_tool_calls(
+            result, messages, role_data, tools, vision_context=vision_context
+        )
 
     return result
 
@@ -704,6 +689,7 @@ async def _handle_tool_calls(
     messages: List[Dict[str, Any]],
     role_data: Dict,
     tools: Optional[List[Dict]],
+    vision_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     处理 AI 返回的 tool_calls，支持多轮工具调用循环（最多 5 轮）。
@@ -782,13 +768,6 @@ async def _handle_tool_calls(
                         messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
                         logger.warning(f"Tool error: send_emotion_emoji -> {err}")
 
-                elif func_name == "set_proactive":
-                    enabled = bool(args.get("enabled", True))
-                    reason = str(args.get("reason", "")).strip()
-                    logger.info(f"Tool call: set_proactive [enabled={enabled}, reason={reason}]")
-                    tool_result = await execute_set_proactive(role_data, enabled, reason)
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
-
                 elif func_name == "web_search":
                     query = str(args.get("query", "")).strip()
                     max_results = int(args.get("max_results", 3))
@@ -821,6 +800,18 @@ async def _handle_tool_calls(
                         tool_result = "参数不完整：summary 为必填"
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
                     logger.info(f"Tool result: write_memory -> {tool_result[:100]}")
+
+                elif func_name == "recognize_image":
+                    focus = str(args.get("focus", "")).strip()
+                    try:
+                        image_index = int(args.get("image_index", 0))
+                    except (TypeError, ValueError):
+                        image_index = 0
+                    urls = list((vision_context or {}).get("image_data_urls") or [])
+                    logger.info(f"Tool call: recognize_image [focus={focus}, image_index={image_index}]")
+                    tool_result = await execute_recognize_image(urls, focus, image_index)
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                    logger.info(f"Tool result: recognize_image -> {tool_result[:100]}")
             except Exception as e:
                 logger.error(f"Tool execution error: {func_name} -> {e}")
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"操作失败：{e}"})

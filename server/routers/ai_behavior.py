@@ -524,6 +524,7 @@ async def _run_memory_ai_pipeline(
     include_user_memory: bool = True,
     include_assistant_memory: bool = True,
     trigger_summary_after_reply: bool = True,
+    vision_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from services.ai_service import generate_with_role, is_no_reply_directive
     from services.memory_service import (
@@ -631,6 +632,7 @@ append_short_term,
         origin=origin,
         sender=user_sender,
         stats_current=stats_current,
+        vision_context=vision_context,
     )
 
     vector_memories_count = len(vector_memories)
@@ -1106,7 +1108,7 @@ async def chat_with_vision(request: VisionRequest):
 
         vision_cfg = vision_service.resolve_vision_config()
         mode = str(request.run_mode or vision_cfg.get("mode") or "standalone").strip().lower()
-        if mode not in {"standalone", "pre_model"}:
+        if mode not in {"standalone", "pre_model", "tool"}:
             mode = "standalone"
 
         vision_api_url = vision_cfg.get("api_url", "")
@@ -1166,6 +1168,96 @@ async def chat_with_vision(request: VisionRequest):
             if upload_dir_for_cleanup is not None:
                 shutil.rmtree(upload_dir_for_cleanup, ignore_errors=True)
             return {"reply": reply, "success": True, "mode": mode, "vision_model": vision_model}
+
+        # 工具模式：不做前置识图，把 recognize_image 作为工具交给聊天模型，
+        # 由 AI 自主决定是否识图、并可指定识图的重点细节（focus）。
+        if mode == "tool":
+            chat_cfg = _resolve_role_or_global_chat_config(request.role_id)
+            role_id_text = str(request.role_id or "").strip()
+            chat_model = str(chat_cfg.get("model") or "gpt-3.5-turbo")
+            # 引导（非强制）AI 在存在图片时调用识图工具
+            guide_parts = [
+                "[图片附件] 用户本次发送了一张图片。若需了解图片内容以更好地回复，"
+                "请调用 recognize_image 工具，并可在 focus 中说明你想重点关注的细节。"
+            ]
+            vision_context = {"image_data_urls": [image_data_url]}
+            reply = ""
+            try:
+                if role_id_text and not is_tool_role_id(role_id_text):
+                    role_for_pipeline = load_role(role_id_text) or {"id": role_id_text, "name": "vision_chat"}
+                    role_for_pipeline["ai_model"] = role_for_pipeline.get("ai_model") or str(chat_cfg.get("model") or "gpt-3.5-turbo")
+                    role_for_pipeline["ai_api_url"] = role_for_pipeline.get("ai_api_url") or str(chat_cfg.get("api_url") or "")
+                    role_for_pipeline["ai_api_key"] = role_for_pipeline.get("ai_api_key") or str(chat_cfg.get("api_key") or "")
+                    chat_model = str(role_for_pipeline.get("ai_model") or chat_model)
+
+                    if request.system_prompt:
+                        existing_system_prompt = str(role_for_pipeline.get("system_prompt") or "").strip()
+                        request_system_prompt = str(request.system_prompt or "").strip()
+                        if existing_system_prompt and request_system_prompt:
+                            role_for_pipeline["system_prompt"] = f"{existing_system_prompt}\n\n{request_system_prompt}"
+                        elif request_system_prompt:
+                            role_for_pipeline["system_prompt"] = request_system_prompt
+
+                    pipeline_result = await _run_memory_ai_pipeline(
+                        role=role_for_pipeline,
+                        role_id=role_id_text,
+                        user_message=str(request.user_prompt or "").strip() or "请看看我发的图片",
+                        event_context={
+                            "origin": "vision_tool",
+                            "sender": "user_vision",
+                        },
+                        extra_parts=guide_parts,
+                        origin="vision_tool",
+                        user_sender="user_vision",
+                        include_user_memory=False,
+                        include_assistant_memory=False,
+                        trigger_summary_after_reply=False,
+                        vision_context=vision_context,
+                    )
+                    if not pipeline_result.get("success"):
+                        raise HTTPException(status_code=502, detail=pipeline_result.get("error") or "识图工具模式聊天模型生成失败")
+                    reply = pipeline_result.get("reply") or ""
+                else:
+                    # 无角色/工具角色兜底：直接以全局配置调用 generate_with_role，仍暴露识图工具
+                    fallback_role = {
+                        "id": role_id_text or "vision_tool",
+                        "name": "vision_chat",
+                        "ai_model": str(chat_cfg.get("model") or "gpt-3.5-turbo"),
+                        "ai_api_url": str(chat_cfg.get("api_url") or ""),
+                        "ai_api_key": str(chat_cfg.get("api_key") or ""),
+                    }
+                    if request.system_prompt:
+                        fallback_role["system_prompt"] = str(request.system_prompt or "").strip()
+                    gen_result = await generate_with_role(
+                        role_data=fallback_role,
+                        user_message=str(request.user_prompt or "").strip() or "请看看我发的图片",
+                        extra_context="\n\n".join(guide_parts),
+                        origin="vision_tool",
+                        sender="user_vision",
+                        vision_context=vision_context,
+                    )
+                    if not gen_result.get("success"):
+                        raise HTTPException(status_code=502, detail=gen_result.get("error") or "识图工具模式聊天模型生成失败")
+                    reply = _sanitize_reply_content(gen_result.get("content") or "")
+
+                vision_service.append_vision_memory(
+                    role_id=request.role_id,
+                    user_prompt=request.user_prompt,
+                    final_reply=reply,
+                    mode=mode,
+                    image_understanding=None,
+                )
+            finally:
+                # 生成完成后再清理图片，确保识图工具执行期间图片仍可读取
+                if upload_dir_for_cleanup is not None:
+                    shutil.rmtree(upload_dir_for_cleanup, ignore_errors=True)
+            return {
+                "reply": reply,
+                "success": True,
+                "mode": mode,
+                "vision_model": vision_model,
+                "chat_model": chat_model,
+            }
 
         # 前置模型模式：先识图，再把识图结果交给聊天模型生成最终回复
         pre_messages = vision_service.build_vision_messages(
