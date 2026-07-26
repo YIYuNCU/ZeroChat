@@ -293,9 +293,11 @@ def _init_moment_jobs():
     scheduler = get_scheduler()
     
     # 定期检查是否有 AI 要发朋友圈
+    # 每小时检查一次，配合每角色 24h 冷却，实现「最多一天一条」；
+    # 对超过 7 天未发帖的角色强制补发，实现「最少一周一条」。
     scheduler.add_job(
         _check_moment_posts,
-        IntervalTrigger(minutes=180),
+        IntervalTrigger(minutes=60),
         id="moment_check",
         replace_existing=True
     )
@@ -310,43 +312,88 @@ def _init_moment_jobs():
     
     logger.info("Scheduled moment check job")
 
+# 发帖节奏参数
+_MOMENT_MIN_INTERVAL_HOURS = 24      # 最多一天一条：距上次发帖不足 24h 跳过
+_MOMENT_MAX_INTERVAL_DAYS = 7        # 最少一周一条：超过 7 天强制补发
+# 处于 24h–7天之间的角色，每次检查进入候选的概率（让发帖自然分散在一周内）
+_MOMENT_POST_CHANCE = 0.18
+
+
+def _last_ai_post_times() -> Dict[str, datetime]:
+    """从 posts.json 计算每个角色最近一次发帖时间（author_id -> 最新 created_at）。"""
+    result: Dict[str, datetime] = {}
+    for post in _load_moments_posts():
+        author_id = str(post.get("author_id", "")).strip()
+        if not author_id or author_id == "me":
+            continue
+        created_at_raw = str(post.get("created_at", ""))
+        try:
+            created_at = datetime.fromisoformat(created_at_raw)
+        except Exception:
+            continue
+        prev = result.get(author_id)
+        if prev is None or created_at > prev:
+            result[author_id] = created_at
+    return result
+
+
 async def _check_moment_posts():
-    """检查是否有 AI 要发朋友圈"""
+    """检查是否有 AI 要发朋友圈（每角色：最多一天一条，最少一周一条）"""
     global _event_callback
-    
-    if not ROLES_DIR.exists() or not _event_callback:
+
+    if not _event_callback:
         return
-    
-    roles = []
-    for role_dir in ROLES_DIR.iterdir():
-        if role_dir.is_dir():
-            profile_file = role_dir / "profile.json"
-            if profile_file.exists():
-                with open(profile_file, "r", encoding="utf-8") as f:
-                    profile = json.load(f)
-                    role_id = str(profile.get("id", "")).strip()
-                    if role_id.startswith("1000000000"):
-                        continue  # 跳过系统角色
-                    if profile.get("archived", False):
-                        continue  # 跳过已归档角色
-                    roles.append(profile)
-    
+
+    roles = _load_non_tool_roles()
     if not roles:
         logger.warning("No valid roles found for moment posting")
         return
-    
-    # 随机选择一个角色发朋友圈（65% 概率）
-    if random.random() < 0.65:
-        role = random.choice(roles)
-        await _event_callback({
-            "role_id": str(role.get("id", "")).strip(),
-            "event_type": "moment",
-            "content": "",
-            "context": {}
-        })
-        logger.info(f"AI {role.get('name')} posting moment")
-    else:
+
+    now = datetime.now()
+    last_posts = _last_ai_post_times()
+
+    forced: List[Dict] = []      # 超过 7 天未发帖，强制补发
+    optional: List[Dict] = []    # 24h–7天之间，低概率发帖
+
+    for role in roles:
+        role_id = str(role.get("id", "")).strip()
+        if not role_id:
+            continue
+        last = last_posts.get(role_id)
+        if last is None:
+            # 从未发过：视为需要补发；按角色 ID 做轻微错峰，避免所有新角色同一小时齐发
+            if (now.hour + hash(role_id)) % 6 == 0:
+                forced.append(role)
+            else:
+                optional.append(role)
+            continue
+        elapsed = now - last
+        if elapsed < timedelta(hours=_MOMENT_MIN_INTERVAL_HOURS):
+            continue  # 最多一天一条：跳过
+        if elapsed >= timedelta(days=_MOMENT_MAX_INTERVAL_DAYS):
+            forced.append(role)  # 最少一周一条：强制补发
+        else:
+            optional.append(role)
+
+    # 每次检查最多让一个角色发帖，避免同一 tick 多角色齐发刷屏。
+    # 优先处理强制补发（>7天）的角色。
+    target: Optional[Dict] = None
+    if forced:
+        target = random.choice(forced)
+    elif optional and random.random() < _MOMENT_POST_CHANCE:
+        target = random.choice(optional)
+
+    if target is None:
         logger.info("No AI moment this time")
+        return
+
+    await _event_callback({
+        "role_id": str(target.get("id", "")).strip(),
+        "event_type": "moment",
+        "content": "",
+        "context": {}
+    })
+    logger.info(f"AI {target.get('name')} posting moment")
 
 
 def _load_moments_posts() -> List[Dict]:
@@ -496,6 +543,17 @@ async def _check_moment_comments():
             if isinstance(c, dict)
         }
 
+        # 限制 AI-AI 评论轮数：对非用户帖子，AI 之间最多互评 2 条，避免无限对评刷屏。
+        if post_author_id != "me":
+            ai_comment_count = sum(
+                1
+                for c in comments
+                if isinstance(c, dict)
+                and str(c.get("author_id", "")).strip() not in ("me", post_author_id)
+            )
+            if ai_comment_count >= 2:
+                continue
+
         for role_id in role_ids:
             if not role_id or role_id == post_author_id:
                 continue
@@ -529,6 +587,115 @@ async def _check_moment_comments():
             target["role_id"],
             target["post_id"],
         )
+
+
+# ========== 用户发帖后的主动互动 ==========
+
+# 用户发帖后，每个 AI 角色点赞的概率
+_USER_POST_LIKE_CHANCE = 0.45
+# 用户发帖后，参与评论的角色最多数量
+_USER_POST_MAX_COMMENTERS = 2
+# 用户发帖后，单个角色触发评论的概率
+_USER_POST_COMMENT_CHANCE = 0.5
+# 互动前的随机延迟范围（秒），模拟真人「刷到」的时间差
+_USER_POST_INTERACT_DELAY_MIN = 30
+_USER_POST_INTERACT_DELAY_MAX = 240
+
+
+async def _ai_like_post(post_id: str, role_id: str, role_name: str) -> bool:
+    """让某个 AI 角色点赞指定帖子（纯数据操作，无需 LLM）。返回是否成功点赞。"""
+    from routers import moments as moments_router
+    from transport.push_hub import publish_server_push
+
+    try:
+        result = await moments_router.like_moment(post_id, role_id, role_name)
+    except Exception as e:
+        logger.warning("AI like failed for post %s by %s: %s", post_id, role_id, e)
+        return False
+
+    if not isinstance(result, dict) or result.get("error"):
+        return False
+
+    try:
+        await publish_server_push(
+            "moment_like",
+            {"role_id": role_id, "post_id": post_id, "author_name": role_name},
+        )
+    except Exception as e:
+        logger.debug("moment_like push failed: %s", e)
+    return True
+
+
+async def trigger_interactions_for_user_post(post_id: str):
+    """用户发帖后主动触发 AI 互动：概率点赞 + 少量评论。
+
+    由 moments.create_moment 在用户（author_id == "me"）发帖成功后以
+    asyncio.create_task 调用，不阻塞发帖响应。
+    """
+    if not _event_callback:
+        return
+
+    # 随机延迟，模拟真人刷到朋友圈的时间差，避免用户发完瞬间一堆互动同时冒出来。
+    await asyncio.sleep(
+        random.randint(_USER_POST_INTERACT_DELAY_MIN, _USER_POST_INTERACT_DELAY_MAX)
+    )
+
+    post = next(
+        (p for p in _load_moments_posts() if str(p.get("id", "")).strip() == post_id),
+        None,
+    )
+    if not post:
+        return
+    if str(post.get("author_id", "")).strip() != "me":
+        return  # 只对用户帖子主动互动
+
+    roles = _load_non_tool_roles()
+    if not roles:
+        return
+
+    post_content = str(post.get("content", ""))
+    post_author = str(post.get("author_name", "用户")) or "用户"
+
+    # 已点赞的角色，避免重复
+    already_liked = {
+        str(l.get("id", "")).strip()
+        for l in (post.get("liked_by") or [])
+        if isinstance(l, dict)
+    }
+
+    random.shuffle(roles)
+    commenters_triggered = 0
+
+    for role in roles:
+        role_id = str(role.get("id", "")).strip()
+        role_name = str(role.get("name", "AI")) or "AI"
+        if not role_id:
+            continue
+
+        # 概率点赞
+        if role_id not in already_liked and random.random() < _USER_POST_LIKE_CHANCE:
+            await _ai_like_post(post_id, role_id, role_name)
+
+        # 少量角色概率评论
+        if (
+            commenters_triggered < _USER_POST_MAX_COMMENTERS
+            and random.random() < _USER_POST_COMMENT_CHANCE
+        ):
+            commenters_triggered += 1
+            await _event_callback(
+                {
+                    "role_id": role_id,
+                    "event_type": "comment",
+                    "content": "",
+                    "context": {
+                        "post_id": post_id,
+                        "post_content": post_content,
+                        "post_author": post_author,
+                    },
+                }
+            )
+            logger.info("AI %s commenting on user post %s", role_id, post_id)
+
 
 # ========== 状态查询 ==========
 

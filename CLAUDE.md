@@ -33,7 +33,7 @@ client/
 │   ├── core/                     # Runtime orchestration (controllers, schedulers, managers)
 │   │   ├── chat_controller.dart      # Central chat logic hub
 │   │   ├── memory_manager.dart       # Memory management (core + short-term)
-│   │   ├── moments_scheduler.dart    # Moments (朋友圈) scheduler
+│   │   ├── moments_scheduler.dart    # Moments (朋友圈) chat-awareness context (posting/interaction scheduled server-side)
 │   │   ├── group_scheduler.dart      # Group chat scheduling
 │   │   ├── message_store.dart        # Message persistence
 │   │   └── segment_sender.dart       # Segmented message sending
@@ -149,7 +149,7 @@ server/
 
 1. **Chat**: Client sends message → `ai_behavior.py` → `ai_service.py` (AI API) → response streamed via WebSocket back to client
 2. **Memory**: Messages stored in SQLite (server) and synchronized to client; core memories are summarized by a dedicated assistant model; vector embeddings are generated for user messages and summaries to enable semantic memory retrieval
-3. **Scheduling**: `scheduler_service.py` (APScheduler) manages proactive messages, moments publishing, and timed tasks — runs independently in a background thread. AI-generated events (moments, comments, tasks, proactive messages) are handled via `lifecycle.py`
+3. **Scheduling**: `scheduler_service.py` (APScheduler) manages proactive messages, moments publishing, and timed tasks — runs independently in a background thread. AI-generated events (moments, comments, tasks, proactive messages) are handled via `lifecycle.py`. **Moments are scheduled server-side only** (the client no longer posts/interacts autonomously). Per-role posting cadence is enforced from `data/moments/posts.json`: at most one post per day, at least one per week (roles idle >7 days are force-posted; roles that posted <24h ago are skipped). When a user publishes a moment (`author_id == "me"`), `create_moment` fires `trigger_interactions_for_user_post` to have AI roles probabilistically like and comment (with a randomized delay). The client `moments_scheduler.dart` only builds the "user's recent moment" weak context for 1:1 chats
 4. **AI Tool Calls**: `ai_service.py` (via `generate_with_role`) exposes function-calling tools defined in `ai_tools.py` to the AI model. Currently supports `schedule_task` (all contexts) and `block_user` (OneBot third-party only). Tool calls are executed, results injected back as `tool` messages, then the model generates the final response.
 5. **OneBot QQ**: `onebot.py` bridges AI roles to QQ groups/private chats via NapCat framework using OneBot V11 protocol. Supports HTTP POST events and reverse WebSocket connections. Message aggregation window of 15 seconds
 6. **Sync**: Client `realtime_sync_service.dart` connects via WebSocket for live push; REST API for CRUD operations. Client also uses `secure_websocket_client.dart` and `secure_backend_client.dart` with AES encryption

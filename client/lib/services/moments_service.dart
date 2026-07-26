@@ -207,40 +207,6 @@ class MomentsService extends ChangeNotifier {
     return backendPost ?? post;
   }
 
-  /// 发布动态（AI 角色）- 预留入口
-  Future<MomentPost> publishAIPost({
-    required String roleId,
-    required String roleName,
-    String? roleAvatarUrl,
-    required String content,
-    String? stickerPath,
-  }) async {
-    final type = stickerPath != null
-        ? MomentType.textWithSticker
-        : MomentType.text;
-
-    final post = MomentPost(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      authorId: roleId,
-      authorName: roleName,
-      authorAvatarUrl: roleAvatarUrl,
-      content: content,
-      stickerPath: stickerPath,
-      createdAt: DateTime.now(),
-      type: type,
-    );
-
-    final backendPost = await publishToBackend(post);
-    if (backendPost != null) {
-      _unreadCount++;
-      notifyListeners();
-    }
-    debugPrint(
-      'MomentsService: Published AI post from $roleName (synced to backend)',
-    );
-    return backendPost ?? post;
-  }
-
   /// 删除动态
   Future<void> deletePost(String postId) async {
     try {
@@ -280,26 +246,6 @@ class MomentsService extends ChangeNotifier {
     }
   }
 
-  /// AI 点赞
-  Future<void> aiLike(String postId, String roleId, String roleName) async {
-    final post = _posts.where((p) => p.id == postId).firstOrNull;
-    if (post == null || post.likedBy.contains(roleId)) return;
-
-    try {
-      await SecureWebSocketClient.instance.request('moments_like', {
-        'post_id': postId,
-        'user_id': roleId,
-        'user_name': roleName,
-      });
-      if (post.authorId == 'me') {
-        _unreadCount++;
-      }
-      await fetchFromBackend();
-    } catch (e) {
-      debugPrint('MomentsService: AI like failed: $e');
-    }
-  }
-
   /// 添加评论
   Future<void> addComment(
     String postId, {
@@ -334,19 +280,6 @@ class MomentsService extends ChangeNotifier {
   /// 清除未读
   void clearUnread() {
     _unreadCount = 0;
-    notifyListeners();
-  }
-
-  /// 获取指定用户/角色的动态
-  List<MomentPost> getPostsByAuthor(String authorId) {
-    return _posts.where((p) => p.authorId == authorId).toList();
-  }
-
-  /// 清空所有动态
-  Future<void> clearAll() async {
-    _posts.clear();
-    _unreadCount = 0;
-    await _savePosts();
     notifyListeners();
   }
 

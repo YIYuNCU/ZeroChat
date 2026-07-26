@@ -198,9 +198,17 @@ async def create_moment(moment: MomentCreate):
         "comments": [],
         "created_at": now.isoformat()
     }
-    
+
     moments.insert(0, new_post)
     save_moments(moments)
+
+    # 用户发帖后，异步触发 AI 主动互动（点赞/评论），不阻塞发帖响应。
+    if str(moment.author_id).strip() == "me":
+        import asyncio
+        from services.scheduler_service import trigger_interactions_for_user_post
+
+        asyncio.create_task(trigger_interactions_for_user_post(new_post["id"]))
+
     return new_post
 
 @router.get("/moments/{post_id}")

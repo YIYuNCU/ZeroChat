@@ -120,7 +120,9 @@ class RealtimeSyncService {
   }
 
   static bool _isMomentPush(String type) {
-    return type == 'moment_post' || type == 'moment_comment';
+    return type == 'moment_post' ||
+        type == 'moment_comment' ||
+        type == 'moment_like';
   }
 
   static Future<void> dispose() async {

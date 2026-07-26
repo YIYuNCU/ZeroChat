@@ -454,85 +454,25 @@
 
 ## moments_scheduler.dart
 
-功能说明：AI 朋友圈自动发布与互动调度器，含定时检查、发布、点赞、评论与回复。
+功能说明：朋友圈聊天感知上下文提供者。AI 朋友圈的发布/点赞/评论/回复已**统一由服务端调度**（server/services/scheduler_service.py），以保证「每角色最多一天一条、最少一周一条」的频率控制并避免客户端与服务端重复发帖；客户端不再自主定时发帖或互动。本类仅保留为 1:1 聊天注入「用户最近朋友圈」弱上下文的能力。
 
 ### Functions
 
 - MomentsScheduler.init()
   - 参数：无
-  - 作用：启动调度器
+  - 作用：兼容启动流程的空初始化（不再启动客户端自主调度）
   - 返回：Future<void>
   - 调用者：应用初始化流程
 
-- MomentsScheduler._startScheduler()
-  - 参数：无
-  - 作用：设置周期定时器与首次延迟触发
-  - 返回：void
-  - 调用者：init()
-
-- MomentsScheduler._onSchedulerTick()
-  - 参数：无
-  - 作用：按概率触发发布/互动/回复
-  - 返回：void
-  - 调用者：_startScheduler() 定时回调
-
-- MomentsScheduler._triggerAIPost()
-  - 参数：无
-  - 作用：按冷却策略选角色并发布
-  - 返回：Future<void>
-  - 调用者：_onSchedulerTick()
-
-- MomentsScheduler.generateAndPostMoment(Role role)
-  - 参数：role
-  - 作用：生成朋友圈内容并发布
-  - 返回：Future<MomentPost?>
-  - 调用者：_triggerAIPost()、外部模块（可能手动触发）
-
-- MomentsScheduler._buildPostPrompt(Role role)
-  - 参数：role
-  - 作用：生成发布 prompt
-  - 返回：String
-  - 调用者：generateAndPostMoment()
-
-- MomentsScheduler._triggerAIInteraction()
-  - 参数：无
-  - 作用：选择帖子并随机点赞/评论
-  - 返回：Future<void>
-  - 调用者：_onSchedulerTick()
-
-- MomentsScheduler._performLike(Role role, MomentPost post)
-  - 参数：role、post
-  - 作用：执行点赞
-  - 返回：Future<void>
-  - 调用者：_triggerAIInteraction()
-
-- MomentsScheduler._performComment(Role role, MomentPost post)
-  - 参数：role、post
-  - 作用：生成并提交评论
-  - 返回：Future<void>
-  - 调用者：_triggerAIInteraction()
-
-- MomentsScheduler._buildCommentPrompt(Role role, MomentPost post)
-  - 参数：role、post
-  - 作用：生成评论 prompt
-  - 返回：String
-  - 调用者：_performComment()
-
-- MomentsScheduler._triggerAIReplyToUserComment()
-  - 参数：无
-  - 作用：找用户评论并回复
-  - 返回：Future<void>
-  - 调用者：_onSchedulerTick()
-
 - MomentsScheduler.getUserRecentMoments({int limit=3})
   - 参数：limit
-  - 作用：获取用户最近朋友圈
+  - 作用：获取用户最近 24 小时内的朋友圈
   - 返回：List<MomentPost>
   - 调用者：buildMomentsAwarenessContext()
 
 - MomentsScheduler.buildMomentsAwarenessContext()
   - 参数：无
-  - 作用：生成弱上下文提示
+  - 作用：按概率生成「用户最近发的朋友圈」弱上下文提示（仅 1:1 聊天）
   - 返回：String?
   - 调用者：ChatController._callAI()
 
@@ -541,12 +481,6 @@
   - 作用：格式化相对时间
   - 返回：String
   - 调用者：buildMomentsAwarenessContext()
-
-- MomentsScheduler.dispose()
-  - 参数：无
-  - 作用：停止调度器
-  - 返回：void
-  - 调用者：框架生命周期/外部管理逻辑
 
 ## segment_sender.dart
 

@@ -1024,11 +1024,9 @@ async def handle_moment_comment(role: Dict, event: AIEvent) -> AIResponse:
     post_content = context.get("post_content", "")
     post_author = context.get("post_author", "用户")
     reply_to = context.get("reply_to")
-    
-    # 概率决定是否互动
-    if random.random() > 0.5:
-        return AIResponse(success=True, action="ignore", content=None)
-    
+
+    # 是否互动的概率已由调度器（scheduler_service）统一决定，
+    # 此处不再二次随机跳过，避免双重概率相乘导致评论过于稀少、不可控。
     result = await generate_moment_comment(
         role_data=role,
         post_content=post_content,
