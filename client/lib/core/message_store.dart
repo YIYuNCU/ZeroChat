@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:crypto/crypto.dart';
 import '../models/message.dart';
+import 'message_parts.dart';
 import '../services/sticker_service.dart';
 import '../services/storage_service.dart';
 import '../services/secure_websocket_client.dart';
@@ -612,8 +613,12 @@ class MessageStore extends ChangeNotifier {
           final lastMessage = messages.last;
           ChatListService.instance.updateChat(
             chatId: chatId,
+            // 预览只保留对话，剥离动作等格式化片段。
             lastMessage: lastMessage.type == MessageType.text
-                ? lastMessage.content
+                ? MessageParts.previewText(
+                    lastMessage.content,
+                    isUserMessage: lastMessage.senderId == 'me',
+                  )
                 : '[图片]',
             lastMessageTime: lastMessage.timestamp,
             unreadIncrement: newUnreadCount,

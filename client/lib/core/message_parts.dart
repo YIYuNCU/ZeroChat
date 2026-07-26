@@ -30,6 +30,21 @@ class MessageParts {
 
   const MessageParts({required this.parts});
 
+  /// 生成聊天列表/通知的预览文本：只保留对话，剥离动作/心理/数值等格式化片段。
+  ///
+  /// [isUserMessage] 为 true 时（用户侧）允许解析事实块，且在无对话内容时回退到
+  /// 纯文本正文；AI 侧无对话（如纯动作）时返回空串，避免泄露 `<动作>` 等原始标签。
+  static String previewText(String content, {required bool isUserMessage}) {
+    final parts = parse(content, allowFact: isUserMessage);
+    final dialogue = parts.dialogue.trim();
+    if (dialogue.isNotEmpty) return dialogue;
+    if (isUserMessage) {
+      final fallback = parts.plainText.trim();
+      return fallback.isNotEmpty ? fallback : content;
+    }
+    return '';
+  }
+
   /// 兼容通知和预览调用：只提取实际对话，并保持出现顺序。
   String get dialogue => _joinedText(MessagePartType.dialogue);
 

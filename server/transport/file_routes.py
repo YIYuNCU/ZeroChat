@@ -1,3 +1,4 @@
+import hmac
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -17,7 +18,8 @@ def create_files_router(config: dict) -> APIRouter:
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
     def _is_authorized(request: Request) -> bool:
-        return request.headers.get("X-Auth-Token", "") == auth_token
+        # 恒定时间比较，防止计时侧信道
+        return hmac.compare_digest(request.headers.get("X-Auth-Token", ""), auth_token)
 
     def _normalize_segment(value: str, field_name: str) -> str:
         try:

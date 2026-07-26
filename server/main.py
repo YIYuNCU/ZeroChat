@@ -75,7 +75,7 @@ CONFIG = load_config()
 validate_security_config(CONFIG)
 
 from core.lifecycle import create_lifespan
-from core.middleware import RequestLoggingMiddleware, SecurityMiddleware
+from core.middleware import PathWhitelistMiddleware, RequestLoggingMiddleware, SecurityMiddleware
 from routers import ai_behavior, chat, moments, onebot, roles, settings, tasks
 from services import scheduler_service
 from transport.file_routes import create_files_router
@@ -117,6 +117,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 路径白名单：最后注册 → 最外层执行，扫描探测在进入日志/鉴权前即被 404
+app.add_middleware(PathWhitelistMiddleware, logger=logger)
 
 # 注册业务路由
 app.include_router(chat.router, prefix="/api", tags=["Chat"])

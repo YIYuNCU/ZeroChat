@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 from datetime import datetime
 
@@ -59,7 +60,7 @@ def create_secure_websocket_endpoint(config: dict, logger):
 
         token_from_header = websocket.headers.get("X-Auth-Token", "")
         incoming_token = token_from_header
-        if incoming_token != auth_token:
+        if not hmac.compare_digest(incoming_token, auth_token):
             await websocket.close(code=1008, reason="Unauthorized")
             return
 

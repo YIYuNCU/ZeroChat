@@ -1752,22 +1752,11 @@ class ChatController extends ChangeNotifier {
       case MessageType.image:
         return '[图片]';
       default:
-        // 预览只展示对话，不展示动作/心理/数值等格式化片段。
-        // 用户事实消息展示事实正文而不是 XML 标签。
-        final isUserMessage = message.senderId == 'me';
-        final parts = MessageParts.parse(
+        // 预览只展示对话，剥离动作/心理/数值等格式化片段。
+        return MessageParts.previewText(
           message.content,
-          allowFact: isUserMessage,
+          isUserMessage: message.senderId == 'me',
         );
-        final dialogue = parts.dialogue.trim();
-        if (dialogue.isNotEmpty) return dialogue;
-        // AI 侧无对话（纯动作等）时预览留空，避免泄露原始标签；
-        // 用户侧回退到事实/纯文本正文。
-        if (isUserMessage) {
-          final fallback = parts.plainText.trim();
-          return fallback.isNotEmpty ? fallback : message.content;
-        }
-        return '';
     }
   }
 }

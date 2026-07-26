@@ -105,21 +105,10 @@ class _ChatListPageState extends State<ChatListPage> {
       case MessageType.image:
         return '[图片]';
       default:
-        // 用户侧事实消息允许解析事实块；AI 侧仅取对话。
-        final isUserMessage = message.senderId == 'me';
-        final parts = MessageParts.parse(
+        return MessageParts.previewText(
           message.content,
-          allowFact: isUserMessage,
+          isUserMessage: message.senderId == 'me',
         );
-        final dialogue = parts.dialogue.trim();
-        if (dialogue.isNotEmpty) return dialogue;
-        // AI 侧无对话（纯动作等）时预览留空，避免泄露原始标签；
-        // 用户侧回退到事实/纯文本正文，避免丢失用户输入的展示。
-        if (isUserMessage) {
-          final fallback = parts.plainText.trim();
-          return fallback.isNotEmpty ? fallback : message.content;
-        }
-        return '';
     }
   }
 

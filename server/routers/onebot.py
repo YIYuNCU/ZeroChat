@@ -1134,18 +1134,18 @@ async def onebot_ws_endpoint(websocket: WebSocket, role_id: str):
         # 1. Authorization: Bearer <token>
         auth_header = websocket.headers.get("authorization", "")
         if auth_header.lower().startswith("bearer "):
-            if auth_header[7:].strip() == expected_secret:
+            if hmac.compare_digest(auth_header[7:].strip(), expected_secret):
                 auth_ok = True
 
         # 2. X-OneBot-Secret header
         if not auth_ok:
             x_secret = websocket.headers.get("x-onebot-secret", "")
-            if x_secret == expected_secret:
+            if hmac.compare_digest(x_secret, expected_secret):
                 auth_ok = True
 
         # 3. Query param
         if not auth_ok:
-            if websocket.query_params.get("access_token", "") == expected_secret:
+            if hmac.compare_digest(websocket.query_params.get("access_token", ""), expected_secret):
                 auth_ok = True
 
         # 4. 首条消息 token 字段
@@ -1159,7 +1159,7 @@ async def onebot_ws_endpoint(websocket: WebSocket, role_id: str):
                     or first_data.get("secret")
                     or ""
                 ).strip()
-                if body_token == expected_secret:
+                if hmac.compare_digest(body_token, expected_secret):
                     auth_ok = True
             except (asyncio.TimeoutError, Exception):
                 pass
@@ -1341,17 +1341,17 @@ async def handle_onebot_event(
                 if val:
                     if header_name == "authorization" and val.lower().startswith("bearer "):
                         val = val[7:].strip()
-                    if val == expected_secret:
+                    if hmac.compare_digest(val, expected_secret):
                         auth_ok = True
                     break
         if not auth_ok:
-            if request.query_params.get("access_token", "") == expected_secret:
+            if hmac.compare_digest(request.query_params.get("access_token", ""), expected_secret):
                 auth_ok = True
         if not auth_ok and isinstance(body, dict):
             body_token = str(
                 body.get("token") or body.get("access_token") or body.get("secret") or ""
             ).strip()
-            if body_token == expected_secret:
+            if hmac.compare_digest(body_token, expected_secret):
                 auth_ok = True
         if not auth_ok:
             raise HTTPException(status_code=401, detail="Invalid OneBot secret")
