@@ -1736,13 +1736,6 @@ class ChatController extends ChangeNotifier {
         debugPrint('ChatController: Sticker fetch error on $candidate: $e');
       }
 
-      // The server accepted the task. A missing push/recovery response is a
-      // transport issue, not a send failure; the persisted task will recover
-      // on reconnect, foreground sync, or the next app start.
-      if (!terminalTaskFailure) {
-        debugPrint('ChatController: queued task $taskId is awaiting recovery');
-        return null;
-      }
     }
 
     if (stickerUrl != null) {
