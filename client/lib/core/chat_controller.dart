@@ -42,6 +42,14 @@ class _PendingChatItem {
   bool get isImage => imagePath != null;
 }
 
+/// The server can return tool side effects alongside the assistant text.
+class _AiReply {
+  final String content;
+  final List<String> emojisCalled;
+
+  const _AiReply(this.content, this.emojisCalled);
+}
+
 /// 聊天核心引擎
 /// 整个项目中唯一负责消息流转、AI 调度、分段发送、群聊控制、记忆更新的权威组件
 /// UI 层严禁直接调用 AI、处理记忆、拆分消息
@@ -934,7 +942,13 @@ class ChatController extends ChangeNotifier {
     );
 
     if (rawReply != null) {
-      await _sendSegmentsQueued(chatId, role.id, rawReply, isGroup: false);
+      await _sendSegmentsQueued(
+        chatId,
+        role.id,
+        rawReply.content,
+        isGroup: false,
+        toolEmotions: rawReply.emojisCalled,
+      );
     }
 
     _hideTyping(chatId);
@@ -1006,13 +1020,19 @@ class ChatController extends ChangeNotifier {
 
         if (rawReply != null) {
           // 群聊分段发送也不显示 typing
-          await _sendSegmentsQueued(chatId, role.id, rawReply, isGroup: true);
-          if (MessageParts.isNoReplyDirective(rawReply)) {
+          await _sendSegmentsQueued(
+            chatId,
+            role.id,
+            rawReply.content,
+            isGroup: true,
+            toolEmotions: rawReply.emojisCalled,
+          );
+          if (MessageParts.isNoReplyDirective(rawReply.content)) {
             continue;
           }
           context.incrementConsecutiveCount(role.id);
           lastSpeakerId = role.id;
-          lastMessage = rawReply;
+          lastMessage = rawReply.content;
         }
       }
 
@@ -1181,7 +1201,13 @@ class ChatController extends ChangeNotifier {
       final showNoReply = role?.showNoReply ?? false;
       if (!(noReply && !showNoReply)) {
         await MessageStore.instance.ensureLoaded(chatId);
-        await _sendSegmentsQueued(chatId, roleId, content, isGroup: isGroup);
+        await _sendSegmentsQueued(
+          chatId,
+          roleId,
+          content,
+          isGroup: isGroup,
+          toolEmotions: _extractToolEmotions(metadata),
+        );
         debugPrint('ChatController: recovered reply rendered for task $taskId');
       }
 
@@ -1265,7 +1291,16 @@ class ChatController extends ChangeNotifier {
     );
   }
 
-  Future<String?> _callAI({
+  List<String> _extractToolEmotions(Map<String, dynamic>? metadata) {
+    final rawEmotions = metadata?['emojis_called'];
+    if (rawEmotions is! List) return const <String>[];
+    return rawEmotions
+        .map((value) => value.toString().trim())
+        .where((value) => value.isNotEmpty)
+        .toList();
+  }
+
+  Future<_AiReply?> _callAI({
     required String chatId,
     required Role role,
     required String userMessage,
@@ -1330,6 +1365,15 @@ class ChatController extends ChangeNotifier {
       },
     );
 
+    // Older servers can finish the request synchronously. Preserve tool
+    // metadata in this compatibility path as well.
+    if (submitResponse.status == 'completed' && submitResponse.content != null) {
+      return _AiReply(
+        submitResponse.content!,
+        _extractToolEmotions(submitResponse.metadata),
+      );
+    }
+
     // 异步任务：等待推送结果
     if (submitResponse.status == 'queued' && submitResponse.taskId != null) {
       final taskId = submitResponse.taskId!;
@@ -1391,7 +1435,7 @@ class ChatController extends ChangeNotifier {
           }
           await _markTaskRendered(taskId);
           if (noReply && !role.showNoReply) return null;
-          return content;
+          return _AiReply(content, _extractToolEmotions(metadata));
         }
 
         // 终态失败：不再需要恢复，清除持久化 pending。
@@ -1445,7 +1489,7 @@ class ChatController extends ChangeNotifier {
                   );
                   await _markTaskRendered(taskId);
                   if (noReply && !role.showNoReply) return null;
-                  return content;
+                  return _AiReply(content, _extractToolEmotions(metadata));
                 }
               }
             }
@@ -1498,6 +1542,7 @@ class ChatController extends ChangeNotifier {
     String roleId,
     String rawReply, {
     required bool isGroup,
+    List<String> toolEmotions = const <String>[],
   }) async {
     final segments = SegmentSender.splitMessage(rawReply);
     final availableEmojiCategories = await _loadAvailableEmojiCategories(
@@ -1516,6 +1561,7 @@ class ChatController extends ChangeNotifier {
             : null);
     debugPrint('ChatController: Split into ${segments.length} segments');
 
+    final renderedTextEmotions = <String>[];
     for (var i = 0; i < segments.length; i++) {
       final segment = segments[i];
       final isLast = i == segments.length - 1;
@@ -1586,119 +1632,17 @@ class ChatController extends ChangeNotifier {
 
       debugPrint('ChatController: Sent segment ${i + 1}/${segments.length}');
 
-      // 如果有情绪标签，从后端获取随机表情包并发送
+      // Keep legacy text tags working while tool-call metadata becomes the
+      // authoritative signal for newer backend responses.
       if (emotion != null) {
-        final placeholderStickerId =
-            '${DateTime.now().millisecondsSinceEpoch}_sticker_${emotion.hashCode}';
-        var placeholderResolved = false;
-        final placeholderContent = StickerService.createStickerMessageContent(
-          emotion,
-          'placeholder://$emotion',
+        renderedTextEmotions.add(emotion);
+        await _appendAiSticker(
+          chatId: chatId,
+          roleId: roleId,
+          emotion: emotion,
+          availableEmojiCategories: availableEmojiCategories,
+          defaultEmojiCategory: defaultEmojiCategory,
         );
-        final placeholderStickerMessage = Message(
-          id: placeholderStickerId,
-          senderId: roleId,
-          receiverId: 'me',
-          content: placeholderContent,
-          type: MessageType.sticker,
-          timestamp: DateTime.now(),
-        );
-        await MessageStore.instance.addMessage(
-          chatId,
-          placeholderStickerMessage,
-        );
-
-        String? resolveStickerUrl(Map<String, dynamic> data) {
-          if (data['found'] == true && data['url'] != null) {
-            final value = data['url'].toString().trim();
-            if (value.isNotEmpty) {
-              return value;
-            }
-          }
-          return null;
-        }
-
-        Future<String?> fetchStickerUrlWithFallback() async {
-          final fallbackEmotions = <String>[emotion];
-          if (defaultEmojiCategory != null && defaultEmojiCategory.isNotEmpty) {
-            fallbackEmotions.add(defaultEmojiCategory);
-          }
-          fallbackEmotions.addAll(availableEmojiCategories);
-
-          final orderedCandidates = <String>[];
-          for (final candidate in fallbackEmotions) {
-            final normalized = candidate.trim().toLowerCase();
-            if (normalized.isEmpty || orderedCandidates.contains(normalized)) {
-              continue;
-            }
-            orderedCandidates.add(normalized);
-          }
-
-          for (final targetEmotion in orderedCandidates) {
-            try {
-              final data = await SecureWebSocketClient.instance
-                  .request('emoji_random', {
-                    'role_id': roleId,
-                    'emotion': targetEmotion,
-                  })
-                  .timeout(const Duration(seconds: 5));
-
-              final stickerUrl = resolveStickerUrl(data);
-              if (stickerUrl != null) {
-                return stickerUrl;
-              }
-            } catch (e) {
-              debugPrint(
-                'ChatController: Sticker fetch error on emotion $targetEmotion: $e',
-              );
-            }
-          }
-
-          return null;
-        }
-
-        try {
-          final stickerUrl = await fetchStickerUrlWithFallback();
-          if (stickerUrl != null) {
-            // 延迟一小段时间再发表情包
-            await Future.delayed(
-              Duration(milliseconds: 300 + _random.nextInt(500)),
-            );
-
-            final stickerContent = StickerService.createStickerMessageContent(
-              emotion,
-              stickerUrl,
-            );
-            await MessageStore.instance.updateMessage(
-              chatId,
-              placeholderStickerId,
-              content: stickerContent,
-              type: MessageType.sticker,
-            );
-            placeholderResolved = true;
-            debugPrint(
-              'ChatController: Replaced placeholder sticker for emotion: $emotion',
-            );
-          }
-        } catch (e) {
-          debugPrint('ChatController: Sticker fetch error: $e');
-        }
-
-        if (!placeholderResolved) {
-          final fallbackPlaceholderEmotion = defaultEmojiCategory ?? emotion;
-          await MessageStore.instance.updateMessage(
-            chatId,
-            placeholderStickerId,
-            content: StickerService.createStickerMessageContent(
-              fallbackPlaceholderEmotion,
-              'placeholder://$fallbackPlaceholderEmotion',
-            ),
-            type: MessageType.sticker,
-          );
-          debugPrint(
-            'ChatController: Keep fallback placeholder sticker for emotion: $emotion',
-          );
-        }
       }
 
       if (!isLast) {
@@ -1708,9 +1652,103 @@ class ChatController extends ChangeNotifier {
       }
     }
 
+    // A tool call is valid even when the final model text does not echo its
+    // legacy [emotion] marker. Consume matching text markers first so old
+    // model responses do not render the same tool call twice.
+    final unmatchedTextEmotions = List<String>.from(renderedTextEmotions);
+    for (final rawEmotion in toolEmotions) {
+      final emotion = StickerService.resolveAvailableEmotion(
+        rawEmotion: rawEmotion,
+        availableCategories: availableEmojiCategories,
+        defaultCategory: defaultEmojiCategory,
+      );
+      if (emotion == null) continue;
+      final existingIndex = unmatchedTextEmotions.indexOf(emotion);
+      if (existingIndex >= 0) {
+        unmatchedTextEmotions.removeAt(existingIndex);
+        continue;
+      }
+      await _appendAiSticker(
+        chatId: chatId,
+        roleId: roleId,
+        emotion: emotion,
+        availableEmojiCategories: availableEmojiCategories,
+        defaultEmojiCategory: defaultEmojiCategory,
+      );
+    }
+
     if (!isGroup) {
       _hideTyping(chatId);
     }
+  }
+
+  Future<void> _appendAiSticker({
+    required String chatId,
+    required String roleId,
+    required String emotion,
+    required List<String> availableEmojiCategories,
+    required String? defaultEmojiCategory,
+  }) async {
+    final placeholderStickerId =
+        '${DateTime.now().microsecondsSinceEpoch}_sticker_${emotion.hashCode}';
+    final placeholderContent = StickerService.createStickerMessageContent(
+      emotion,
+      'placeholder://$emotion',
+    );
+    await MessageStore.instance.addMessage(chatId, Message(
+      id: placeholderStickerId,
+      senderId: roleId,
+      receiverId: 'me',
+      content: placeholderContent,
+      type: MessageType.sticker,
+      timestamp: DateTime.now(),
+    ));
+
+    final candidates = <String>[emotion];
+    if (defaultEmojiCategory != null && defaultEmojiCategory.isNotEmpty) {
+      candidates.add(defaultEmojiCategory);
+    }
+    candidates.addAll(availableEmojiCategories);
+
+    String? stickerUrl;
+    for (final candidate in candidates.toSet()) {
+      try {
+        final data = await SecureWebSocketClient.instance
+            .request('emoji_random', {'role_id': roleId, 'emotion': candidate})
+            .timeout(const Duration(seconds: 5));
+        if (data['found'] == true && data['url'] != null) {
+          final value = data['url'].toString().trim();
+          if (value.isNotEmpty) {
+            stickerUrl = value;
+            break;
+          }
+        }
+      } catch (e) {
+        debugPrint('ChatController: Sticker fetch error on $candidate: $e');
+      }
+    }
+
+    if (stickerUrl != null) {
+      await Future.delayed(Duration(milliseconds: 300 + _random.nextInt(500)));
+      await MessageStore.instance.updateMessage(
+        chatId,
+        placeholderStickerId,
+        content: StickerService.createStickerMessageContent(emotion, stickerUrl),
+        type: MessageType.sticker,
+      );
+      return;
+    }
+
+    final fallbackEmotion = defaultEmojiCategory ?? emotion;
+    await MessageStore.instance.updateMessage(
+      chatId,
+      placeholderStickerId,
+      content: StickerService.createStickerMessageContent(
+        fallbackEmotion,
+        'placeholder://$fallbackEmotion',
+      ),
+      type: MessageType.sticker,
+    );
   }
 
   // ========== 辅助方法 ==========
