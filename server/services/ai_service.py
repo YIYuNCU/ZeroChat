@@ -658,6 +658,7 @@ from services.ai_tools import (
     _WEB_SEARCH_TOOL,
     _WRITE_MEMORY_TOOL,
     _RECOGNIZE_IMAGE_TOOL,
+    _REVIEW_PREVIOUS_IMAGES_TOOL,
     execute_schedule_task,
     execute_block_user,
     execute_search_memory,
@@ -682,8 +683,7 @@ async def generate_with_role(
     """
     以角色身份生成回复
 
-    vision_context: 「工具模式」识图专用。形如 {"image_data_urls": [<data url>, ...]}，
-    非空时向聊天模型开放 recognize_image 工具，由 AI 自主决定是否识图。
+    vision_context: 工具模式识图上下文，包含本次和同一会话上一批图片。
     """
     messages = []
     is_onebot = origin.startswith("onebot")
@@ -720,8 +720,11 @@ async def generate_with_role(
         active_tools.extend(_BLOCK_USER_TOOL)
     # 工具模式识图：本次消息附带图片时开放 recognize_image，由 AI 自主决定是否识图
     image_data_urls = list((vision_context or {}).get("image_data_urls") or [])
+    previous_image_data_urls = list((vision_context or {}).get("previous_image_data_urls") or [])
     if image_data_urls:
         active_tools.extend(_RECOGNIZE_IMAGE_TOOL)
+    if previous_image_data_urls:
+        active_tools.extend(_REVIEW_PREVIOUS_IMAGES_TOOL)
     tools = active_tools if active_tools else None
     result = await _call_with_role_config(role_data, messages, default_temp=1.2, tools=tools)
 
@@ -878,6 +881,22 @@ async def _handle_tool_calls(
                     tool_result = await execute_recognize_image(urls, focus, image_index)
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: recognize_image -> {tool_result[:100]}")
+
+                elif func_name == "review_previous_images":
+                    prompt = str(args.get("prompt", "")).strip()
+                    try:
+                        image_index = int(args.get("image_index", 0))
+                    except (TypeError, ValueError):
+                        image_index = 0
+                    urls = list((vision_context or {}).get("previous_image_data_urls") or [])
+                    logger.info(
+                        "Tool call: review_previous_images [prompt=%s, image_index=%s]",
+                        prompt,
+                        image_index,
+                    )
+                    tool_result = await execute_recognize_image(urls, prompt, image_index)
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: review_previous_images -> {tool_result[:100]}")
             except Exception as e:
                 logger.error(f"Tool execution error: {func_name} -> {e}")
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": f"操作失败：{e}"})

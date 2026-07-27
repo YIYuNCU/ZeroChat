@@ -750,6 +750,19 @@ def _resolve_vision_uploads(upload_ids: List[str]) -> tuple[List[str], List[Path
     return data_urls, cleanup_dirs
 
 
+def _vision_history_scope(event_context: Dict[str, Any]) -> str:
+    """Build a stable scope so image history cannot cross chat boundaries."""
+    origin = str(event_context.get("origin") or "zerochat").strip() or "zerochat"
+    chat_id = str(
+        event_context.get("chat_id")
+        or event_context.get("onebot_group_id")
+        or event_context.get("group_id")
+        or event_context.get("sender_id")
+        or "default"
+    ).strip()
+    return f"{origin}:{chat_id}"
+
+
 async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     """处理用户聊天消息"""
     from services.memory_service import (
@@ -822,17 +835,37 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     # 会在存在图片时暴露 recognize_image 工具，由 AI 自主决定是否识图（不做前置识别）。
     vision_context: Optional[Dict[str, Any]] = None
     vision_cleanup_dirs: List[Path] = []
+    from services import vision_service
+    vision_history_scope = _vision_history_scope(event_context)
+    previous_image_data_urls = vision_service.load_previous_images(
+        role_id, vision_history_scope
+    )
     upload_ids = event_context.get("vision_upload_ids") or []
     if isinstance(upload_ids, list) and upload_ids:
         data_urls, vision_cleanup_dirs = _resolve_vision_uploads(upload_ids)
         if data_urls:
-            vision_context = {"image_data_urls": data_urls}
+            vision_context = {
+                "image_data_urls": data_urls,
+                "previous_image_data_urls": previous_image_data_urls,
+            }
+            vision_service.save_previous_images(role_id, vision_history_scope, data_urls)
             extra_parts.append(
                 f"[图片附件] 用户本次发送了 {len(data_urls)} 张图片。若需了解图片内容以更好地回复，"
                 "请调用 recognize_image 工具，并可在 focus 中说明你想重点关注的细节。"
             )
+            if previous_image_data_urls:
+                extra_parts.append(
+                    f"[上一批图片] 本会话上一批共有 {len(previous_image_data_urls)} 张图片。"
+                    "如需用新问题重新识别，请调用 review_previous_images 并提供 prompt。"
+                )
             if not user_message.strip():
                 user_message = "用户发送了图片"
+    elif previous_image_data_urls:
+        vision_context = {"previous_image_data_urls": previous_image_data_urls}
+        extra_parts.append(
+            f"[上一批图片] 用户在本会话上一批发送了 {len(previous_image_data_urls)} 张图片。"
+            "若用户要求回看，请调用 review_previous_images 并提供新的 prompt。"
+        )
 
     try:
         pipeline_result = await _run_memory_ai_pipeline(

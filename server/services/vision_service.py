@@ -3,7 +3,10 @@ Vision / 图片识别共享工具模块
 提供 OneBot 与 WebSocket 前端共用的图片识别处理逻辑
 """
 import base64
+import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -12,6 +15,46 @@ from services.memory_service import append_short_term
 from core.utils import is_tool_role_id
 
 logger = logging.getLogger(__name__)
+
+_VISION_HISTORY_DIR = Path(__file__).parent.parent / "data" / "vision_history"
+
+
+def _history_file(role_id: str, conversation_scope: str) -> Path:
+    scope = f"{role_id}\0{conversation_scope}".encode("utf-8")
+    return _VISION_HISTORY_DIR / f"{hashlib.sha256(scope).hexdigest()}.json"
+
+
+def load_previous_images(role_id: str, conversation_scope: str) -> List[str]:
+    """Return the prior image batch for this role and conversation only."""
+    if not role_id or not conversation_scope:
+        return []
+    try:
+        with open(_history_file(role_id, conversation_scope), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        images = data.get("images") if isinstance(data, dict) else None
+        if not isinstance(images, list):
+            return []
+        return [str(image) for image in images if str(image).startswith("data:image/")]
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return []
+
+
+def save_previous_images(role_id: str, conversation_scope: str, image_data_urls: List[str]) -> None:
+    """Replace the prior image batch for one role and one conversation."""
+    if not role_id or not conversation_scope:
+        return
+    images = [str(image) for image in image_data_urls if str(image).startswith("data:image/")]
+    if not images:
+        return
+    target = _history_file(role_id, conversation_scope)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_suffix(".tmp")
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump({"images": images}, f, ensure_ascii=False)
+        temp.replace(target)
+    except OSError as error:
+        logger.warning("Unable to save previous image batch: %s", error)
 
 
 def guess_image_mime(data: bytes) -> Optional[str]:

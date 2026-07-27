@@ -9,6 +9,7 @@ from routers.settings import SettingsUpdate, update_settings
 from services.ai_tools import (
     _BLOCK_USER_TOOL,
     _RECOGNIZE_IMAGE_TOOL,
+    _REVIEW_PREVIOUS_IMAGES_TOOL,
     _SCHEDULE_TASK_TOOL,
     _SEARCH_MEMORY_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
@@ -20,6 +21,7 @@ from services.ai_service import (
     _handle_tool_calls,
     _normalize_embedding_url,
 )
+from services import vision_service
 from transport import ws_dispatcher
 
 
@@ -32,6 +34,7 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
             _WEB_SEARCH_TOOL,
             _WRITE_MEMORY_TOOL,
             _RECOGNIZE_IMAGE_TOOL,
+            _REVIEW_PREVIOUS_IMAGES_TOOL,
             _SEND_EMOTION_EMOJI_TOOL,
         )
         for group in tool_groups:
@@ -162,6 +165,53 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[0]["reasoning_content"], "需要表达关心")
         self.assertEqual(messages[1]["tool_call_id"], "call_love_1")
         self.assertEqual(normalized["_emojis_called"], ["love"])
+
+    def test_previous_image_cache_keeps_the_complete_batch(self):
+        images = [f"data:image/png;base64,image-{index}" for index in range(7)]
+        with TemporaryDirectory() as temp_dir, patch.object(
+            vision_service, "_VISION_HISTORY_DIR", Path(temp_dir)
+        ):
+            vision_service.save_previous_images("role-1", "zerochat:chat-1", images)
+            loaded = vision_service.load_previous_images("role-1", "zerochat:chat-1")
+            other_chat = vision_service.load_previous_images("role-1", "zerochat:chat-2")
+
+        self.assertEqual(loaded, images)
+        self.assertEqual(other_chat, [])
+
+    async def test_previous_image_tool_uses_a_new_vision_prompt(self):
+        previous_image = "data:image/png;base64,previous-image"
+        result = {
+            "tool_calls": [{
+                "id": "call_previous_image",
+                "type": "function",
+                "function": {
+                    "name": "review_previous_images",
+                    "arguments": {
+                        "prompt": "只识别图片中的招牌文字",
+                        "image_index": 0,
+                    },
+                },
+            }],
+        }
+        messages = []
+        with patch(
+            "services.ai_service.execute_recognize_image",
+            return_value="招牌写着 ZeroChat",
+        ) as recognize, patch(
+            "services.ai_service._call_with_role_config",
+            return_value={"success": True, "content": "我看到了"},
+        ):
+            await _handle_tool_calls(
+                result,
+                messages,
+                {"id": "role-1"},
+                [],
+                vision_context={"previous_image_data_urls": [previous_image]},
+            )
+
+        recognize.assert_awaited_once_with(
+            [previous_image], "只识别图片中的招牌文字", 0
+        )
 
     def test_embedding_url_normalization_preserves_provider_base_path(self):
         self.assertEqual(
