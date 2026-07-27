@@ -2,20 +2,121 @@ import asyncio
 import base64
 import hashlib
 import json
+import mimetypes
 import shutil
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import WebSocket
 
-from core.utils import is_tool_role_id, mask_api_key
+from core.utils import ensure_path_within_root, ensure_simple_path_segment, is_tool_role_id, mask_api_key
 from routers import roles, settings
 from services import settings_service
 
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 VISION_UPLOADS_DIR = DATA_DIR / "vision"
+EMOJI_TRANSFER_CHUNK_SIZE = 48 * 1024
+EMOJI_TRANSFER_MAX_SIZE = 12 * 1024 * 1024
+EMOJI_TRANSFER_TTL = timedelta(minutes=2)
+_EMOJI_TRANSFERS: dict[str, dict] = {}
+
+
+def _role_emoji_ref(role_id: str, category: str, filename: str) -> str:
+    return "ws-emoji://role/{}/{}/{}".format(
+        quote(role_id, safe=""), quote(category, safe=""), quote(filename, safe="")
+    )
+
+
+def _user_emoji_ref(emoji_id: str) -> str:
+    return f"ws-emoji://user/{quote(emoji_id, safe='')}"
+
+
+def _cleanup_emoji_transfers() -> None:
+    cutoff = datetime.now() - EMOJI_TRANSFER_TTL
+    for transfer_id, transfer in list(_EMOJI_TRANSFERS.items()):
+        if transfer["created_at"] < cutoff:
+            _EMOJI_TRANSFERS.pop(transfer_id, None)
+
+
+def _safe_segment(value: str, field_name: str) -> str:
+    try:
+        return ensure_simple_path_segment(value, field_name)
+    except ValueError as exc:
+        raise ValueError(f"invalid emoji {field_name}") from exc
+
+
+def _resolve_emoji_reference(reference: str) -> Path:
+    parsed = urlparse(str(reference or ""))
+    if parsed.scheme != "ws-emoji":
+        raise ValueError("unsupported emoji reference")
+
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if parsed.netloc == "role" and len(parts) == 3:
+        role_id = _safe_segment(parts[0], "role_id")
+        category = _safe_segment(parts[1], "category")
+        filename = _safe_segment(parts[2], "filename")
+        root = roles.get_role_dir(role_id) / "emojis"
+        path = ensure_path_within_root(root / category / filename, root)
+    elif parsed.netloc == "user" and len(parts) == 1:
+        emoji_id = parts[0].strip()
+        with roles._get_user_emoji_connection() as conn:
+            row = conn.execute(
+                "SELECT file_path FROM user_emojis WHERE id = ?", (emoji_id,)
+            ).fetchone()
+        if not row:
+            raise ValueError("emoji not found")
+        path = ensure_path_within_root(Path(str(row["file_path"])), roles.USER_EMOJI_DIR)
+    else:
+        raise ValueError("invalid emoji reference")
+
+    if not path.exists() or not path.is_file():
+        raise ValueError("emoji file not found")
+    return path
+
+
+async def _handle_emoji_file_init(payload: dict, backend_base_url: str) -> dict:
+    path = _resolve_emoji_reference(str(payload.get("reference") or ""))
+    _cleanup_emoji_transfers()
+    transfer_id = uuid.uuid4().hex
+    size = path.stat().st_size
+    if size > EMOJI_TRANSFER_MAX_SIZE:
+        raise ValueError("emoji file exceeds transfer limit")
+    total_chunks = max(1, (size + EMOJI_TRANSFER_CHUNK_SIZE - 1) // EMOJI_TRANSFER_CHUNK_SIZE)
+    _EMOJI_TRANSFERS[transfer_id] = {"path": path, "created_at": datetime.now()}
+    return {
+        "transfer_id": transfer_id,
+        "total_chunks": total_chunks,
+        "size": size,
+        "filename": path.name,
+        "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+async def _handle_emoji_file_chunk(payload: dict, backend_base_url: str) -> dict:
+    _cleanup_emoji_transfers()
+    transfer_id = str(payload.get("transfer_id") or "").strip()
+    transfer = _EMOJI_TRANSFERS.get(transfer_id)
+    if not transfer:
+        raise ValueError("emoji transfer expired")
+    try:
+        index = int(payload.get("chunk_index"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid chunk_index") from exc
+    path = transfer["path"]
+    size = path.stat().st_size
+    total_chunks = max(1, (size + EMOJI_TRANSFER_CHUNK_SIZE - 1) // EMOJI_TRANSFER_CHUNK_SIZE)
+    if index < 0 or index >= total_chunks:
+        raise ValueError("invalid chunk_index")
+    with path.open("rb") as source:
+        source.seek(index * EMOJI_TRANSFER_CHUNK_SIZE)
+        chunk = source.read(EMOJI_TRANSFER_CHUNK_SIZE)
+    if index == total_chunks - 1:
+        _EMOJI_TRANSFERS.pop(transfer_id, None)
+    return {"transfer_id": transfer_id, "chunk_index": index, "chunk_base64": base64.b64encode(chunk).decode("ascii")}
 
 
 def _safe_upload_id(raw: str) -> str:
@@ -87,9 +188,10 @@ def _normalize_chunk_index(metadata: dict, raw_chunk_index: int, total_chunks: i
 
 
 def resolve_backend_base_url_from_websocket(websocket: WebSocket, config: dict) -> str:
-    host = websocket.headers.get("host") or f"{config.get('host', '127.0.0.1')}:{config.get('port', 8000)}"
+    host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or f"{config.get('host', '127.0.0.1')}:{config.get('port', 8000)}"
+    forwarded_proto = (websocket.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
     ws_scheme = websocket.url.scheme
-    http_scheme = "https" if ws_scheme == "wss" else "http"
+    http_scheme = forwarded_proto if forwarded_proto in {"http", "https"} else ("https" if ws_scheme == "wss" else "http")
     return f"{http_scheme}://{host}".rstrip("/")
 
 
@@ -245,10 +347,10 @@ async def _handle_vision_upload_commit(payload: dict, backend_base_url: str) -> 
 
 
 async def _handle_settings_get(payload: dict, backend_base_url: str) -> dict:
-    settings_data = settings_service.load_settings()
+    settings_data = dict(settings_service.load_settings())
     include_secrets = payload.get("include_secrets") is True
     if not include_secrets:
-        for key_name in ("ai_api_key", "intent_api_key", "vision_api_key"):
+        for key_name in ("ai_api_key", "intent_api_key", "vision_api_key", "embedding_api_key"):
             masked = mask_api_key(settings_data.get(key_name))
             if masked is not None:
                 settings_data[f"{key_name}_masked"] = masked
@@ -284,6 +386,14 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
     if update.vision_mode is not None:
         mode = str(update.vision_mode).strip().lower()
         updates["vision_mode"] = mode if mode in {"standalone", "pre_model", "tool"} else "standalone"
+    if update.embedding_enabled is not None:
+        updates["embedding_enabled"] = update.embedding_enabled
+    if update.embedding_api_url is not None:
+        updates["embedding_api_url"] = update.embedding_api_url
+    if update.embedding_api_key is not None:
+        updates["embedding_api_key"] = update.embedding_api_key
+    if update.embedding_model is not None:
+        updates["embedding_model"] = update.embedding_model
     if update.host is not None:
         updates["host"] = update.host
     if update.port is not None:
@@ -563,7 +673,7 @@ async def _handle_user_emoji_upload(payload: dict, backend_base_url: str) -> dic
             "category": category,
             "tag": tag_value,
             "filename": saved_filename,
-            "url": f"{backend_base_url}/files/user-emojis/{emoji_id}",
+            "url": _user_emoji_ref(emoji_id),
         },
     }
 
@@ -589,7 +699,7 @@ async def _handle_user_emojis_list(payload: dict, backend_base_url: str) -> dict
             "tag": str(r["tag"]),
             "filename": str(r["filename"]),
             "created_at": str(r["created_at"]),
-            "url": f"{backend_base_url}/files/user-emojis/{r['id']}",
+            "url": _user_emoji_ref(str(r["id"])),
         }
         for r in rows
     ]
@@ -704,6 +814,12 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
     backend_base_url = resolve_backend_base_url_from_websocket(websocket, config)
 
     # --- Extracted handlers ---
+    if action == "emoji_file_init":
+        return await _handle_emoji_file_init(payload, backend_base_url)
+
+    if action == "emoji_file_chunk":
+        return await _handle_emoji_file_chunk(payload, backend_base_url)
+
     if action == "vision_upload_init":
         return await _handle_vision_upload_init(payload, backend_base_url)
 
@@ -1106,7 +1222,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             "found": True,
             "emotion": emotion,
             "filename": chosen.name,
-            "url": f"{backend_base_url}/files/emojis/{role_id}/{emotion}/{chosen.name}",
+            "url": _role_emoji_ref(role_id, emotion, chosen.name),
         }
 
     if action == "role_emoji_categories_list":
@@ -1150,7 +1266,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
                 "id": f"{category}:{f.name}",
                 "filename": f.name,
                 "category": category,
-                "url": f"{backend_base_url}/files/emojis/{role_id}/{category}/{f.name}",
+                "url": _role_emoji_ref(role_id, category, f.name),
             }
             for f in files
         ]
@@ -1184,7 +1300,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
                 "id": f"{category}:{saved_filename}",
                 "filename": saved_filename,
                 "category": category,
-                "url": f"{backend_base_url}/files/emojis/{role_id}/{category}/{saved_filename}",
+                "url": _role_emoji_ref(role_id, category, saved_filename),
             },
         }
 

@@ -7,6 +7,7 @@ import json
 import logging
 import httpx
 import re
+from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -335,15 +336,7 @@ async def generate_embedding(
     if not resolved_url or not resolved_key:
         return {"success": False, "embedding": None, "error": "Embedding API 未配置"}
 
-    embed_url = resolved_url.rstrip("/")
-    # 移除已有 /v1/chat/completions 后缀，替换为 /v1/embeddings
-    if embed_url.endswith("/v1/chat/completions"):
-        embed_url = embed_url.replace("/v1/chat/completions", "/v1/embeddings")
-    elif embed_url.endswith("/chat/completions"):
-        embed_url = embed_url.replace("/chat/completions", "/embeddings")
-    else:
-        # 确保 URL 指向 /v1/embeddings 端点
-        embed_url = embed_url.rstrip("/v1").rstrip("/") + "/v1/embeddings"
+    embed_url = _normalize_embedding_url(resolved_url)
 
     try:
         client = _get_http_client()
@@ -362,10 +355,29 @@ async def generate_embedding(
         data = response.json()
         embedding = data["data"][0]["embedding"]
         return {"success": True, "embedding": embedding, "error": None}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            return {
+                "success": False,
+                "embedding": None,
+                "error": "Embedding API authentication failed (HTTP 401). Update the embedding API key.",
+            }
+        return {"success": False, "embedding": None, "error": f"Embedding API HTTP {e.response.status_code}"}
     except httpx.HTTPError as e:
-        return {"success": False, "embedding": None, "error": f"HTTP Error: {str(e)}"}
+        return {"success": False, "embedding": None, "error": f"Embedding API request failed: {e}"}
     except Exception as e:
         return {"success": False, "embedding": None, "error": str(e)}
+
+
+def _normalize_embedding_url(api_url: str) -> str:
+    """Convert an OpenAI-compatible base or chat URL to its embeddings endpoint."""
+    parsed = urlsplit(api_url.strip())
+    path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        path = f"{path[:-len('/chat/completions')]}/embeddings"
+    elif not path.endswith("/embeddings"):
+        path = f"{path}/embeddings" if path.endswith("/v1") else f"{path}/v1/embeddings"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _build_stats_instruction(role_data: Dict, stats_current: Optional[Dict[str, Any]] = None) -> str:

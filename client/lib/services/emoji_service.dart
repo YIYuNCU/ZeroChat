@@ -184,14 +184,25 @@ class EmojiService {
 
   String withBase(String relativeUrl, String baseUrl) {
     final normalized = _normalizeEmojiPath(relativeUrl);
+    final uri = Uri.tryParse(normalized);
+    final emojiPath = uri?.path ?? normalized;
+    final isEmojiPath = emojiPath.startsWith('/files/emojis/') ||
+        emojiPath.startsWith('/files/user-emojis/');
+    final safeBase = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    if (uri != null && uri.hasScheme && isEmojiPath && safeBase.isNotEmpty) {
+      var resolved = '$safeBase$emojiPath';
+      if (uri.hasQuery) resolved = '$resolved?${uri.query}';
+      if (uri.hasFragment) resolved = '$resolved#${uri.fragment}';
+      return resolved;
+    }
     if (normalized.startsWith('http://') ||
         normalized.startsWith('https://') ||
+        normalized.startsWith('ws-emoji://') ||
         normalized.startsWith('data:') ||
         normalized.startsWith('file://')) {
       return normalized;
     }
 
-    final safeBase = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
     if (safeBase.isEmpty) {
       return normalized;
     }

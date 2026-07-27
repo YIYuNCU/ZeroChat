@@ -5,6 +5,7 @@ import '../models/message.dart';
 import '../models/stats_config.dart';
 import '../core/message_parts.dart';
 import '../services/sticker_service.dart';
+import '../services/emoji_transfer_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/role_service.dart';
@@ -487,6 +488,17 @@ class ChatBubble extends StatelessWidget {
 
     final resolvedPath = _resolveStickerImagePath(imagePath.trim());
 
+    if (EmojiTransferService.isTransferReference(resolvedPath)) {
+      return FutureBuilder<String?>(
+        future: EmojiTransferService.resolveLocalPath(resolvedPath),
+        builder: (context, snapshot) {
+          final localPath = snapshot.data;
+          if (localPath == null) return _buildStickerPlaceholder(emotion);
+          return _buildLocalSticker(localPath, emotion);
+        },
+      );
+    }
+
     return Container(
       constraints: const BoxConstraints(maxWidth: 120, maxHeight: 120),
       child: ClipRRect(
@@ -502,6 +514,21 @@ class ChatBubble extends StatelessWidget {
                 errorBuilder: (_, __, ___) => _buildStickerPlaceholder(emotion),
               )
             : _buildStickerPlaceholder(emotion),
+      ),
+    );
+  }
+
+  Widget _buildLocalSticker(String localPath, String? emotion) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 120, maxHeight: 120),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.file(
+          File(localPath),
+          fit: BoxFit.contain,
+          cacheWidth: 360,
+          errorBuilder: (_, __, ___) => _buildStickerPlaceholder(emotion),
+        ),
       ),
     );
   }

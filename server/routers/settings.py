@@ -39,11 +39,11 @@ class SettingsUpdate(BaseModel):
 @router.get("/settings")
 async def get_settings(include_secrets: bool = Query(False)):
     """获取全局设置"""
-    settings = settings_service.load_settings()
+    settings = dict(settings_service.load_settings())
 
     # 默认隐藏敏感信息，避免泄露；用于新安装客户端全量同步时可显式请求明文
     if not include_secrets:
-        for key_name in ("ai_api_key", "intent_api_key", "vision_api_key"):
+        for key_name in ("ai_api_key", "intent_api_key", "vision_api_key", "embedding_api_key"):
             masked = mask_api_key(settings.get(key_name))
             if masked is not None:
                 settings[f"{key_name}_masked"] = masked
@@ -80,6 +80,14 @@ async def update_settings(update: SettingsUpdate):
     if update.vision_mode is not None:
         mode = update.vision_mode.strip().lower()
         updates["vision_mode"] = mode if mode in {"standalone", "pre_model", "tool"} else "standalone"
+    if update.embedding_enabled is not None:
+        updates["embedding_enabled"] = update.embedding_enabled
+    if update.embedding_api_url is not None:
+        updates["embedding_api_url"] = update.embedding_api_url
+    if update.embedding_api_key is not None:
+        updates["embedding_api_key"] = update.embedding_api_key
+    if update.embedding_model is not None:
+        updates["embedding_model"] = update.embedding_model
     if update.host is not None:
         updates["host"] = update.host
     if update.port is not None:

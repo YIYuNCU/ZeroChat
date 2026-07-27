@@ -61,6 +61,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   late TextEditingController _embeddingModelController;
   List<String> _embeddingModels = [];
   bool _isLoadingEmbeddingModels = false;
+  String? _testingApi;
 
   @override
   void initState() {
@@ -220,6 +221,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
             _buildDivider(),
             _buildApiConnectButton(),
             _buildDivider(),
+            _buildCurrentConfigTestButton('chat', '测试聊天配置'),
+            _buildDivider(),
             _buildModelSelector(),
           ]),
 
@@ -247,6 +250,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               ),
               _buildDivider(),
               _buildIntentModelFetchButton(),
+              _buildDivider(),
+              _buildCurrentConfigTestButton('intent', '测试意图配置'),
               _buildDivider(),
               _buildIntentModelSelector(),
             ],
@@ -276,6 +281,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               ),
               _buildDivider(),
               _buildVisionModelFetchButton(),
+              _buildDivider(),
+              _buildCurrentConfigTestButton('vision', '测试视觉配置'),
               _buildDivider(),
               _buildVisionModelSelector(),
               _buildDivider(),
@@ -307,6 +314,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               ),
               _buildDivider(),
               _buildEmbeddingModelFetchButton(),
+              _buildDivider(),
+              _buildCurrentConfigTestButton('embedding', '测试向量配置'),
               _buildDivider(),
               _buildEmbeddingModelSelector(),
             ],
@@ -751,6 +760,167 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
         ],
       ),
     );
+  }
+
+  Widget _buildCurrentConfigTestButton(String kind, String label) {
+    final testing = _testingApi == kind;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: SizedBox(
+        width: double.infinity,
+        child: OutlinedButton.icon(
+          onPressed: _testingApi == null ? () => _testApiConfig(kind) : null,
+          icon: testing
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.play_circle_outline, size: 18),
+          label: Text(testing ? '测试中...' : label),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: const Color(0xFF1677FF),
+            side: const BorderSide(color: Color(0xFF1677FF)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _testApiConfig(String kind) async {
+    late final String url;
+    late final String key;
+    late final String model;
+    switch (kind) {
+      case 'chat':
+        url = _chatUrlController.text.trim();
+        key = _chatKeyController.text.trim();
+        model = _chatModelController.text.trim();
+        break;
+      case 'intent':
+        url = _intentUrlController.text.trim();
+        key = _intentKeyController.text.trim();
+        model = _intentModelController.text.trim();
+        break;
+      case 'vision':
+        url = _visionUrlController.text.trim();
+        key = _visionKeyController.text.trim();
+        model = _visionModelController.text.trim();
+        break;
+      case 'embedding':
+        url = _embeddingUrlController.text.trim();
+        key = _embeddingKeyController.text.trim();
+        model = _embeddingModelController.text.trim();
+        break;
+      default:
+        return;
+    }
+
+    if (url.isEmpty || key.isEmpty || model.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先填写 API URL、API Key 和模型')),
+      );
+      return;
+    }
+
+    setState(() => _testingApi = kind);
+    try {
+      final response = kind == 'embedding'
+          ? await SecureBackendClient.postRawJson(
+              _embeddingEndpoint(url),
+              body: {'model': model, 'input': 'ZeroChat configuration test'},
+              headers: {'Authorization': 'Bearer $key'},
+              includeAuth: false,
+              timeout: const Duration(seconds: 20),
+            )
+          : await SecureBackendClient.postRawJson(
+              _chatEndpoint(url),
+              body: _chatTestBody(kind, model),
+              headers: {'Authorization': 'Bearer $key'},
+              includeAuth: false,
+              timeout: const Duration(seconds: 30),
+            );
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('HTTP ${response.statusCode}: ${_responseSummary(response.body)}');
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${_apiLabel(kind)} 配置可用')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${_apiLabel(kind)} 测试失败: ${_responseSummary(error.toString())}')),
+      );
+    } finally {
+      if (mounted) setState(() => _testingApi = null);
+    }
+  }
+
+  Map<String, dynamic> _chatTestBody(String kind, String model) {
+    if (kind == 'vision') {
+      return {
+        'model': model,
+        'max_tokens': 8,
+        'messages': [
+          {
+            'role': 'user',
+            'content': [
+              {'type': 'text', 'text': 'Reply with OK.'},
+              {
+                'type': 'image_url',
+                'image_url': {
+                  'url': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
+                },
+              },
+            ],
+          },
+        ],
+      };
+    }
+    return {
+      'model': model,
+      'max_tokens': 8,
+      'messages': [
+        {'role': 'user', 'content': 'Reply with OK.'},
+      ],
+    };
+  }
+
+  String _chatEndpoint(String value) {
+    final uri = Uri.parse(value.trim());
+    var path = uri.path.replaceFirst(RegExp(r'/+$'), '');
+    if (!path.endsWith('/chat/completions')) {
+      path = path.endsWith('/v1') ? '$path/chat/completions' : '$path/v1/chat/completions';
+    }
+    return uri.replace(path: path, query: '', fragment: '').toString();
+  }
+
+  String _embeddingEndpoint(String value) {
+    final uri = Uri.parse(value.trim());
+    var path = uri.path.replaceFirst(RegExp(r'/+$'), '');
+    if (path.endsWith('/chat/completions')) {
+      path = '${path.substring(0, path.length - '/chat/completions'.length)}/embeddings';
+    } else if (!path.endsWith('/embeddings')) {
+      path = path.endsWith('/v1') ? '$path/embeddings' : '$path/v1/embeddings';
+    }
+    return uri.replace(path: path, query: '', fragment: '').toString();
+  }
+
+  String _apiLabel(String kind) {
+    return switch (kind) {
+      'chat' => '聊天 API',
+      'intent' => '意图 API',
+      'vision' => '视觉 API',
+      'embedding' => '向量 API',
+      _ => 'API',
+    };
+  }
+
+  String _responseSummary(String value) {
+    final normalized = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return normalized.length > 120 ? '${normalized.substring(0, 120)}...' : normalized;
   }
 
   Widget _buildModelSelector() {
