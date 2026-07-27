@@ -6,11 +6,45 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from routers.settings import SettingsUpdate, update_settings
-from services.ai_service import _normalize_embedding_url
+from services.ai_tools import (
+    _BLOCK_USER_TOOL,
+    _RECOGNIZE_IMAGE_TOOL,
+    _SCHEDULE_TASK_TOOL,
+    _SEARCH_MEMORY_TOOL,
+    _SEND_EMOTION_EMOJI_TOOL,
+    _WEB_SEARCH_TOOL,
+    _WRITE_MEMORY_TOOL,
+)
+from services.ai_service import (
+    _consume_inline_emoji_tool_markup,
+    _handle_tool_calls,
+    _normalize_embedding_url,
+)
 from transport import ws_dispatcher
 
 
 class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
+    def test_all_function_tools_use_strict_closed_schemas(self):
+        tool_groups = (
+            _SCHEDULE_TASK_TOOL,
+            _BLOCK_USER_TOOL,
+            _SEARCH_MEMORY_TOOL,
+            _WEB_SEARCH_TOOL,
+            _WRITE_MEMORY_TOOL,
+            _RECOGNIZE_IMAGE_TOOL,
+            _SEND_EMOTION_EMOJI_TOOL,
+        )
+        for group in tool_groups:
+            function = group[0]["function"]
+            parameters = function["parameters"]
+            self.assertTrue(function["strict"], function["name"])
+            self.assertFalse(parameters["additionalProperties"], function["name"])
+            self.assertEqual(
+                set(parameters["required"]),
+                set(parameters["properties"]),
+                function["name"],
+            )
+
     async def test_rest_settings_persists_embedding_fields(self):
         update = SettingsUpdate(
             embedding_enabled=True,
@@ -78,6 +112,56 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
                     chunks.append(base64.b64decode(part["chunk_base64"]))
 
         self.assertEqual(b"".join(chunks), content)
+
+    async def test_inline_emoji_tool_markup_is_not_rendered_as_text(self):
+        result = {"content": '收到啦 <send_emotion_emoji emotion="love" />'}
+        with patch(
+            "services.ai_service.execute_send_emotion_emoji",
+            return_value="[love]",
+        ) as execute:
+            normalized = await _consume_inline_emoji_tool_markup(result, {"id": "role-1"})
+
+        self.assertEqual(normalized["content"], "收到啦")
+        self.assertEqual(normalized["_emojis_called"], ["love"])
+        execute.assert_awaited_once_with({"id": "role-1"}, "love")
+
+    async def test_empty_inline_emoji_tool_markup_is_removed(self):
+        result = {"content": '<send_emotion_emoji emotion="" />'}
+        with patch("services.ai_service.execute_send_emotion_emoji") as execute:
+            normalized = await _consume_inline_emoji_tool_markup(result, {"id": "role-1"})
+
+        self.assertEqual(normalized["content"], "")
+        self.assertEqual(normalized["_emojis_called"], [])
+        execute.assert_not_awaited()
+
+    async def test_deepseek_tool_call_replays_assistant_message(self):
+        result = {
+            "assistant_content": None,
+            "reasoning_content": "需要表达关心",
+            "tool_calls": [{
+                "id": "call_love_1",
+                "type": "function",
+                "function": {
+                    "name": "send_emotion_emoji",
+                    "arguments": {"emotion": "love"},
+                },
+            }],
+        }
+        messages = []
+        with patch(
+            "services.ai_service.execute_send_emotion_emoji",
+            return_value="[love]",
+        ), patch(
+            "services.ai_service._call_with_role_config",
+            return_value={"success": True, "content": "收到啦"},
+        ):
+            normalized = await _handle_tool_calls(result, messages, {"id": "role-1"}, [])
+
+        self.assertEqual(messages[0]["role"], "assistant")
+        self.assertIsNone(messages[0]["content"])
+        self.assertEqual(messages[0]["reasoning_content"], "需要表达关心")
+        self.assertEqual(messages[1]["tool_call_id"], "call_love_1")
+        self.assertEqual(normalized["_emojis_called"], ["love"])
 
     def test_embedding_url_normalization_preserves_provider_base_path(self):
         self.assertEqual(

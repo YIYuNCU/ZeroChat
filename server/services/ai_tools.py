@@ -28,6 +28,7 @@ _SCHEDULE_TASK_TOOL = [{
     "function": {
         "name": "schedule_task",
         "description": "创建一个定时提醒任务。当用户明确要求提醒、或你主动承诺在未来某时间做某事时，调用此函数创建定时任务。触发时间使用 ISO 8601 格式（24小时制），可指定重复模式（none/daily/weekly）。",
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
@@ -45,7 +46,8 @@ _SCHEDULE_TASK_TOOL = [{
                     "description": "重复模式：none（单次）、daily（每天）、weekly（每周）"
                 }
             },
-            "required": ["message", "trigger_time"]
+            "required": ["message", "trigger_time", "repeat"],
+            "additionalProperties": False,
         }
     }
 }]
@@ -59,6 +61,7 @@ _BLOCK_USER_TOOL = [{
     "function": {
         "name": "block_user",
         "description": "屏蔽当前群聊/私聊中某个用户的消息。当你觉得某个用户的行为令人不适、骚扰、刷屏、恶意攻击或伪装亲密对象时，需要调用此函数屏蔽该用户。不要因为正常的聊天分歧而屏蔽用户。",
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
@@ -71,7 +74,8 @@ _BLOCK_USER_TOOL = [{
                     "description": "屏蔽原因（简短说明）"
                 }
             },
-            "required": ["user_id", "reason"]
+            "required": ["user_id", "reason"],
+            "additionalProperties": False,
         }
     }
 }]
@@ -161,6 +165,7 @@ _SEARCH_MEMORY_TOOL = [{
     "function": {
         "name": "search_memory",
         "description": "搜索长期记忆来回忆过去的对话。这是你唯一能准确想起用户说过什么的方法。当对话涉及之前讨论过的话题、用户提到的任何名字/事件/偏好/约定、或你怀疑当前话题与过去有关联时，必须立即调用此工具搜索相关记忆。宁可多搜一次，不可假装记得或模糊猜测。",
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
@@ -169,7 +174,8 @@ _SEARCH_MEMORY_TOOL = [{
                     "description": "搜索关键词或问题，用自然语言描述你想查找的记忆内容，如'用户喜欢什么食物''之前关于旅行的对话'"
                 }
             },
-            "required": ["query"]
+            "required": ["query"],
+            "additionalProperties": False,
         }
     }
 }]
@@ -226,6 +232,7 @@ _WEB_SEARCH_TOOL = [{
     "function": {
         "name": "web_search",
         "description": "联网搜索获取最新信息。当你需要查找实时新闻、天气、价格、最新事件、产品信息等无法从记忆中获取的外部信息时，调用此工具。",
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
@@ -235,11 +242,11 @@ _WEB_SEARCH_TOOL = [{
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "返回结果数量，默认3",
-                    "default": 3
+                    "description": "返回结果数量，通常为 3"
                 }
             },
-            "required": ["query"]
+            "required": ["query", "max_results"],
+            "additionalProperties": False,
         }
     }
 }]
@@ -274,6 +281,7 @@ _WRITE_MEMORY_TOOL = [{
     "function": {
         "name": "write_memory",
         "description": "将重要信息写入长期记忆。必须先综合当前内容、人物、事件结果、上下文和时间，生成简洁客观的记忆摘要，禁止直接复制整段聊天。只保存未来确实会用到的信息。",
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
@@ -283,10 +291,11 @@ _WRITE_MEMORY_TOOL = [{
                 },
                 "occurred_at": {
                     "type": "string",
-                    "description": "事件发生时间，ISO 8601 格式。事件发生时间不明确时省略，服务端会使用当前消息时间"
+                    "description": "事件发生时间，ISO 8601 格式。事件发生时间不明确时传空字符串，服务端会使用当前消息时间"
                 }
             },
-            "required": ["summary"]
+            "required": ["summary", "occurred_at"],
+            "additionalProperties": False,
         }
     }
 }]
@@ -303,6 +312,7 @@ _RECOGNIZE_IMAGE_TOOL = [{
     "function": {
         "name": "recognize_image",
         "description": "识别并理解用户发来的图片内容。当用户本次消息附带了图片、且你需要了解图片里有什么才能更好地回复时，调用此工具。可以通过 focus 说明你想重点关注的细节（例如「图片里的文字」「人物的表情」「场景氛围」）。如果图片与对话无关或无需查看即可自然回复，则不必调用。",
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
@@ -312,11 +322,11 @@ _RECOGNIZE_IMAGE_TOOL = [{
                 },
                 "image_index": {
                     "type": "integer",
-                    "description": "要识别第几张图片（从 0 开始）。通常只有一张图片时省略即可，默认 0。",
-                    "default": 0
+                    "description": "要识别第几张图片（从 0 开始）。通常只有一张图片时传 0。"
                 }
             },
-            "required": []
+            "required": ["focus", "image_index"],
+            "additionalProperties": False,
         }
     }
 }]
@@ -430,15 +440,18 @@ _SEND_EMOTION_EMOJI_TOOL = [{
     "function": {
         "name": "send_emotion_emoji",
         "description": "在回复中附加一个情绪表情贴图来表达你的感受。当你的回复带有明显情绪倾向时（开心、关心、难过、惊讶、困惑、疲惫、生气等），调用此工具发送对应的情绪表情。不需要每句话都用，选择有情绪表达的回复即可。",
+        "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
                 "emotion": {
                     "type": "string",
+                    "enum": ["happy", "sad", "angry", "surprised", "love", "confused", "excited", "tired"],
                     "description": "情绪标签，从以下中选择最匹配你当前回复情绪的标签：happy（开心）、sad（难过）、angry（生气）、surprised（惊讶）、love（爱意/撒娇）、confused（困惑）、excited（兴奋）、tired（疲惫）。例如回复搞笑的內容用 happy，表达关心用 love，听到好消息用 excited。"
                 }
             },
-            "required": ["emotion"]
+            "required": ["emotion"],
+            "additionalProperties": False,
         }
     }
 }]

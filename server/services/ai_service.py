@@ -16,11 +16,45 @@ from services import settings_service
 logger = logging.getLogger(__name__)
 
 NO_REPLY_DIRECTIVE = "<无回复/>"
+_INLINE_EMOJI_TOOL_RE = re.compile(
+    r'<\s*send_emotion_emoji\b(?P<attrs>[^>]*)/\s*>', re.IGNORECASE
+)
+_INLINE_EMOJI_EMOTION_RE = re.compile(
+    r'\bemotion\s*=\s*["\'](?P<emotion>[^"\']*)["\']', re.IGNORECASE
+)
+_VALID_EMOJI_EMOTION_RE = re.compile(r'^[a-z0-9_-]{1,64}$')
 
 
 def is_no_reply_directive(content: Any) -> bool:
     """仅接受独立的无回复指令，避免吞掉与正文混合的回复。"""
     return str(content or "").strip() == NO_REPLY_DIRECTIVE
+
+
+async def _consume_inline_emoji_tool_markup(
+    result: Dict[str, Any], role_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Handle providers that emit an emoji tool call as XML in plain text."""
+    content = str(result.get("content") or "")
+    matches = list(_INLINE_EMOJI_TOOL_RE.finditer(content))
+    if not matches:
+        return result
+
+    result["content"] = _INLINE_EMOJI_TOOL_RE.sub("", content).strip()
+    emojis_called = list(result.get("_emojis_called") or [])
+    for match in matches:
+        emotion_match = _INLINE_EMOJI_EMOTION_RE.search(match.group("attrs"))
+        emotion = (emotion_match.group("emotion") if emotion_match else "").strip().lower()
+        if not _VALID_EMOJI_EMOTION_RE.fullmatch(emotion):
+            logger.warning("Ignoring invalid inline emoji tool markup: %s", match.group(0))
+            continue
+        tool_result = await execute_send_emotion_emoji(role_data, emotion)
+        if tool_result.startswith("["):
+            emojis_called.append(emotion)
+        else:
+            logger.warning("Inline emoji tool call failed: %s", tool_result)
+
+    result["_emojis_called"] = emojis_called
+    return result
 
 # 共享 httpx 客户端连接池
 _SHARED_CLIENT: Optional[httpx.AsyncClient] = None
@@ -210,8 +244,8 @@ async def _post_chat(
         response.raise_for_status()
         data = response.json()
         message = data["choices"][0]["message"]
-        raw_content = message.get("content") or ""
-        content = _extract_plain_message_content(raw_content)
+        assistant_content = message.get("content")
+        content = _extract_plain_message_content(assistant_content or "")
         tool_calls = message.get("tool_calls")
         # DeepSeek 等 API 可能在限速时返回 200 OK 但 content 为空
         if not content and not tool_calls:
@@ -230,6 +264,10 @@ async def _post_chat(
             result["usage"] = usage
         if tool_calls:
             result["tool_calls"] = tool_calls
+            # DeepSeek requires the assistant's original tool-call message to
+            # be replayed before each role=tool result. Do not substitute the
+            # display-normalized content here; it may be null or empty.
+            result["assistant_content"] = assistant_content
         # DeepSeek 等 API 的 thinking 模式会返回 reasoning_content，重调时需原样传回
         if message.get("reasoning_content"):
             result["reasoning_content"] = message["reasoning_content"]
@@ -519,7 +557,7 @@ def _build_system_prompt(
         "  - 原则：宁可多搜一次，不可假装记得；记忆窗口里没有 ≠ 不存在，仍需搜索。\n\n"
         "2. send_emotion_emoji（情绪表情）—— 回复带明显情绪时调用，不必每句都用：\n"
         "  - 情绪标签：happy/excited（开心有趣）、love（关心撒娇）、sad（难过）、surprised（惊讶）、confused（困惑）、tired（疲惫）、angry（生气）。\n"
-        "  - 硬性约束：严禁在正文直接插入 Unicode emoji（😀❤️😭 等），情绪一律通过本工具表达。\n\n"
+        "  - 硬性约束：严禁在正文直接插入 Unicode emoji（😀❤️😭 等）或任何 XML/文本工具调用标记；必须使用 API 的 tool_calls 字段。\n\n"
         "3. schedule_task（定时任务）—— 用户要求提醒、或你承诺将来做某事时创建：\n"
         "  - 需指定提醒内容、触发时间（ISO 8601，24 小时制）及可选重复模式。\n\n"
         "4. web_search（联网搜索）—— 需要实时/外部信息时使用：\n"
@@ -693,7 +731,7 @@ async def generate_with_role(
             result, messages, role_data, tools, vision_context=vision_context
         )
 
-    return result
+    return await _consume_inline_emoji_tool_markup(result, role_data)
 
 
 async def _handle_tool_calls(
@@ -712,18 +750,34 @@ async def _handle_tool_calls(
     max_rounds = 5
 
     for round_idx in range(max_rounds):
-        # 先添加一条 assistant 消息记录所有 tool_calls，再逐个添加 tool 响应
-        assistant_msg: Dict[str, Any] = {"role": "assistant", "content": "", "tool_calls": result["tool_calls"]}
-        if result.get("reasoning_content"):
+        # DeepSeek requires its original assistant tool-call message, followed
+        # by one role=tool message per tool_call_id.
+        assistant_msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": result.get("assistant_content", result.get("content")),
+            "tool_calls": result["tool_calls"],
+        }
+        if "reasoning_content" in result:
             assistant_msg["reasoning_content"] = result["reasoning_content"]
         messages.append(assistant_msg)
 
         for tc in result["tool_calls"]:
+            if not isinstance(tc, dict):
+                logger.warning("Ignoring malformed tool call: %r", tc)
+                continue
+            tool_call_id = str(tc.get("id") or "").strip()
+            if not tool_call_id:
+                logger.warning("Ignoring tool call without id: %r", tc)
+                continue
             func = tc.get("function", {})
+            if not isinstance(func, dict):
+                logger.warning("Ignoring tool call without function: %r", tc)
+                continue
             func_name = func.get("name", "")
             try:
                 from services.json_parse import extract_json_object
-                args = extract_json_object(func.get("arguments", "{}"))
+                raw_args = func.get("arguments", "{}")
+                args = raw_args if isinstance(raw_args, dict) else extract_json_object(raw_args)
                 if args is None:
                     args = {}
 
@@ -734,11 +788,11 @@ async def _handle_tool_calls(
                     logger.info(f"Tool call: schedule_task [message={msg}, trigger_time={trigger_time}, repeat={repeat}]")
                     if msg and trigger_time:
                         tool_result = await execute_schedule_task(role_data, msg, trigger_time, repeat)
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                         logger.info(f"Tool result: schedule_task -> {tool_result[:100]}")
                     else:
                         err = "参数不完整：message 和 trigger_time 为必填"
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: schedule_task -> {err}")
 
                 elif func_name == "block_user":
@@ -747,11 +801,11 @@ async def _handle_tool_calls(
                     logger.info(f"Tool call: block_user [user_id={uid}, reason={reason}]")
                     if uid:
                         tool_result = await execute_block_user(role_data, uid, reason)
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                         logger.info(f"Tool result: block_user -> {tool_result[:100]}")
                     else:
                         err = "参数不完整：user_id 为必填"
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: block_user -> {err}")
 
                 elif func_name == "search_memory":
@@ -759,11 +813,11 @@ async def _handle_tool_calls(
                     logger.info(f"Tool call: search_memory [query={query[:80]}]")
                     if query:
                         tool_result = await execute_search_memory(role_data, query)
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                         logger.info(f"Tool result: search_memory -> {tool_result[:100]}")
                     else:
                         err = "参数不完整：query 为必填"
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: search_memory -> {err}")
 
                 elif func_name == "send_emotion_emoji":
@@ -773,11 +827,11 @@ async def _handle_tool_calls(
                         tool_result = await execute_send_emotion_emoji(role_data, emotion)
                         if not tool_result.startswith("没有找到"):
                             emojis_called.append(emotion)
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                         logger.info(f"Tool result: send_emotion_emoji -> {tool_result[:100]}")
                     else:
                         err = "参数不完整：emotion 为必填"
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": err})
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: send_emotion_emoji -> {err}")
 
                 elif func_name == "web_search":
@@ -791,7 +845,7 @@ async def _handle_tool_calls(
                         tool_result = await execute_web_search(role_data, query, max_results)
                     else:
                         tool_result = "参数不完整：query 为必填"
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: web_search -> {tool_result[:100]}")
 
                 elif func_name == "write_memory":
@@ -810,7 +864,7 @@ async def _handle_tool_calls(
                         )
                     else:
                         tool_result = "参数不完整：summary 为必填"
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: write_memory -> {tool_result[:100]}")
 
                 elif func_name == "recognize_image":
@@ -822,11 +876,11 @@ async def _handle_tool_calls(
                     urls = list((vision_context or {}).get("image_data_urls") or [])
                     logger.info(f"Tool call: recognize_image [focus={focus}, image_index={image_index}]")
                     tool_result = await execute_recognize_image(urls, focus, image_index)
-                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: recognize_image -> {tool_result[:100]}")
             except Exception as e:
                 logger.error(f"Tool execution error: {func_name} -> {e}")
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"操作失败：{e}"})
+                messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": f"操作失败：{e}"})
 
         tool_count = len(result["tool_calls"])
         logger.info(f"Re-calling AI with {tool_count} tool result(s) (round {round_idx+1}/{max_rounds})")
