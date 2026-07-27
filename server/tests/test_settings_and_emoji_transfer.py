@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import unittest
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -21,11 +22,20 @@ from services.ai_service import (
     _handle_tool_calls,
     _normalize_embedding_url,
 )
+from services.memory_service import _advance_period_cycles
 from services import vision_service
 from transport import ws_dispatcher
 
 
 class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
+    def test_period_cycle_advance_applies_a_bounded_variation(self):
+        with patch("services.memory_service.random.randint", return_value=-2):
+            advanced = _advance_period_cycles(
+                date(2026, 1, 1), 28, date(2026, 1, 30)
+            )
+
+        self.assertEqual(advanced, date(2026, 1, 27))
+
     def test_all_function_tools_use_strict_closed_schemas(self):
         tool_groups = (
             _SCHEDULE_TASK_TOOL,

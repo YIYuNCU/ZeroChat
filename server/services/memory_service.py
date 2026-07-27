@@ -374,58 +374,74 @@ def _clamp_int(value, default: int, min_val: int, max_val: int, jitter=None) -> 
 
 
 def _advance_period_cycles(last_start: datetime.date, cycle_length: int, today: datetime.date) -> datetime.date:
-    """Advance period start date to the most recent cycle within range of today."""
-
+    """Advance cycles with a small, persisted per-cycle biological variation."""
     while last_start + timedelta(days=cycle_length) <= today:
-        jitter = cycle_length + random.randint(-2, 2)
-        next_start = last_start + timedelta(days=max(jitter, 1))
-        if next_start > today or next_start <= last_start:
-            next_start = last_start + timedelta(days=cycle_length)
-            if next_start > today:
-                break
+        variation = random.randint(-2, 2)
+        next_start = last_start + timedelta(days=max(1, cycle_length + variation))
+        if next_start > today:
+            # Do not move a projected future start into the current cycle.
+            break
         last_start = next_start
     return last_start
 
 
-def _if_in_menstruation(role_id: str) -> tuple[Optional[bool], Optional[int]]:
+def _get_menstruation_status(role_id: str) -> Optional[Dict[str, Any]]:
+    """Build one consistent, date-specific cycle status for prompt injection."""
     profile_path = ROLES_DIR / role_id / "profile.json"
     if not profile_path.exists():
-        return None, None
+        return None
 
     try:
         with open(profile_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
-        return None, None
+        return None
 
-    gentle = _normalize_gender(data)
-    if data.get("gender") != gentle:
-        data["gender"] = gentle
-
-    if gentle != "women":
-        print(f"生理期检测：角色 {role_id} 性别为 {gentle}，不进行生理期检测")
-        _save_profile(profile_path, data)
-        return None, None
+    gender = _normalize_gender(data)
+    if gender != "women":
+        return None
 
     cycle_data, cycle_length, period_length, profile_updated = _load_cycle_data(data)
-    if profile_updated:
+    if profile_updated or data.get("gender") != gender:
+        data["gender"] = gender
         data["menstruation_cycle"] = cycle_data
         _save_profile(profile_path, data)
 
     today = datetime.now().date()
     with _get_connection(role_id) as conn:
-        last_start = _get_or_init_last_period_start(conn, cycle_data, cycle_length, today)
-        last_start = _advance_period_cycles(last_start, cycle_length, today)
+        period_start = _get_or_init_last_period_start(
+            conn, cycle_data, cycle_length, today
+        )
+        period_start = _advance_period_cycles(period_start, cycle_length, today)
+        next_period_start = period_start + timedelta(days=cycle_length)
+        _set_meta(conn, "last_period_start", period_start.isoformat())
+        _set_meta(conn, "next_period_start", next_period_start.isoformat())
 
-        _set_meta(conn, "last_period_start", last_start.isoformat())
-        _set_meta(conn, "next_period_start", (last_start + timedelta(days=cycle_length)).isoformat())
+    cycle_day = (today - period_start).days + 1
+    period_end = period_start + timedelta(days=period_length - 1)
+    in_period = today <= period_end
+    return {
+        "today": today.isoformat(),
+        "cycle_length": cycle_length,
+        "period_length": period_length,
+        "cycle_day": cycle_day,
+        "in_period": in_period,
+        "period_day": cycle_day if in_period else None,
+        "period_start": period_start.isoformat(),
+        # Kept for state transitions; do not expose it to the model early.
+        "expected_period_end": period_end.isoformat(),
+        "next_period_start": next_period_start.isoformat(),
+        "days_until_next_period": max(0, (next_period_start - today).days),
+    }
 
-    day_offset = max(0, (today - last_start).days)
-    if day_offset < period_length:
-        return True, day_offset + 1
 
-    days_until_next = max(1, (last_start + timedelta(days=cycle_length) - today).days)
-    return False, days_until_next
+def _if_in_menstruation(role_id: str) -> tuple[Optional[bool], Optional[int]]:
+    status = _get_menstruation_status(role_id)
+    if status is None:
+        return None, None
+    if status["in_period"]:
+        return True, int(status["period_day"])
+    return False, int(status["days_until_next_period"])
 
 
 def _get_or_init_last_period_start(conn, cycle_data: dict, cycle_length: int, today: datetime.date):
@@ -449,23 +465,16 @@ def _get_or_init_last_period_start(conn, cycle_data: dict, cycle_length: int, to
     return min(last_date, today)
 
 def _get_menstruation_cycle_info(role_id: str) -> Optional[Dict[str, Any]]:
-    profile_path = ROLES_DIR / role_id / "profile.json"
-    if not profile_path.exists():
+    status = _get_menstruation_status(role_id)
+    if status is None:
         return None
-
-    try:
-        with open(profile_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return None
-
-    gentle = data.get("gender", "men")
-    if gentle == "women":
-        cycle_data = data.get("menstruation_cycle", {})
-        return {
-            "cycle_length": cycle_data.get("cycle_length"),
-            "period_length": cycle_data.get("period_length")
-        }
+    return {
+        "cycle_length": status["cycle_length"],
+        "period_length": status["period_length"],
+        "period_start": status["period_start"],
+        "expected_period_end": status["expected_period_end"],
+        "next_period_start": status["next_period_start"],
+    }
 
 def _get_role_core_memory(role_id: str) -> str:
     profile_path = ROLES_DIR / role_id / "profile.json"

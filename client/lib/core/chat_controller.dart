@@ -1308,6 +1308,7 @@ class ChatController extends ChangeNotifier {
     List<String> imagePaths = const [],
   }) async {
     String? asyncPushError;
+    var terminalTaskFailure = false;
     final recentMessages = MessageStore.instance.getRecentRounds(
       chatId,
       role.maxContextRounds,
@@ -1438,7 +1439,8 @@ class ChatController extends ChangeNotifier {
           return _AiReply(content, _extractToolEmotions(metadata));
         }
 
-        // 终态失败：不再需要恢复，清除持久化 pending。
+        // 服务端已明确返回终态失败，才向用户展示发送失败。
+        terminalTaskFailure = true;
         await _removePersistedPendingTask(taskId);
         asyncPushError = pushPayload['error']?.toString();
         debugPrint('ChatController: Async chat failed: $asyncPushError');
@@ -1499,6 +1501,13 @@ class ChatController extends ChangeNotifier {
         }
         // 超时且即时恢复未命中：保留持久化 pending，留待后续
         // 重连/前台恢复/重启时经 recoverPendingChatTasks 补齐渲染。
+      }
+
+      // 已收到 queued/task_id 代表服务端已接收任务。推送未到或即时恢复
+      // 未命中时保留 pending 供后续恢复，不能误报为消息发送失败。
+      if (!terminalTaskFailure) {
+        debugPrint('ChatController: queued task $taskId is awaiting recovery');
+        return null;
       }
     }
 
@@ -1725,6 +1734,14 @@ class ChatController extends ChangeNotifier {
         }
       } catch (e) {
         debugPrint('ChatController: Sticker fetch error on $candidate: $e');
+      }
+
+      // The server accepted the task. A missing push/recovery response is a
+      // transport issue, not a send failure; the persisted task will recover
+      // on reconnect, foreground sync, or the next app start.
+      if (!terminalTaskFailure) {
+        debugPrint('ChatController: queued task $taskId is awaiting recovery');
+        return null;
       }
     }
 

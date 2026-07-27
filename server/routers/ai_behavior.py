@@ -766,8 +766,8 @@ def _vision_history_scope(event_context: Dict[str, Any]) -> str:
 async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     """处理用户聊天消息"""
     from services.memory_service import (
-        _if_in_menstruation, _get_memory_length,
-        sequential_memory_generation,_get_menstruation_cycle_info
+        _get_memory_length, _get_menstruation_status,
+        sequential_memory_generation,
     )
     
     role_id = event.role_id
@@ -809,19 +809,29 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         extra_parts.append(backend_moments_context)
     if search_context:
         extra_parts.append(search_context)
-    in_menstruation, menstruation_day = _if_in_menstruation(role_id)
-    cycle_info = _get_menstruation_cycle_info(role_id)
-    if in_menstruation is True and menstruation_day is not None:
-        print(f"生理期检测：角色 {role.get('name')} 当前处于生理期第 {menstruation_day} 天，已将相关信息加入上下文")
-        extra_parts.append(f"\n生理期数据：你当前处于生理期第{menstruation_day}天，预计持续时间{cycle_info['period_length']}天，请考虑这一点对你的情绪和状态的影响。\n")
-    elif in_menstruation is False and menstruation_day is not None:
-        if cycle_info:
-            extra_parts.append(f"\n生理期数据：你当前不处于生理期，预计还有{menstruation_day}天来生理期")
+    menstruation_status = _get_menstruation_status(role_id)
+    if menstruation_status is not None:
+        if menstruation_status["in_period"]:
+            extra_parts.append(
+                "[生理期状态]\n"
+                f"今天：{menstruation_status['today']}（周期第{menstruation_status['cycle_day']}天）\n"
+                f"本次经期开始：{menstruation_status['period_start']}，今天是第{menstruation_status['period_day']}天。\n"
+                f"预计下次经期开始：{menstruation_status['next_period_start']} 左右。\n"
+                "请自然考虑这一状态对情绪和身体感受的影响，不要主动向用户解释系统数据。"
+            )
+            if menstruation_status["today"] == menstruation_status["expected_period_end"]:
+                extra_parts.append(
+                    "[生理期状态更新]\n"
+                    "按当前周期估算，本次经期预计在今天结束。请自然考虑这一变化，"
+                    "不要主动向用户解释系统数据。"
+                )
         else:
-            print(f"生理期检测：角色 {role.get('name')} 当前不处于生理期，预计还有 {menstruation_day} 天来生理期")
-            extra_parts.append(f"\n生理期数据：你当前不处于生理期，预计还有{menstruation_day}天来生理期。\n")
-    else:
-        print(f"生理期检测：角色 {role.get('name')} 当前不需要进行生理期检测")
+            extra_parts.append(
+                "[生理期状态]\n"
+                f"今天：{menstruation_status['today']}（周期第{menstruation_status['cycle_day']}天），当前不在经期。\n"
+                f"预计下次经期开始：{menstruation_status['next_period_start']} 左右，时间可能前后浮动。\n"
+                "请自然考虑这一状态对情绪和身体感受的影响，不要主动向用户解释系统数据。"
+            )
     # 外挂 JSON 记录
     attached_json = role.get("attached_json_content", "")
     if not attached_json:
