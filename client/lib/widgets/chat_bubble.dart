@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../services/sticker_service.dart';
 import '../services/emoji_transfer_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
 import '../services/role_service.dart';
 import 'smart_avatar_image.dart';
 
@@ -797,21 +799,75 @@ class _TransferStickerContent extends StatefulWidget {
 
 class _TransferStickerContentState extends State<_TransferStickerContent> {
   late Future<String?> _localPathFuture;
+  StreamSubscription<void>? _reconnectSubscription;
+  Timer? _retryTimer;
+  int _retryCount = 0;
+  bool _resolved = false;
+  static const int _maxRetries = 5;
 
   @override
   void initState() {
     super.initState();
-    _localPathFuture = EmojiTransferService.resolveLocalPath(widget.reference);
+    _startResolution();
+    _reconnectSubscription =
+        SecureWebSocketClient.instance.onReconnectedStream.listen((_) {
+          _retryImmediately();
+        });
   }
 
   @override
   void didUpdateWidget(covariant _TransferStickerContent oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.reference != widget.reference) {
-      _localPathFuture = EmojiTransferService.resolveLocalPath(
-        widget.reference,
-      );
+      _retryTimer?.cancel();
+      _retryCount = 0;
+      _resolved = false;
+      _startResolution();
     }
+  }
+
+  void _startResolution() {
+    _localPathFuture = _resolveLocalPath();
+  }
+
+  Future<String?> _resolveLocalPath() async {
+    final localPath = await EmojiTransferService.resolveLocalPath(
+      widget.reference,
+    );
+    if (localPath != null) {
+      _resolved = true;
+    } else {
+      _scheduleRetry();
+    }
+    return localPath;
+  }
+
+  void _scheduleRetry() {
+    if (!mounted || _retryTimer != null || _retryCount >= _maxRetries) {
+      return;
+    }
+    final delaySeconds = 1 << _retryCount;
+    _retryCount += 1;
+    _retryTimer = Timer(Duration(seconds: delaySeconds), () {
+      _retryTimer = null;
+      _retryImmediately();
+    });
+  }
+
+  void _retryImmediately() {
+    if (!mounted || _resolved) {
+      return;
+    }
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    setState(_startResolution);
+  }
+
+  @override
+  void dispose() {
+    _retryTimer?.cancel();
+    _reconnectSubscription?.cancel();
+    super.dispose();
   }
 
   @override
