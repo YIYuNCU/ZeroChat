@@ -2152,11 +2152,13 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     );
 
     if (result != null) {
-      _currentRole = _currentRole.copyWith(
+      final updatedRole = _currentRole.copyWith(
         followupConfig: _currentRole.followupConfig.copyWith(maxChain: result),
       );
-      await RoleService.updateRole(_currentRole);
-      setState(() {});
+      setState(() {
+        _currentRole = updatedRole;
+      });
+      await RoleService.updateRole(updatedRole);
     }
   }
 
