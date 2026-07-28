@@ -25,6 +25,11 @@ class EmojiTransferService {
 
   static Future<String?> _download(String reference) async {
     try {
+      final cachedPath = await _findCachedPath(reference);
+      if (cachedPath != null) {
+        return cachedPath;
+      }
+
       final init = await SecureWebSocketClient.instance.request(
         'emoji_file_init',
         {'reference': reference},
@@ -93,5 +98,37 @@ class EmojiTransferService {
     if (dot < 0 || dot == filename.length - 1) return 'img';
     final extension = filename.substring(dot + 1).toLowerCase();
     return RegExp(r'^[a-z0-9]{1,5}$').hasMatch(extension) ? extension : 'img';
+  }
+
+  /// Cached emoji file names are derived from their stable transfer reference.
+  /// Look there before contacting the server so historical stickers render
+  /// immediately after an app restart, including while reconnecting offline.
+  static Future<String?> _findCachedPath(String reference) async {
+    try {
+      final root = await getApplicationDocumentsDirectory();
+      final cacheDir = Directory(
+        '${root.path}${Platform.pathSeparator}emoji_cache',
+      );
+      if (!await cacheDir.exists()) {
+        return null;
+      }
+
+      final cacheKey = sha256.convert(utf8.encode(reference)).toString();
+      await for (final entry in cacheDir.list(followLinks: false)) {
+        if (entry is! File) {
+          continue;
+        }
+        final name = entry.path.split(Platform.pathSeparator).last;
+        if (!name.startsWith('$cacheKey.') || name.endsWith('.part')) {
+          continue;
+        }
+        if (await entry.length() > 0) {
+          return entry.path;
+        }
+      }
+    } catch (error) {
+      debugPrint('EmojiTransferService: local cache lookup failed: $error');
+    }
+    return null;
   }
 }
