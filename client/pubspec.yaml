@@ -63,9 +63,7 @@ dependencies:
   # Timezone data for scheduling exact-time notifications
   timezone: ^0.9.4
 
-  # System calendar events (set_alarm tool)
-  device_calendar: ^4.3.3
-  # Android system alarm intent (ACTION_SET_ALARM)
+  # Android system intents: 系统闹钟(ACTION_SET_ALARM) 与 日历事件(ACTION_INSERT)
   android_intent_plus: ^5.0.0
   
   # App badge (unread count)
