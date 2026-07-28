@@ -48,6 +48,9 @@ class MessageStore extends ChangeNotifier {
   /// 正在 drain 的标记，避免重连风暴时并发重复 drain。
   bool _draining = false;
 
+  /// 本地用户消息变更时递增，用于识别可能覆盖刚发送消息的旧快照。
+  int _localUserMessageRevision = 0;
+
   /// 初始化（确保只执行一次）
   static Future<void> init() async {
     if (_instance._initialized) {
@@ -120,8 +123,12 @@ class MessageStore extends ChangeNotifier {
 
   /// 添加消息（唯一写入入口）
   Future<void> addMessage(String chatId, Message message) async {
+    final messageToStore = prepareMessageForLocalInsert(message);
     _messages[chatId] ??= [];
-    _messages[chatId]!.add(message);
+    _messages[chatId]!.add(messageToStore);
+    if (messageToStore.senderId == 'me') {
+      _localUserMessageRevision += 1;
+    }
     // 内存与 UI 立即更新；落盘走防抖，合并高频写入。
     _scheduleSaveMessages(chatId);
     _notifyMessageUpdate(chatId);
@@ -130,7 +137,15 @@ class MessageStore extends ChangeNotifier {
     );
 
     // 异步同步到后端（不阻塞 UI）
-    _syncMessageToBackend(chatId, message);
+    _syncMessageToBackend(chatId, messageToStore);
+  }
+
+  @visibleForTesting
+  static Message prepareMessageForLocalInsert(Message message) {
+    if (message.senderId != 'me') {
+      return message;
+    }
+    return message.copyWith(sendStatus: MessageSendStatus.sending);
   }
 
   /// 批量添加消息
@@ -145,7 +160,13 @@ class MessageStore extends ChangeNotifier {
   Future<void> deleteMessage(String chatId, String messageId) async {
     final messages = _messages[chatId];
     if (messages != null) {
+      final isUserMessage = messages.any(
+        (message) => message.id == messageId && message.senderId == 'me',
+      );
       messages.removeWhere((m) => m.id == messageId);
+      if (isUserMessage) {
+        _localUserMessageRevision += 1;
+      }
       await _saveMessages(chatId);
       _notifyMessageUpdate(chatId);
 
@@ -180,6 +201,9 @@ class MessageStore extends ChangeNotifier {
       quotedPreviewText: quotedPreviewText,
       sendStatus: sendStatus,
     );
+    if (current.senderId == 'me') {
+      _localUserMessageRevision += 1;
+    }
 
     await _saveMessages(chatId);
     _notifyMessageUpdate(chatId);
@@ -522,11 +546,22 @@ class MessageStore extends ChangeNotifier {
 
   Future<void> _syncAllChatsFromBackendIfNeeded() async {
     try {
+      final requestedAtRevision = _localUserMessageRevision;
       final localMd5 = _calculateLocalChatsMd5();
       final data = await SecureWebSocketClient.instance.request(
         'chat_snapshot',
         {'client_md5': localMd5},
       );
+      if (!isSnapshotRevisionCurrent(
+        requestedAtRevision,
+        _localUserMessageRevision,
+      )) {
+        debugPrint(
+          'MessageStore: discarded stale chat snapshot after local user message change',
+        );
+        unawaited(_syncAllChatsFromBackendIfNeeded());
+        return;
+      }
       final needSync = data['need_sync'] == true;
       if (!needSync) {
         debugPrint('MessageStore: Chat snapshot MD5 matched, skip full sync');
@@ -690,14 +725,12 @@ class MessageStore extends ChangeNotifier {
   /// AI/系统消息保持尽力而为，不跟踪发送状态。
   void _syncMessageToBackend(String chatId, Message message) {
     final tracked = message.senderId == 'me';
-    if (tracked) {
-      // 入队即标记在途，供 UI 显示"发送中"。
-      unawaited(
-        updateMessageSendStatus(chatId, message.id, MessageSendStatus.sending),
-      );
-    }
-
     unawaited(_runOutboxSync(chatId, message, tracked: tracked));
+  }
+
+  @visibleForTesting
+  static bool isSnapshotRevisionCurrent(int requested, int current) {
+    return requested == current;
   }
 
   Future<void> _runOutboxSync(

@@ -665,19 +665,26 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             else
               Padding(
                 padding: EdgeInsets.only(bottom: inputBottomInset),
-                child: InputBar(
-                  controller: _inputBarController,
-                  onInputActivated: _onInputActivated,
-                  onEmojiPanelVisibilityChanged: _onEmojiPanelVisibilityChanged,
-                  onEmojiPanelHeightChanged: _onEmojiPanelHeightChanged,
-                  onSend: _sendMessage,
-                  onImageSend: _sendImageMessage,
-                  onEmojiSend: _sendEmojiMessage,
-                  onTextChanged: (_) => ChatController.instance
-                      .notifyInputActivity(widget.chatId),
-                  roleId: widget.isGroup
-                      ? RoleService.getCurrentRole().id
-                      : widget.chatId,
+                child: AnimatedBuilder(
+                  animation: ChatController.instance,
+                  builder: (context, _) => InputBar(
+                    controller: _inputBarController,
+                    sendEnabled: !ChatController.instance.isProcessing(
+                      widget.chatId,
+                    ),
+                    onInputActivated: _onInputActivated,
+                    onEmojiPanelVisibilityChanged:
+                        _onEmojiPanelVisibilityChanged,
+                    onEmojiPanelHeightChanged: _onEmojiPanelHeightChanged,
+                    onSend: _sendMessage,
+                    onImageSend: _sendImageMessage,
+                    onEmojiSend: _sendEmojiMessage,
+                    onTextChanged: (_) => ChatController.instance
+                        .notifyInputActivity(widget.chatId),
+                    roleId: widget.isGroup
+                        ? RoleService.getCurrentRole().id
+                        : widget.chatId,
+                  ),
                 ),
               ),
           ],

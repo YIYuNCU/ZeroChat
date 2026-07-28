@@ -19,6 +19,7 @@ class InputBarController extends ChangeNotifier {
 /// 用于聊天页面底部的消息输入区域
 class InputBar extends StatefulWidget {
   final Function(String)? onSend;
+  final bool sendEnabled;
   final Function(String imagePath)? onImageSend;
   final void Function(EmojiItem emoji)? onEmojiSend;
   final ValueChanged<String>? onTextChanged;
@@ -32,6 +33,7 @@ class InputBar extends StatefulWidget {
   const InputBar({
     super.key,
     this.onSend,
+    this.sendEnabled = true,
     this.onImageSend,
     this.onEmojiSend,
     this.onTextChanged,
@@ -115,6 +117,9 @@ class _InputBarState extends State<InputBar> {
   }
 
   void _handleSend() {
+    if (!widget.sendEnabled) {
+      return;
+    }
     final text = _controller.text.trim();
     if (text.isNotEmpty) {
       widget.onSend?.call(text);
@@ -428,13 +433,16 @@ class _InputBarState extends State<InputBar> {
 
   Widget _buildSendButton() {
     return GestureDetector(
-      onTap: _handleSend,
+      key: const ValueKey('send_button'),
+      onTap: widget.sendEnabled ? _handleSend : null,
       child: Container(
         width: 56,
         height: 36,
         margin: const EdgeInsets.only(left: 4),
         decoration: BoxDecoration(
-          color: const Color(0xFF07C160),
+          color: widget.sendEnabled
+              ? const Color(0xFF07C160)
+              : const Color(0xFFB7DCC8),
           borderRadius: BorderRadius.circular(4),
         ),
         child: const Center(

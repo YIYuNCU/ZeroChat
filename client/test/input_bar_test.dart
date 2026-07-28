@@ -3,6 +3,30 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:zerochat/widgets/input_bar.dart';
 
 void main() {
+  testWidgets('disabled send button preserves the draft', (tester) async {
+    var sentText = '';
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InputBar(
+            sendEnabled: false,
+            onSend: (text) => sentText = text,
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), 'wait for reply');
+    await tester.tap(find.byKey(const ValueKey('send_button')));
+    await tester.pump();
+
+    expect(sentText, isEmpty);
+    expect(
+      tester.widget<EditableText>(find.byType(EditableText)).controller.text,
+      'wait for reply',
+    );
+  });
+
   testWidgets('format toolbar inserts paired tags around selection', (
     tester,
   ) async {

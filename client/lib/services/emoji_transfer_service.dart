@@ -12,7 +12,11 @@ class EmojiTransferService {
   EmojiTransferService._();
 
   static const int _maxFileSize = 12 * 1024 * 1024;
-  static final Map<String, Future<String?>> _inFlight = {};
+  /// Reuse both pending and completed resolutions for the app session. A
+  /// message status update rebuilds its bubble; returning the same Future
+  /// keeps FutureBuilder from falling back to its placeholder and downloading
+  /// the same emoji again.
+  static final Map<String, Future<String?>> _resolutions = {};
 
   static bool isTransferReference(String value) =>
       value.trim().startsWith('ws-emoji://');
@@ -20,7 +24,13 @@ class EmojiTransferService {
   static Future<String?> resolveLocalPath(String reference) {
     final normalized = reference.trim();
     if (!isTransferReference(normalized)) return Future.value(null);
-    return _inFlight.putIfAbsent(normalized, () => _download(normalized));
+    return _resolutions.putIfAbsent(normalized, () async {
+      final localPath = await _download(normalized);
+      if (localPath == null) {
+        _resolutions.remove(normalized);
+      }
+      return localPath;
+    });
   }
 
   static Future<String?> _download(String reference) async {
@@ -83,8 +93,6 @@ class EmojiTransferService {
     } catch (error) {
       debugPrint('EmojiTransferService: transfer failed: $error');
       return null;
-    } finally {
-      _inFlight.remove(reference);
     }
   }
 
