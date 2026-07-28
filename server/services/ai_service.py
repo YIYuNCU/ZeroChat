@@ -657,6 +657,7 @@ async def _call_with_role_config(role_data: Dict, messages: List[Dict], default_
 from services.ai_tools import (
     _SCHEDULE_TASK_TOOL,
     _SET_ALARM_TOOL,
+    _CONTINUE_IF_NO_REPLY_TOOL,
     _BLOCK_USER_TOOL,
     _SEARCH_MEMORY_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
@@ -666,6 +667,7 @@ from services.ai_tools import (
     _REVIEW_PREVIOUS_IMAGES_TOOL,
     execute_schedule_task,
     execute_set_alarm,
+    execute_continue_if_no_reply,
     execute_block_user,
     execute_search_memory,
     execute_send_emotion_emoji,
@@ -723,8 +725,10 @@ async def generate_with_role(
     active_tools.extend(_WEB_SEARCH_TOOL)
     active_tools.extend(_WRITE_MEMORY_TOOL)
     # set_alarm 作用于用户设备的系统闹钟/日历，仅对有设备的 ZeroChat 场景开放
+    # continue_if_no_reply（无回复续写）同样仅对 ZeroChat 场景开放
     if not is_onebot:
         active_tools.extend(_SET_ALARM_TOOL)
+        active_tools.extend(_CONTINUE_IF_NO_REPLY_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
     # 工具模式识图：本次消息附带图片时开放 recognize_image，由 AI 自主决定是否识图
@@ -821,6 +825,19 @@ async def _handle_tool_calls(
                         err = "参数不完整：title 和 trigger_time 为必填"
                         messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: set_alarm -> {err}")
+
+                elif func_name == "continue_if_no_reply":
+                    delay_minutes = args.get("delay_minutes")
+                    prompt = str(args.get("prompt", "")).strip()
+                    logger.info(f"Tool call: continue_if_no_reply [delay_minutes={delay_minutes}, prompt={prompt[:60]}]")
+                    if delay_minutes is not None and prompt:
+                        tool_result = await execute_continue_if_no_reply(role_data, delay_minutes, prompt)
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                        logger.info(f"Tool result: continue_if_no_reply -> {tool_result[:100]}")
+                    else:
+                        err = "参数不完整：delay_minutes 和 prompt 为必填"
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
+                        logger.warning(f"Tool error: continue_if_no_reply -> {err}")
 
                 elif func_name == "block_user":
                     uid = str(args.get("user_id", "")).strip()

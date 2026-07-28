@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import '../models/onebot_config.dart';
 import '../models/proactive_config.dart';
+import '../models/followup_config.dart';
 import '../models/role.dart';
 import '../models/stats_config.dart';
 import '../core/message_store.dart';
@@ -380,6 +381,13 @@ class RoleService {
                       ),
                     )
                   : const ProactiveConfig(),
+              followupConfig: json['followup_config'] is Map
+                  ? FollowupConfig.fromJson(
+                      Map<String, dynamic>.from(
+                        json['followup_config'] as Map,
+                      ),
+                    )
+                  : const FollowupConfig(),
             );
 
             // 更新或添加角色（保留本地专有字段）
@@ -415,6 +423,7 @@ class RoleService {
                 showNoReply: backendRole.showNoReply,
                 archived: backendRole.archived,
                 proactiveConfig: backendRole.proactiveConfig,
+                followupConfig: backendRole.followupConfig,
               );
             } else {
               _roles.add(backendRole);
@@ -513,6 +522,7 @@ class RoleService {
           'max_context_rounds': role.maxContextRounds,
           'allow_web_search': role.allowWebSearch,
           'proactive_config': role.proactiveConfig.toBackendJson(),
+          'followup_config': role.followupConfig.toBackendJson(),
         },
       });
       return true;

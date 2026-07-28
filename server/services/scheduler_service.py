@@ -21,6 +21,7 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 TASKS_DIR = DATA_DIR / "tasks"
 TASKS_FILE = TASKS_DIR / "scheduled.json"
+FOLLOWUPS_FILE = TASKS_DIR / "followups.json"
 
 # 全局调度器实例
 _scheduler: Optional[AsyncIOScheduler] = None
@@ -47,6 +48,7 @@ def start_scheduler():
         # 初始化所有调度任务
         _init_proactive_jobs()
         _init_scheduled_tasks()
+        _init_followups()
         _init_moment_jobs()
 
 def stop_scheduler():
@@ -285,6 +287,183 @@ def mark_task_completed(task_id: str):
                 json.dump(tasks, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.warning(f"Failed to mark task completed ({task_id}): {e}")
+
+
+# ========== 无回复续写调度 ==========
+# 当 AI 主动调用 continue_if_no_reply 工具时，登记一个一次性计时器：
+# 若在指定时长内用户没有回复，则触发一条续写消息。用户回复时取消。
+
+def _load_followups() -> Dict[str, Dict]:
+    """读取续写状态表 {role_id: {chain_count, prompt, chat_id, deadline}}"""
+    if not FOLLOWUPS_FILE.exists():
+        return {}
+    try:
+        with open(FOLLOWUPS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning(f"Failed to load followups: {e}")
+        return {}
+
+
+def _save_followups(data: Dict[str, Dict]):
+    """写回续写状态表"""
+    try:
+        FOLLOWUPS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(FOLLOWUPS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save followups: {e}")
+
+
+def _get_role_quiet_hours(role_id: str) -> tuple:
+    """读取角色的安静时段（复用 proactive_config，保持与主动消息一致）"""
+    profile_file = ROLES_DIR / role_id / "profile.json"
+    if not profile_file.exists():
+        return (23, 7)
+    try:
+        with open(profile_file, "r", encoding="utf-8") as f:
+            role = json.load(f)
+        proactive_config = role.get("proactive_config") or {}
+        return (
+            int(proactive_config.get("quiet_hours_start", 23)),
+            int(proactive_config.get("quiet_hours_end", 7)),
+        )
+    except Exception:
+        return (23, 7)
+
+
+def schedule_followup(
+    role_id: str,
+    delay_minutes: int,
+    prompt: str,
+    chain_count: int = 1,
+    chat_id: Optional[str] = None,
+):
+    """登记「无回复续写」计时器：delay_minutes 后若用户仍未回复则触发续写。"""
+    if is_tool_role_id(role_id):
+        return
+
+    scheduler = get_scheduler()
+    job_id = f"followup_{role_id}"
+
+    # 覆盖同角色的旧续写计时器
+    if scheduler.get_job(job_id):
+        scheduler.remove_job(job_id)
+
+    now = datetime.now()
+    next_run = now + timedelta(minutes=max(1, int(delay_minutes)))
+
+    # 遵守安静时段：落在安静时段则推移到时段结束
+    quiet_start, quiet_end = _get_role_quiet_hours(role_id)
+    if _is_quiet_hour(next_run.hour, quiet_start, quiet_end):
+        next_run = next_run.replace(hour=quiet_end, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+
+    followups = _load_followups()
+    followups[role_id] = {
+        "chain_count": int(chain_count),
+        "prompt": prompt,
+        "chat_id": chat_id or role_id,
+        "deadline": next_run.isoformat(),
+    }
+    _save_followups(followups)
+
+    scheduler.add_job(
+        _trigger_followup,
+        DateTrigger(run_date=next_run),
+        id=job_id,
+        args=[role_id],
+        replace_existing=True,
+    )
+    logger.info(
+        f"Scheduled followup for {role_id} at {next_run} (chain={chain_count})"
+    )
+
+
+def cancel_followup(role_id: str):
+    """取消续写计时器并清除状态（用户回复时调用，等价于链计数归零）"""
+    scheduler = get_scheduler()
+    job_id = f"followup_{role_id}"
+    if scheduler.get_job(job_id):
+        scheduler.remove_job(job_id)
+        logger.info(f"Cancelled followup for {role_id}")
+
+    followups = _load_followups()
+    if role_id in followups:
+        followups.pop(role_id, None)
+        _save_followups(followups)
+
+
+async def _trigger_followup(role_id: str):
+    """触发续写消息。不自动重排——只有 AI 再次调用工具才续接。"""
+    global _event_callback
+
+    followups = _load_followups()
+    state = followups.get(role_id) or {}
+    prompt = state.get("prompt", "")
+    chat_id = state.get("chat_id") or role_id
+    chain_count = int(state.get("chain_count", 1))
+
+    # 触发后清除本次状态（链计数由工具执行器基于下一次调用重新累加）
+    if role_id in followups:
+        followups.pop(role_id, None)
+        _save_followups(followups)
+
+    try:
+        if _event_callback:
+            await _event_callback({
+                "role_id": role_id,
+                "event_type": "followup",
+                "content": prompt,
+                "context": {
+                    "chat_id": chat_id,
+                    "chain_count": chain_count,
+                },
+            })
+        else:
+            logger.warning("Followup trigger skipped: event callback is not set")
+    except Exception:
+        logger.exception("Followup trigger failed for %s", role_id)
+
+
+def _init_followups():
+    """启动时重排未过期的续写计时器（参照 _init_scheduled_tasks）"""
+    followups = _load_followups()
+    if not followups:
+        return
+
+    now = datetime.now()
+    changed = False
+    for role_id, state in list(followups.items()):
+        deadline_raw = str((state or {}).get("deadline", ""))
+        try:
+            deadline = datetime.fromisoformat(deadline_raw)
+        except (TypeError, ValueError):
+            followups.pop(role_id, None)
+            changed = True
+            continue
+
+        if deadline <= now:
+            # 服务停机期间已过期的续写不补发，直接清除
+            followups.pop(role_id, None)
+            changed = True
+            continue
+
+        scheduler = get_scheduler()
+        scheduler.add_job(
+            _trigger_followup,
+            DateTrigger(run_date=deadline),
+            id=f"followup_{role_id}",
+            args=[role_id],
+            replace_existing=True,
+        )
+        logger.info(f"Restored followup for {role_id} at {deadline}")
+
+    if changed:
+        _save_followups(followups)
+
 
 # ========== 朋友圈 AI 调度 ==========
 

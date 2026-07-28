@@ -319,6 +319,32 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           const SizedBox(height: 10),
 
+          // 无回复续写配置
+          _buildSection([
+            _buildItem(
+              title: '无回复续写',
+              subtitle: 'AI 说完话后，若你迟迟不回复，可主动继续跟进',
+              trailing: Switch(
+                value: _currentRole.followupConfig.enabled,
+                onChanged: (value) => _toggleFollowup(value),
+                activeColor: const Color(0xFF07C160),
+              ),
+            ),
+            if (_currentRole.followupConfig.enabled) ...[
+              const Divider(height: 1, indent: 16),
+              _buildItem(
+                title: '最大续写次数',
+                trailing: Text(
+                  '${_currentRole.followupConfig.maxChain} 次',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _editFollowupMaxChain,
+              ),
+            ],
+          ]),
+
+          const SizedBox(height: 10),
+
           // 定时任务
           _buildSection([
             _buildItem(
@@ -523,6 +549,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
   Widget _buildItem({
     required String title,
+    String? subtitle,
     Widget? trailing,
     VoidCallback? onTap,
     Color? titleColor,
@@ -534,9 +561,29 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(
-              title,
-              style: TextStyle(fontSize: 16, color: titleColor ?? Colors.black),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: titleColor ?? Colors.black,
+                    ),
+                  ),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF999999),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
             ),
             if (trailing != null) trailing,
           ],
@@ -2038,6 +2085,81 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     }
   }
 
+  // ========== 无回复续写配置方法 ==========
+
+  void _toggleFollowup(bool enabled) async {
+    setState(() {
+      _currentRole = _currentRole.copyWith(
+        followupConfig: _currentRole.followupConfig.copyWith(enabled: enabled),
+      );
+    });
+    await RoleService.updateRole(_currentRole);
+  }
+
+  void _editFollowupMaxChain() async {
+    int value = _currentRole.followupConfig.maxChain;
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('最大续写次数'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                '若你一直不回复，AI 最多连续跟进的次数。达到上限后 AI 会自然收尾。',
+                style: TextStyle(fontSize: 13, color: Color(0xFF888888)),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.remove_circle_outline),
+                    onPressed: value > 1
+                        ? () => setDialogState(() => value--)
+                        : null,
+                  ),
+                  Text(
+                    '$value 次',
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add_circle_outline),
+                    onPressed: value < 10
+                        ? () => setDialogState(() => value++)
+                        : null,
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, value),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != null) {
+      _currentRole = _currentRole.copyWith(
+        followupConfig: _currentRole.followupConfig.copyWith(maxChain: result),
+      );
+      await RoleService.updateRole(_currentRole);
+      setState(() {});
+    }
+  }
+
   String _formatProactiveInterval(ProactiveConfig config) {
     final minMinutes = config.minIntervalMinutes;
     final maxMinutes = config.maxIntervalMinutes;
@@ -2125,6 +2247,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       coreMemory: updated.coreMemory,
       summaryEveryNRounds: updated.summaryEveryNRounds,
       proactiveConfig: updated.proactiveConfig,
+      followupConfig: updated.followupConfig,
       stickerConfig: updated.stickerConfig,
     );
     await RoleService.updateRole(cleared);

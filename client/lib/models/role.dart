@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'onebot_config.dart';
 import 'proactive_config.dart';
+import 'followup_config.dart';
 import 'stats_config.dart';
 import 'sticker.dart';
 
@@ -41,6 +42,9 @@ class Role {
 
   // 主动消息配置（角色独立）
   final ProactiveConfig proactiveConfig;
+
+  // 无回复续写配置（角色独立）
+  final FollowupConfig followupConfig;
 
   // 表情包配置（角色独立）
   final StickerConfig stickerConfig;
@@ -87,6 +91,7 @@ class Role {
     List<String>? coreMemory,
     this.summaryEveryNRounds = 20,
     ProactiveConfig? proactiveConfig,
+    FollowupConfig? followupConfig,
     StickerConfig? stickerConfig,
     OneBotConfig? onebotConfig,
     StatsConfig? statsConfig,
@@ -106,6 +111,7 @@ class Role {
              'last_period_start': '2026-01-24',
            },
        proactiveConfig = proactiveConfig ?? const ProactiveConfig(),
+       followupConfig = followupConfig ?? const FollowupConfig(),
        stickerConfig = stickerConfig ?? const StickerConfig(),
        onebotConfig = onebotConfig ?? const OneBotConfig(),
        statsConfig = statsConfig ?? const StatsConfig(),
@@ -148,6 +154,7 @@ class Role {
     List<String>? coreMemory,
     int? summaryEveryNRounds,
     ProactiveConfig? proactiveConfig,
+    FollowupConfig? followupConfig,
     StickerConfig? stickerConfig,
     OneBotConfig? onebotConfig,
     StatsConfig? statsConfig,
@@ -182,6 +189,7 @@ class Role {
       coreMemory: coreMemory ?? this.coreMemory,
       summaryEveryNRounds: summaryEveryNRounds ?? this.summaryEveryNRounds,
       proactiveConfig: proactiveConfig ?? this.proactiveConfig,
+      followupConfig: followupConfig ?? this.followupConfig,
       stickerConfig: stickerConfig ?? this.stickerConfig,
       onebotConfig: onebotConfig ?? this.onebotConfig,
       statsConfig: statsConfig ?? this.statsConfig,
@@ -269,6 +277,11 @@ class Role {
               json['proactive_config'] as Map<String, dynamic>,
             )
           : const ProactiveConfig(),
+      followupConfig: json['followup_config'] != null
+          ? FollowupConfig.fromJson(
+              json['followup_config'] as Map<String, dynamic>,
+            )
+          : const FollowupConfig(),
       stickerConfig: json['sticker_config'] != null
           ? StickerConfig.fromJson(
               json['sticker_config'] as Map<String, dynamic>,
@@ -323,6 +336,7 @@ class Role {
       'core_memory': coreMemory,
       'summary_every_n_rounds': summaryEveryNRounds,
       'proactive_config': proactiveConfig.toJson(),
+      'followup_config': followupConfig.toJson(),
       'sticker_config': stickerConfig.toJson(),
       'onebot_config': onebotConfig.toJson(),
       'stats_config': statsConfig.toJson(),

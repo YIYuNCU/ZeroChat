@@ -91,6 +91,35 @@ _SET_ALARM_TOOL = [{
 }]
 
 """
+无回复续写工具：允许 AI 在说完话后设置一个「若用户在指定时长内没有回复就继续说」的计时器。
+用户一旦回复，续写会自动取消。支持链式续写，但受角色配置的最大续写次数限制。
+仅对有设备的 ZeroChat 场景开放。
+"""
+_CONTINUE_IF_NO_REPLY_TOOL = [{
+    "type": "function",
+    "function": {
+        "name": "continue_if_no_reply",
+        "description": "设置一个「无回复续写」计时器：当你说完话，并且希望在用户一段时间内没有回复时主动继续说、追问或补充（例如没等到回应就补一句「在吗」「刚才那个你怎么看」），调用此函数。用户一旦回复，续写会自动取消。可以在续写触发后再次调用形成链式跟进，但有最大次数限制，达到上限时请自然收尾、不要再调用。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_minutes": {
+                    "type": "integer",
+                    "description": "等待用户回复的时长（分钟）。超过这个时长用户仍未回复，就会触发你的续写。例如 3 表示等 3 分钟。"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "续写触发时给你自己的提示，说明你想继续说什么、以什么心情追问，例如「用户还没回，关心地追问一下刚才提到的考试结果」"
+                }
+            },
+            "required": ["delay_minutes", "prompt"],
+            "additionalProperties": False,
+        }
+    }
+}]
+
+"""
 屏蔽用户工具：允许 AI 屏蔽第三方用户的骚扰消息。
 仅对 OneBot 第三方用户消息场景开放。
 """
@@ -231,6 +260,76 @@ async def execute_set_alarm(
         f"已请求在设备上设置{kind_hint}：{title}（{trigger_time}）。"
         "若设备未授予权限，可能会降级为应用内提醒。"
     )
+
+
+async def execute_continue_if_no_reply(
+    role_data: Dict,
+    delay_minutes: int,
+    prompt: str,
+) -> str:
+    """登记「无回复续写」计时器，返回结果描述。"""
+    role_id = role_data.get("id", "")
+    role_name = role_data.get("name", role_id)
+
+    # 校验时长
+    try:
+        delay = int(delay_minutes)
+    except (TypeError, ValueError):
+        return "设置失败：delay_minutes 必须是整数分钟数"
+    if delay < 1:
+        return "设置失败：delay_minutes 至少为 1 分钟"
+
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return "设置失败：prompt 不能为空，请说明续写时想继续说什么"
+
+    # 读取角色续写配置
+    profile_file = DATA_DIR / "roles" / role_id / "profile.json"
+    followup_config = {}
+    try:
+        if profile_file.exists():
+            with open(profile_file, "r", encoding="utf-8") as f:
+                role_content = json.load(f)
+            followup_config = role_content.get("followup_config") or {}
+    except Exception as e:
+        logger.warning(f"读取续写配置失败 role={role_id}: {e}")
+
+    if not followup_config.get("enabled", True):
+        return "该角色未启用「无回复续写」功能，无法设置"
+
+    max_chain = max(1, int(followup_config.get("max_chain", 3)))
+
+    from services import scheduler_service
+
+    # 当前链计数：已排程状态中的 chain_count（无则 0）
+    current_state = scheduler_service._load_followups().get(role_id) or {}
+    current_chain = int(current_state.get("chain_count", 0))
+    if current_chain >= max_chain:
+        return (
+            f"已达到最大续写次数（{max_chain} 次），无法继续安排跟进，"
+            "请自然收尾，不要再等待用户回复。"
+        )
+
+    next_chain = current_chain + 1
+    try:
+        scheduler_service.schedule_followup(
+            role_id,
+            delay_minutes=delay,
+            prompt=prompt,
+            chain_count=next_chain,
+            chat_id=role_id,
+        )
+    except Exception as e:
+        logger.error(f"continue_if_no_reply 排程失败 role={role_id}: {e}")
+        return f"设置失败：{e}"
+
+    logger.info(
+        f"AI设置无回复续写: role={role_name}({role_id}), delay={delay}min, "
+        f"chain={next_chain}/{max_chain}"
+    )
+    remaining = max_chain - next_chain
+    tail = "（这已是最后一次跟进）" if remaining <= 0 else ""
+    return f"已设置：若 {delay} 分钟内用户未回复，将继续跟进{tail}"
 
 
 async def execute_block_user(role_data: Dict, user_id: str, reason: str) -> str:

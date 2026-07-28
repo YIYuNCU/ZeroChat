@@ -31,6 +31,7 @@ class AIEventType(str, Enum):
     CHAT = "chat"              # 用户聊天消息
     TASK = "task"              # 定时任务触发
     PROACTIVE = "proactive"    # 主动消息
+    FOLLOWUP = "followup"      # 无回复续写
     MOMENT_POST = "moment"     # 发朋友圈
     MOMENT_COMMENT = "comment" # 朋友圈评论
     MEMORY_SUMMARIZATION = "memory_summarization"  # 记忆总结
@@ -421,6 +422,8 @@ async def handle_ai_event(event: AIEvent):
         return await handle_chat(role, event)
     elif event.event_type == AIEventType.PROACTIVE:
         return await handle_proactive(role, event)
+    elif event.event_type == AIEventType.FOLLOWUP:
+        return await handle_followup(role, event)
     elif event.event_type == AIEventType.TASK:
         return await handle_task(role, event)
     elif event.event_type == AIEventType.MOMENT_POST:
@@ -782,6 +785,12 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             error="角色已归档，无法聊天",
         )
 
+    # 用户回复即取消上一轮「无回复续写」计时器并归零链计数。
+    # 放在生成之前，避免误取消本轮 AI 可能新排的续写。
+    if str(event_context.get("sender") or "user") == "user":
+        from services import scheduler_service
+        scheduler_service.cancel_followup(role_id)
+
     search_context = ""
     enable_connection = role.get("enable_connection", False)
     if enable_connection:
@@ -966,6 +975,59 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
         action="reply",
         content=ai_message,
         metadata={"type": "proactive", "role_name": role.get("name")}
+    )
+
+
+# ========== 无回复续写处理 ==========
+
+async def handle_followup(role: Dict, event: AIEvent) -> AIResponse:
+    """处理无回复续写触发：用户在设定时长内未回复，AI 主动继续。"""
+    if not role.get("followup_config", {}).get("enabled", True):
+        return AIResponse(success=False, action="ignore", content=None)
+
+    role_id = event.role_id
+    ctx = event.context or {}
+    chain_count = int(ctx.get("chain_count", 1))
+    max_chain = max(1, int(role.get("followup_config", {}).get("max_chain", 3)))
+
+    base_prompt = event.content or "用户还没有回复，请自然地继续刚才的话题、追问或补充一句。"
+
+    # 告知 AI 当前续写进度，便于其自主决定是否再次调用 continue_if_no_reply
+    if chain_count >= max_chain:
+        chain_hint = (
+            f"\n[续写状态] 这是第 {chain_count} 次跟进，已达到上限（{max_chain} 次）。"
+            "请自然收尾，不要再设置继续等待用户回复。"
+        )
+    else:
+        chain_hint = (
+            f"\n[续写状态] 这是第 {chain_count} 次跟进（上限 {max_chain} 次）。"
+            "如果你觉得还有必要，可以再次设置无回复续写；否则自然收尾即可。"
+        )
+
+    pipeline_result = await _run_memory_ai_pipeline(
+        role=role,
+        role_id=role_id,
+        user_message=base_prompt,
+        event_context=ctx,
+        extra_parts=[chain_hint],
+        origin="zerochat",
+        user_sender="system",
+        include_user_memory=False,
+        include_assistant_memory=True,
+        trigger_summary_after_reply=False,
+    )
+    if not pipeline_result.get("success"):
+        return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
+    if pipeline_result.get("no_reply") is True:
+        return AIResponse(success=True, action="ignore", content=None)
+
+    ai_message = pipeline_result.get("reply") or ""
+
+    return AIResponse(
+        success=True,
+        action="reply",
+        content=ai_message,
+        metadata={"type": "followup", "role_name": role.get("name")}
     )
 
 

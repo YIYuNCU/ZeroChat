@@ -113,10 +113,10 @@ def create_scheduler_event_handler(logger):
                         },
                     )
 
-            elif event_type == "proactive":
+            elif event_type in ("proactive", "followup"):
                 chat_id = str((event.context or {}).get("chat_id") or event.role_id).strip()
                 if chat_id:
-                    message_id = f"{datetime.now().timestamp()}_proactive"
+                    message_id = f"{datetime.now().timestamp()}_{event_type}"
                     await save_role_chat_message(
                         chat_id,
                         ChatMessage(
@@ -127,6 +127,7 @@ def create_scheduler_event_handler(logger):
                             type="text",
                         ),
                     )
+                    # 复用 proactive_message 推送类型（客户端已按其拉取会话快照）
                     await publish_server_push(
                         "proactive_message",
                         {

@@ -106,6 +106,11 @@ class ProactiveConfig(BaseModel):
     quiet_hours_end: int = 7    # 07:00
     next_trigger_time: Optional[str] = None
 
+class FollowupConfig(BaseModel):
+    """无回复续写配置：AI 说完话后，若用户在设定时长内未回复则继续跟进"""
+    enabled: bool = True
+    max_chain: int = 3  # 最大连续续写次数，超过后 AI 需自然收尾
+
 class PersonalityTraits(BaseModel):
     """人格特质"""
     openness: int = 50          # 开放性 0-100
@@ -176,6 +181,9 @@ class RoleCreate(BaseModel):
     # 主动消息配置
     proactive_config: Optional[ProactiveConfig] = None
 
+    # 无回复续写配置
+    followup_config: Optional[FollowupConfig] = None
+
     # OneBot V11 接口配置
     onebot_config: Optional[OneBotConfig] = None
 
@@ -210,6 +218,7 @@ class RoleUpdate(BaseModel):
     core_memory: Optional[List[str]] = None
     personality: Optional[PersonalityTraits] = None
     proactive_config: Optional[ProactiveConfig] = None
+    followup_config: Optional[FollowupConfig] = None
     onebot_config: Optional[OneBotConfig] = None
     stats_config: Optional[StatsConfig] = None
     show_action: Optional[bool] = None
@@ -494,6 +503,9 @@ async def create_role(role: RoleCreate, request: Request):
             "trigger_prompt": "", "quiet_hours_start": 23, "quiet_hours_end": 7,
             "next_trigger_time": None
         },
+        "followup_config": role.followup_config.model_dump() if role.followup_config else {
+            "enabled": True, "max_chain": 3
+        },
         "onebot_config": role.onebot_config.model_dump() if role.onebot_config else {
             "enabled": False, "secret": ""
         },
@@ -543,6 +555,10 @@ async def update_role(role_id: str, update: RoleUpdate, request: Request):
             scheduler_service.schedule_proactive_for_role(role_id, reset=True)
         else:
             scheduler_service.unschedule_proactive_for_role(role_id)
+    if update.followup_config is not None and not update.followup_config.enabled:
+        # 关闭续写功能时，取消任何挂起的续写计时器
+        from services import scheduler_service
+        scheduler_service.cancel_followup(role_id)
     if update.core_memory is not None:
         from services.memory_service import load_memory, save_memory
 

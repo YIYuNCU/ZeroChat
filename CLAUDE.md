@@ -86,7 +86,8 @@ client/
 │   │   ├── sticker_service.dart      # Sticker management
 │   │   ├── favorite_service.dart     # Favorites management
 │   │   ├── task_service.dart         # Task management
-│   │   ├── notification_service.dart # Local notifications
+│   │   ├── device_alarm_service.dart # System alarm/calendar via Android intents (set_alarm tool)
+│   │   ├── notification_service.dart # Local notifications + scheduled reminders (zonedSchedule)
 │   │   ├── background_runtime_service.dart  # Background keep-alive & scheduling
 │   │   ├── intent_service.dart       # Intent handling & navigation
 │   │   ├── message_splitter_service.dart    # Long message splitting
@@ -103,7 +104,7 @@ client/
 │   └── utils/                    # Utilities
 │       └── datetime_util.dart        # Date/time formatting helpers
 ├── android/                      # Android platform config
-├── pubspec.yaml                  # Dart dependencies (version 1.2.4)
+├── pubspec.yaml                  # Dart dependencies (version 1.5.0)
 └── analysis_options.yaml         # Dart lint rules
 ```
 
@@ -124,7 +125,7 @@ server/
 │   └── onebot.py             # OneBot V11 QQ protocol adapter (HTTP POST + reverse WS)
 ├── services/                 # Business logic
 │   ├── ai_service.py         # AI API calling (OpenAI-compatible + embedding)
-│   ├── ai_tools.py           # AI function-calling tools (schedule_task, block_user)
+│   ├── ai_tools.py           # AI function-calling tools (schedule_task, set_alarm, block_user, search_memory, web_search, write_memory, emoji, image)
 │   ├── memory_service.py     # Memory storage (SQLite-based)
 │   ├── vector_memory.py      # Vector memory store (semantic search via embeddings)
 │   ├── scheduler_service.py  # APScheduler-based task scheduling
@@ -150,7 +151,9 @@ server/
 1. **Chat**: Client sends message → `ai_behavior.py` → `ai_service.py` (AI API) → response streamed via WebSocket back to client
 2. **Memory**: Messages stored in SQLite (server) and synchronized to client; core memories are summarized by a dedicated assistant model; vector embeddings are generated for user messages and summaries to enable semantic memory retrieval
 3. **Scheduling**: `scheduler_service.py` (APScheduler) manages proactive messages, moments publishing, and timed tasks — runs independently in a background thread. AI-generated events (moments, comments, tasks, proactive messages) are handled via `lifecycle.py`. **Moments are scheduled server-side only** (the client no longer posts/interacts autonomously). Per-role posting cadence is enforced from `data/moments/posts.json`: at most one post per day, at least one per week (roles idle >7 days are force-posted; roles that posted <24h ago are skipped). When a user publishes a moment (`author_id == "me"`), `create_moment` fires `trigger_interactions_for_user_post` to have AI roles probabilistically like and comment (with a randomized delay). The client `moments_scheduler.dart` only builds the "user's recent moment" weak context for 1:1 chats
-4. **AI Tool Calls**: `ai_service.py` (via `generate_with_role`) exposes function-calling tools defined in `ai_tools.py` to the AI model. Currently supports `schedule_task` (all contexts) and `block_user` (OneBot third-party only). Tool calls are executed, results injected back as `tool` messages, then the model generates the final response.
+4. **AI Tool Calls**: `ai_service.py` (via `generate_with_role`) exposes function-calling tools defined in `ai_tools.py` to the AI model, dispatched in `_handle_tool_calls` (multi-round loop, max 5). Tools: `schedule_task` (in-app timed reminder), `set_alarm` (device system alarm/calendar, non-OneBot only), `search_memory`, `web_search`, `write_memory`, `send_emotion_emoji`, `recognize_image`/`review_previous_images` (vision tool mode), all-contexts; `block_user` (OneBot third-party only). Tool calls are executed, results injected back as `tool` messages, then the model generates the final response.
+   - **`schedule_task`** persists to `data/tasks/scheduled.json` and registers with the scheduler; both the AI path (`execute_schedule_task`) and the REST path (`create_task`) emit a `task_created` server push so clients refresh the task list immediately (previously AI-created tasks only appeared after a reconnect/foreground resync).
+   - **`set_alarm`** does not write server state — `execute_set_alarm` emits a `device_alarm_request` push; the client `device_alarm_service.dart` launches an Android system intent (`ACTION_SET_ALARM` for alarms, `ACTION_INSERT` for calendar events) and falls back to an exact local notification (`NotificationService.scheduleReminder`) on non-Android or intent failure.
 5. **OneBot QQ**: `onebot.py` bridges AI roles to QQ groups/private chats via NapCat framework using OneBot V11 protocol. Supports HTTP POST events and reverse WebSocket connections. Message aggregation window of 15 seconds
 6. **Sync**: Client `realtime_sync_service.dart` connects via WebSocket for live push; REST API for CRUD operations. Client also uses `secure_websocket_client.dart` and `secure_backend_client.dart` with AES encryption
 
