@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:app_badge_plus/app_badge_plus.dart';
+import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/timezone.dart' as tz;
 
 /// 通知服务
 /// 处理本地通知和应用角标
@@ -13,6 +15,7 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
 
   bool _initialized = false;
+  bool _tzInitialized = false;
   int _lastBadgeCount = 0;
 
   /// 当前是否在聊天页面（避免重复通知）
@@ -174,6 +177,64 @@ class NotificationService {
       debugPrint('NotificationService: Badge set to $count');
     } catch (e) {
       debugPrint('NotificationService: Error setting badge: $e');
+    }
+  }
+
+  /// 在指定时间调度一条本地提醒通知（用于 set_alarm 的降级/日历失败兜底）
+  /// 返回是否调度成功。
+  Future<bool> scheduleReminder({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime triggerTime,
+  }) async {
+    if (!_initialized) {
+      await init();
+    }
+    if (triggerTime.isBefore(DateTime.now())) {
+      debugPrint('NotificationService: reminder time is in the past, skipped');
+      return false;
+    }
+    try {
+      if (!_tzInitialized) {
+        tzdata.initializeTimeZones();
+        _tzInitialized = true;
+      }
+
+      const androidDetails = AndroidNotificationDetails(
+        'zerochat_reminders',
+        '定时提醒',
+        channelDescription: 'ZeroChat 定时闹钟/提醒',
+        importance: Importance.max,
+        priority: Priority.high,
+        category: AndroidNotificationCategory.alarm,
+      );
+      const iosDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
+      const details = NotificationDetails(
+        android: androidDetails,
+        iOS: iosDetails,
+      );
+
+      final scheduled = tz.TZDateTime.from(triggerTime, tz.local);
+      await _notifications.zonedSchedule(
+        id,
+        title,
+        body,
+        scheduled,
+        details,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+      debugPrint('NotificationService: scheduled reminder at $scheduled');
+      return true;
+    } catch (e) {
+      debugPrint('NotificationService: scheduleReminder failed: $e');
+      return false;
     }
   }
 

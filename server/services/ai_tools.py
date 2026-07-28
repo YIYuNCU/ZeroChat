@@ -53,6 +53,44 @@ _SCHEDULE_TASK_TOOL = [{
 }]
 
 """
+系统闹钟/日历工具：允许 AI 请求在用户设备上设置系统闹钟或写入日历事件。
+与 schedule_task 不同：schedule_task 是应用内的定时消息提醒；set_alarm 会
+落到用户手机的系统闹钟 App 或系统日历，由客户端执行。仅对有设备的 ZeroChat 场景开放。
+"""
+_SET_ALARM_TOOL = [{
+    "type": "function",
+    "function": {
+        "name": "set_alarm",
+        "description": "在用户的设备上设置系统闹钟或写入日历事件。当用户明确要求「定个闹钟」「加到日历」「提醒我到点响铃」等需要落到手机系统的场景时调用。与 schedule_task（应用内提醒消息）不同，此工具作用于系统闹钟/日历。触发时间使用 ISO 8601 格式（24 小时制）。注意：这是向设备发起请求，用户可能拒绝权限，不保证一定成功。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "闹钟或日历事件的标题，例如「吃药」「开会」「起床」"
+                },
+                "trigger_time": {
+                    "type": "string",
+                    "description": "触发时间，ISO 8601 格式（例如 2026-05-08T14:30:00），24 小时制。基于当前时间推算。"
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["alarm", "calendar_event"],
+                    "description": "类型：alarm（系统闹钟，到点响铃）、calendar_event（日历事件）"
+                },
+                "note": {
+                    "type": "string",
+                    "description": "备注/说明，可留空字符串"
+                }
+            },
+            "required": ["title", "trigger_time", "kind", "note"],
+            "additionalProperties": False,
+        }
+    }
+}]
+
+"""
 屏蔽用户工具：允许 AI 屏蔽第三方用户的骚扰消息。
 仅对 OneBot 第三方用户消息场景开放。
 """
@@ -121,11 +159,78 @@ async def execute_schedule_task(role_data: Dict, message: str, trigger_time: str
 
         scheduler_service.schedule_task(task_record)
 
+        # 通知在线客户端立即刷新任务列表，使 AI 自建任务在设置页可见
+        try:
+            from transport.push_hub import publish_server_push
+            await publish_server_push(
+                "task_created",
+                {
+                    "role_id": role_id,
+                    "chat_id": task_record["chat_id"],
+                    "task_id": task_record["id"],
+                },
+            )
+        except Exception as e:
+            logger.debug(f"task_created 推送失败（不影响任务创建）: {e}")
+
         repeat_hint = "" if repeat == "none" else f"（重复：{repeat}）"
         logger.info(f"AI创建定时任务: role={role_name}({role_id}), time={trigger_time}, msg={message}{repeat_hint}")
         return f"定时任务已创建：在 {trigger_time} 提醒「{message}」{repeat_hint}"
     except Exception as e:
         return f"创建失败：{e}"
+
+
+async def execute_set_alarm(
+    role_data: Dict,
+    title: str,
+    trigger_time: str,
+    kind: str = "alarm",
+    note: str = "",
+) -> str:
+    """请求在用户设备上设置系统闹钟/日历事件，通过推送信令交由客户端执行。"""
+    role_id = role_data.get("id", "")
+    role_name = role_data.get("name", role_id)
+
+    title = (title or "").strip()
+    if not title:
+        return "设置失败：标题为空"
+
+    kind = (kind or "alarm").strip().lower()
+    if kind not in ("alarm", "calendar_event"):
+        kind = "alarm"
+
+    # 解析并验证时间
+    try:
+        run_time = datetime.fromisoformat(trigger_time)
+        if run_time < datetime.now():
+            return f"设置失败：时间 {trigger_time} 已过期，请选择未来的时间"
+    except ValueError as e:
+        return f"设置失败：时间格式无效（{e}），请使用 ISO 8601 格式"
+
+    try:
+        from transport.push_hub import publish_server_push
+        await publish_server_push(
+            "device_alarm_request",
+            {
+                "role_id": role_id,
+                "title": title,
+                "trigger_time": run_time.isoformat(),
+                "kind": kind,
+                "note": (note or "").strip(),
+            },
+        )
+    except Exception as e:
+        logger.error(f"set_alarm 推送失败 role={role_id}: {e}")
+        return f"设置失败：{e}"
+
+    kind_hint = "系统闹钟" if kind == "alarm" else "日历事件"
+    logger.info(
+        f"AI设置{kind_hint}: role={role_name}({role_id}), time={trigger_time}, title={title}"
+    )
+    return (
+        f"已请求在设备上设置{kind_hint}：{title}（{trigger_time}）。"
+        "若设备未授予权限，可能会降级为应用内提醒。"
+    )
 
 
 async def execute_block_user(role_data: Dict, user_id: str, reason: str) -> str:

@@ -19,11 +19,26 @@ class TaskManagerPage extends StatefulWidget {
 class _TaskManagerPageState extends State<TaskManagerPage> {
   List<ScheduledTask> _tasks = [];
   bool _isAdding = false;
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    // 先展示本地缓存，再从后端拉取最新（含 AI 自建任务）后刷新
     _loadTasks();
+    try {
+      await TaskService.fetchFromBackend(force: true);
+    } catch (_) {
+      // 拉取失败时保留本地缓存
+    }
+    if (mounted) {
+      setState(() => _isLoading = false);
+      _loadTasks();
+    }
   }
 
   void _loadTasks() {
@@ -55,7 +70,11 @@ class _TaskManagerPageState extends State<TaskManagerPage> {
       ),
       body: Container(
         color: const Color(0xFFEDEDED),
-        child: _tasks.isEmpty ? _buildEmptyState() : _buildTaskList(),
+        child: (_isLoading && _tasks.isEmpty)
+            ? const Center(
+                child: CircularProgressIndicator(color: Color(0xFF07C160)),
+              )
+            : (_tasks.isEmpty ? _buildEmptyState() : _buildTaskList()),
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _showAddTaskDialog,

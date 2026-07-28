@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.4.13+64
+version: 1.5.0+65
 
 environment:
   sdk: ^3.10.3
@@ -60,6 +60,13 @@ dependencies:
   
   # Local notifications
   flutter_local_notifications: ^17.0.0
+  # Timezone data for scheduling exact-time notifications
+  timezone: ^0.9.4
+
+  # System calendar events (set_alarm tool)
+  device_calendar: ^4.3.3
+  # Android system alarm intent (ACTION_SET_ALARM)
+  android_intent_plus: ^5.0.0
   
   # App badge (unread count)
   app_badge_plus: ^1.1.5

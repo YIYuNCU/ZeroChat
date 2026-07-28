@@ -559,13 +559,17 @@ def _build_system_prompt(
         "  - 情绪标签：happy/excited（开心有趣）、love（关心撒娇）、sad（难过）、surprised（惊讶）、confused（困惑）、tired（疲惫）、angry（生气）。\n"
         "  - 硬性约束：严禁在正文直接插入 Unicode emoji（😀❤️😭 等）或任何 XML/文本工具调用标记；必须使用 API 的 tool_calls 字段。\n\n"
         "3. schedule_task（定时任务）—— 用户要求提醒、或你承诺将来做某事时创建：\n"
-        "  - 需指定提醒内容、触发时间（ISO 8601，24 小时制）及可选重复模式。\n\n"
+        "  - 需指定提醒内容、触发时间（ISO 8601，24 小时制）及可选重复模式。\n"
+        "  - 这是应用内提醒消息；若用户想要手机响铃的闹钟或写入日历，用 set_alarm。\n\n"
         "4. web_search（联网搜索）—— 需要实时/外部信息时使用：\n"
         "  - 新闻、天气、行情、赛事、最新事件或版本等你不确定、可能已过期的信息 → 搜索确认。\n"
         "  - 主观问题或已有足够把握的内容不要搜。\n\n"
         "5. write_memory（记忆写入）—— 保存未来会用到的重要信息（个人信息、共识、决定等）：\n"
         "  - 必须先综合人物/事件/结果/时间写成简洁客观的摘要，禁止复制聊天原文；不要逐句保存。\n"
-        "  - 能确定发生时间就传 occurred_at，否则省略（由系统用当前消息时间）。\n"
+        "  - 能确定发生时间就传 occurred_at，否则省略（由系统用当前消息时间）。\n\n"
+        "6. set_alarm（系统闹钟/日历）—— 用户要求「定闹钟」「加到日历」等落到手机系统的提醒时使用：\n"
+        "  - 指定标题、触发时间（ISO 8601，24 小时制）及类型（alarm 系统闹钟 / calendar_event 日历事件）。\n"
+        "  - 与 schedule_task 区分：只有需要手机系统响铃/日历时才用 set_alarm，普通聊天内提醒仍用 schedule_task。\n"
     )
     # 角色人设（优先级低于系统级指令）
     persona = role_data.get("persona", "")
@@ -652,6 +656,7 @@ async def _call_with_role_config(role_data: Dict, messages: List[Dict], default_
 
 from services.ai_tools import (
     _SCHEDULE_TASK_TOOL,
+    _SET_ALARM_TOOL,
     _BLOCK_USER_TOOL,
     _SEARCH_MEMORY_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
@@ -660,6 +665,7 @@ from services.ai_tools import (
     _RECOGNIZE_IMAGE_TOOL,
     _REVIEW_PREVIOUS_IMAGES_TOOL,
     execute_schedule_task,
+    execute_set_alarm,
     execute_block_user,
     execute_search_memory,
     execute_send_emotion_emoji,
@@ -716,6 +722,9 @@ async def generate_with_role(
     active_tools.extend(_SEND_EMOTION_EMOJI_TOOL)
     active_tools.extend(_WEB_SEARCH_TOOL)
     active_tools.extend(_WRITE_MEMORY_TOOL)
+    # set_alarm 作用于用户设备的系统闹钟/日历，仅对有设备的 ZeroChat 场景开放
+    if not is_onebot:
+        active_tools.extend(_SET_ALARM_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
     # 工具模式识图：本次消息附带图片时开放 recognize_image，由 AI 自主决定是否识图
@@ -797,6 +806,21 @@ async def _handle_tool_calls(
                         err = "参数不完整：message 和 trigger_time 为必填"
                         messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: schedule_task -> {err}")
+
+                elif func_name == "set_alarm":
+                    title = str(args.get("title", "")).strip()
+                    trigger_time = str(args.get("trigger_time", "")).strip()
+                    kind = str(args.get("kind", "alarm")).strip()
+                    note = str(args.get("note", "")).strip()
+                    logger.info(f"Tool call: set_alarm [title={title}, trigger_time={trigger_time}, kind={kind}]")
+                    if title and trigger_time:
+                        tool_result = await execute_set_alarm(role_data, title, trigger_time, kind, note)
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                        logger.info(f"Tool result: set_alarm -> {tool_result[:100]}")
+                    else:
+                        err = "参数不完整：title 和 trigger_time 为必填"
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
+                        logger.warning(f"Tool error: set_alarm -> {err}")
 
                 elif func_name == "block_user":
                     uid = str(args.get("user_id", "")).strip()

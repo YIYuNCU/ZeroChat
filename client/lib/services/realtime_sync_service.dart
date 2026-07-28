@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../core/chat_controller.dart';
 import '../core/message_store.dart';
+import 'device_alarm_service.dart';
 import 'moments_service.dart';
 import 'role_service.dart';
 import 'secure_websocket_client.dart';
@@ -44,6 +45,11 @@ class RealtimeSyncService {
             _lastChatSync = now;
             await MessageStore.instance.syncFromBackendSnapshot();
           }
+          return;
+        }
+
+        if (type == 'device_alarm_request') {
+          await DeviceAlarmService.handleRequest(event);
           return;
         }
 
@@ -116,7 +122,9 @@ class RealtimeSyncService {
   }
 
   static bool _isTaskPush(String type) {
-    return type == 'task_message' || type == 'task_triggered';
+    return type == 'task_message' ||
+        type == 'task_triggered' ||
+        type == 'task_created';
   }
 
   static bool _isMomentPush(String type) {

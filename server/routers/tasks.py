@@ -69,6 +69,21 @@ async def create_task(task: TaskCreate):
 
     # 立即注册到后端调度器
     scheduler_service.schedule_task(new_task)
+
+    # 通知在线客户端刷新任务列表（多设备同步）
+    try:
+        from transport.push_hub import publish_server_push
+        await publish_server_push(
+            "task_created",
+            {
+                "role_id": new_task["role_id"],
+                "chat_id": new_task["chat_id"],
+                "task_id": new_task["id"],
+            },
+        )
+    except Exception:
+        pass
+
     return new_task
 
 @router.put("/tasks/{task_id}/toggle")
