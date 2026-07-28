@@ -489,13 +489,10 @@ class ChatBubble extends StatelessWidget {
     final resolvedPath = _resolveStickerImagePath(imagePath.trim());
 
     if (EmojiTransferService.isTransferReference(resolvedPath)) {
-      return FutureBuilder<String?>(
-        future: EmojiTransferService.resolveLocalPath(resolvedPath),
-        builder: (context, snapshot) {
-          final localPath = snapshot.data;
-          if (localPath == null) return _buildStickerPlaceholder(emotion);
-          return _buildLocalSticker(localPath, emotion);
-        },
+      return _TransferStickerContent(
+        key: ValueKey(message.id),
+        reference: resolvedPath,
+        emotion: emotion,
       );
     }
 
@@ -518,7 +515,7 @@ class ChatBubble extends StatelessWidget {
     );
   }
 
-  Widget _buildLocalSticker(String localPath, String? emotion) {
+  static Widget _buildLocalSticker(String localPath, String? emotion) {
     return Container(
       constraints: const BoxConstraints(maxWidth: 120, maxHeight: 120),
       child: ClipRRect(
@@ -617,7 +614,7 @@ class ChatBubble extends StatelessWidget {
   }
 
   /// 表情包占位符
-  Widget _buildStickerPlaceholder(String? emotion) {
+  static Widget _buildStickerPlaceholder(String? emotion) {
     return Container(
       width: 80,
       height: 80,
@@ -635,7 +632,7 @@ class ChatBubble extends StatelessWidget {
   }
 
   /// 获取情绪对应的 emoji
-  String _getEmotionEmoji(String? emotion) {
+  static String _getEmotionEmoji(String? emotion) {
     switch (emotion) {
       case 'happy':
         return '😊';
@@ -778,6 +775,97 @@ class ChatBubble extends StatelessWidget {
         isLeft: isLeft,
       ),
     );
+  }
+}
+
+/// Holds the transfer Future for one message so send-status refreshes do not
+/// replace FutureBuilder's active work with a new request.
+class _TransferStickerContent extends StatefulWidget {
+  final String reference;
+  final String? emotion;
+
+  const _TransferStickerContent({
+    super.key,
+    required this.reference,
+    required this.emotion,
+  });
+
+  @override
+  State<_TransferStickerContent> createState() =>
+      _TransferStickerContentState();
+}
+
+class _TransferStickerContentState extends State<_TransferStickerContent> {
+  late Future<String?> _localPathFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _localPathFuture = EmojiTransferService.resolveLocalPath(widget.reference);
+  }
+
+  @override
+  void didUpdateWidget(covariant _TransferStickerContent oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.reference != widget.reference) {
+      _localPathFuture = EmojiTransferService.resolveLocalPath(
+        widget.reference,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String?>(
+      future: _localPathFuture,
+      builder: (context, snapshot) {
+        final localPath = snapshot.data;
+        if (localPath == null) {
+          return ChatBubble._buildStickerPlaceholder(widget.emotion);
+        }
+        return ChatBubble._buildLocalSticker(localPath, widget.emotion);
+      },
+    );
+  }
+
+  Widget _buildPlaceholder(String? emotion) {
+    return Container(
+      width: 80,
+      height: 80,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF5F5F5),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Center(
+        child: Text(
+          _getEmotionEmoji(emotion),
+          style: const TextStyle(fontSize: 40),
+        ),
+      ),
+    );
+  }
+
+  static String _getEmotionEmoji(String? emotion) {
+    switch (emotion) {
+      case 'happy':
+        return '🙂';
+      case 'sad':
+        return '😢';
+      case 'angry':
+        return '😠';
+      case 'shy':
+        return '😊';
+      case 'love':
+        return '❤️';
+      case 'confused':
+        return '😕';
+      case 'surprised':
+        return '😮';
+      case 'sleepy':
+        return '😴';
+      default:
+        return '😐';
+    }
   }
 }
 
