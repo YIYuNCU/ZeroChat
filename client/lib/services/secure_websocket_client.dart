@@ -61,6 +61,7 @@ class SecureWebSocketClient {
 
   Completer<void>? _connectingCompleter;
   int _requestSeq = 0;
+  int _connectionAttempts = 0;
 
   /// Called after a successful reconnection (not first connect).
   /// Used by ChatController to recover missed pushes.
@@ -98,6 +99,9 @@ class SecureWebSocketClient {
     final completer = Completer<void>();
     _connectingCompleter = completer;
 
+    final wasReconnection = _connectionAttempts > 0;
+    _connectionAttempts += 1;
+
     try {
       final wsUri = _buildWsUri(
         backendUrl: SettingsService.instance.backendUrl,
@@ -108,7 +112,6 @@ class SecureWebSocketClient {
         headers: {'X-Auth-Token': SettingsService.instance.backendAuthToken},
       ).timeout(_connectTimeout);
 
-      final wasReconnection = _reconnectBackoffCount > 0;
       _resetBackoff();
       _socket = socket;
       _subscription = socket.listen(

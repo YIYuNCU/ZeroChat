@@ -22,6 +22,7 @@ EMOJI_TRANSFER_CHUNK_SIZE = 48 * 1024
 EMOJI_TRANSFER_MAX_SIZE = 12 * 1024 * 1024
 EMOJI_TRANSFER_TTL = timedelta(minutes=2)
 _EMOJI_TRANSFERS: dict[str, dict] = {}
+_ACTIVE_ASYNC_CHAT_TASKS: dict[str, asyncio.Task] = {}
 
 
 def _role_emoji_ref(role_id: str, category: str, filename: str) -> str:
@@ -806,6 +807,20 @@ async def _process_chat_background(task_id: str, event):
         })
 
 
+def _client_task_id(client_submission_id: str) -> str | None:
+    """Build a stable task ID only for client-generated safe identifiers."""
+    if not client_submission_id or len(client_submission_id) > 128:
+        return None
+    if not all(char.isascii() and (char.isalnum() or char in "_-") for char in client_submission_id):
+        return None
+    return f"chat_{client_submission_id}"
+
+
+def _forget_async_chat_task(task_id: str, task: asyncio.Task) -> None:
+    if _ACTIVE_ASYNC_CHAT_TASKS.get(task_id) is task:
+        _ACTIVE_ASYNC_CHAT_TASKS.pop(task_id, None)
+
+
 # ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
@@ -930,10 +945,43 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         event_payload = payload.get("event") or {}
         event = AIEvent(**event_payload)
 
-        # Chat events with async flag → background task mechanism
+        # Chat events with async flag → background task mechanism.
+        # A client_submission_id survives a lost queue acknowledgement, so a
+        # reconnect can safely ask about the exact same task without creating
+        # a second model generation.
         if event.event_type == AIEventType.CHAT and (event.context or {}).get("async"):
-            task_id = f"chat_{uuid.uuid4().hex}"
-            asyncio.create_task(_process_chat_background(task_id, event))
+            context = event.context or {}
+            client_submission_id = str(context.get("client_submission_id") or "")
+            stable_task_id = _client_task_id(client_submission_id)
+            task_id = stable_task_id or f"chat_{uuid.uuid4().hex}"
+
+            if stable_task_id is not None:
+                from transport.push_hub import get_missed_chat_pushes
+
+                completed = get_missed_chat_pushes([task_id])
+                if completed:
+                    cached_payload = completed[0].get("payload") or {}
+                    return {
+                        "success": cached_payload.get("success", False),
+                        "task_id": task_id,
+                        "status": "completed",
+                        "content": cached_payload.get("content"),
+                        "error": cached_payload.get("error"),
+                        "metadata": cached_payload.get("metadata", {}),
+                    }
+
+                active_task = _ACTIVE_ASYNC_CHAT_TASKS.get(task_id)
+                if active_task is not None and not active_task.done():
+                    return {"success": True, "task_id": task_id, "status": "queued"}
+
+            background_task = asyncio.create_task(
+                _process_chat_background(task_id, event)
+            )
+            if stable_task_id is not None:
+                _ACTIVE_ASYNC_CHAT_TASKS[task_id] = background_task
+                background_task.add_done_callback(
+                    lambda task, task_id=task_id: _forget_async_chat_task(task_id, task)
+                )
             return {"success": True, "task_id": task_id, "status": "queued"}
 
         # All other events / non-async chat → synchronous (unchanged)

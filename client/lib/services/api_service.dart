@@ -335,10 +335,12 @@ class ApiService {
   static Future<ChatSubmitResponse> submitChatTask({
     required String roleId,
     required String message,
+    required String clientSubmissionId,
     Map<String, dynamic>? context,
   }) async {
     try {
       final mergedContext = Map<String, dynamic>.from(context ?? {});
+      mergedContext['client_submission_id'] = clientSubmissionId;
       mergedContext['async'] = true; // 标记使用异步任务机制
 
       final wsData = await SecureWebSocketClient.instance.request(
@@ -382,7 +384,7 @@ class ApiService {
       return ChatSubmitResponse.error('Unknown backend response');
     } catch (e) {
       debugPrint('ApiService: submitChatTask failed: $e');
-      return ChatSubmitResponse.error('后端WebSocket不可用: $e');
+      return ChatSubmitResponse.transportError('后端WebSocket不可用: $e');
     }
   }
 
@@ -611,6 +613,7 @@ class ChatSubmitResponse {
   final String? content;
   final Map<String, dynamic>? metadata;
   final String? error;
+  final bool isTransportError;
 
   ChatSubmitResponse._({
     required this.success,
@@ -619,6 +622,7 @@ class ChatSubmitResponse {
     this.content,
     this.metadata,
     this.error,
+    this.isTransportError = false,
   });
 
   factory ChatSubmitResponse.queued(String taskId) {
@@ -646,6 +650,15 @@ class ChatSubmitResponse {
       success: false,
       status: 'error',
       error: error,
+    );
+  }
+
+  factory ChatSubmitResponse.transportError(String error) {
+    return ChatSubmitResponse._(
+      success: false,
+      status: 'error',
+      error: error,
+      isTransportError: true,
     );
   }
 }

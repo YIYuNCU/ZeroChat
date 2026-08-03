@@ -1099,6 +1099,7 @@ class ChatController extends ChangeNotifier {
     _recoveringPersistedTasks = true;
     try {
       await _ensurePersistedStateLoaded();
+      await _resumeUncertainChatSubmissions();
 
       // 合并内存中活跃 await 与持久化 pending 的 task_id。
       final pendingMap = _loadPersistedPendingTasks();
@@ -1174,6 +1175,10 @@ class ChatController extends ChangeNotifier {
       final success = payload['success'] == true;
       final content = payload['content']?.toString();
       if (!success || content == null || chatId.isEmpty || roleId.isEmpty) {
+        await _replaceRecoveryStatusWithFailure(
+          taskId,
+          payload['error']?.toString() ?? '服务器处理失败',
+        );
         // 终态失败或上下文缺失：丢弃 pending，不渲染。
         await _removePersistedPendingTask(taskId);
         await _persistRenderedTaskIds();
@@ -1199,6 +1204,7 @@ class ChatController extends ChangeNotifier {
 
       final role = RoleService.getRoleById(roleId);
       final showNoReply = role?.showNoReply ?? false;
+      await _clearRecoveryStatusMessage(taskId);
       if (!(noReply && !showNoReply)) {
         await MessageStore.instance.ensureLoaded(chatId);
         await _sendSegmentsQueued(
@@ -1242,6 +1248,10 @@ class ChatController extends ChangeNotifier {
     required bool isGroup,
     required String userMessage,
     String? attachedJson,
+    String? clientSubmissionId,
+    String? requestMessage,
+    Map<String, dynamic>? requestContext,
+    bool submissionUncertain = false,
   }) async {
     final map = _loadPersistedPendingTasks();
     map[taskId] = {
@@ -1250,6 +1260,10 @@ class ChatController extends ChangeNotifier {
       'is_group': isGroup,
       'user_message': userMessage,
       'attached_json': attachedJson,
+      'client_submission_id': clientSubmissionId,
+      'request_message': requestMessage,
+      'request_context': requestContext,
+      'submission_uncertain': submissionUncertain,
       'created_at': DateTime.now().toIso8601String(),
     };
     await StorageService.setJson(
@@ -1298,6 +1312,149 @@ class ChatController extends ChangeNotifier {
         .map((value) => value.toString().trim())
         .where((value) => value.isNotEmpty)
         .toList();
+  }
+
+  Future<void> _updatePersistedPendingTask(
+    String taskId,
+    Map<String, dynamic> updates,
+  ) async {
+    final map = _loadPersistedPendingTasks();
+    final rawRecord = map[taskId];
+    if (rawRecord is! Map) return;
+    final record = Map<String, dynamic>.from(rawRecord);
+    record.addAll(updates);
+    map[taskId] = record;
+    await StorageService.setJson(
+      _kPendingTasksKey,
+      Map<String, dynamic>.from(map),
+    );
+  }
+
+  Future<void> _movePersistedPendingTask(
+    String fromTaskId,
+    String toTaskId,
+  ) async {
+    if (fromTaskId == toTaskId) return;
+    final map = _loadPersistedPendingTasks();
+    final record = map.remove(fromTaskId);
+    if (record == null) return;
+    map[toTaskId] = record;
+    await StorageService.setJson(
+      _kPendingTasksKey,
+      Map<String, dynamic>.from(map),
+    );
+  }
+
+  Future<void> _ensureRecoveryStatusMessage(String taskId) async {
+    final rawRecord = _loadPersistedPendingTasks()[taskId];
+    if (rawRecord is! Map) return;
+    final record = Map<String, dynamic>.from(rawRecord);
+    final chatId = record['chat_id']?.toString() ?? '';
+    if (chatId.isEmpty) return;
+    await MessageStore.instance.ensureLoaded(chatId);
+
+    final existingId = record['recovery_message_id']?.toString();
+    if (existingId != null &&
+        existingId.isNotEmpty &&
+        MessageStore.instance.getMessage(chatId, existingId) != null) {
+      return;
+    }
+
+    final statusMessage = createMessage(
+      senderId: 'error',
+      receiverId: 'me',
+      content: '网络连接已中断，正在恢复与服务器的连接…',
+    );
+    await MessageStore.instance.addMessages(chatId, [statusMessage]);
+    await _updatePersistedPendingTask(taskId, {
+      'recovery_message_id': statusMessage.id,
+    });
+  }
+
+  Future<void> _clearRecoveryStatusMessage(String taskId) async {
+    final rawRecord = _loadPersistedPendingTasks()[taskId];
+    if (rawRecord is! Map) return;
+    final record = Map<String, dynamic>.from(rawRecord);
+    final chatId = record['chat_id']?.toString() ?? '';
+    final messageId = record['recovery_message_id']?.toString() ?? '';
+    if (chatId.isNotEmpty && messageId.isNotEmpty) {
+      await MessageStore.instance.deleteMessage(chatId, messageId);
+    }
+  }
+
+  Future<void> _resumeUncertainChatSubmissions() async {
+    final pendingMap = _loadPersistedPendingTasks();
+    for (final entry in pendingMap.entries.toList()) {
+      final taskId = entry.key;
+      if (entry.value is! Map) continue;
+      final record = Map<String, dynamic>.from(entry.value as Map);
+      if (record['submission_uncertain'] != true) continue;
+
+      final submissionId = record['client_submission_id']?.toString() ?? '';
+      final roleId = record['role_id']?.toString() ?? '';
+      final requestMessage = record['request_message']?.toString() ?? '';
+      final rawContext = record['request_context'];
+      if (submissionId.isEmpty || roleId.isEmpty || rawContext is! Map) {
+        continue;
+      }
+
+      final response = await ApiService.submitChatTask(
+        roleId: roleId,
+        message: requestMessage,
+        clientSubmissionId: submissionId,
+        context: Map<String, dynamic>.from(rawContext),
+      );
+
+      if (response.status == 'queued' && response.taskId != null) {
+        await _movePersistedPendingTask(taskId, response.taskId!);
+        await _updatePersistedPendingTask(response.taskId!, {
+          'submission_uncertain': false,
+        });
+        continue;
+      }
+
+      if (response.status == 'completed' && response.content != null) {
+        await _deliverRecoveredReply(taskId, {
+          'task_id': taskId,
+          'success': true,
+          'content': response.content,
+          'metadata': response.metadata ?? <String, dynamic>{},
+        });
+      } else if (!response.isTransportError) {
+        await _replaceRecoveryStatusWithFailure(
+          taskId,
+          response.error ?? '服务器处理失败',
+        );
+        await _removePersistedPendingTask(taskId);
+      }
+    }
+  }
+
+  Future<void> _replaceRecoveryStatusWithFailure(
+    String taskId,
+    String error,
+  ) async {
+    final rawRecord = _loadPersistedPendingTasks()[taskId];
+    if (rawRecord is! Map) return;
+    final record = Map<String, dynamic>.from(rawRecord);
+    final chatId = record['chat_id']?.toString() ?? '';
+    final messageId = record['recovery_message_id']?.toString() ?? '';
+    if (chatId.isNotEmpty && messageId.isNotEmpty) {
+      await MessageStore.instance.updateMessage(
+        chatId,
+        messageId,
+        content: '消息发送失败：$error',
+      );
+    }
+  }
+
+  String _newClientSubmissionId() {
+    final entropy = Random.secure().nextInt(0x7fffffff).toRadixString(36);
+    return '${DateTime.now().microsecondsSinceEpoch}_$entropy';
+  }
+
+  String _taskIdForSubmission(String clientSubmissionId) {
+    return 'chat_$clientSubmissionId';
   }
 
   Future<_AiReply?> _callAI({
@@ -1352,23 +1509,44 @@ class ChatController extends ChangeNotifier {
     // 优先尝试后端 API（异步任务机制）
     _ensureChatPushListener();
 
+    final requestContext = <String, dynamic>{
+      'chat_id': chatId,
+      'is_group': isGroup,
+      'history': history,
+      'core_memory': coreMemory,
+      'moments_context': momentsContext,
+      'attached_json': attachedJson,
+      if (visionUploadIds.isNotEmpty) 'vision_upload_ids': visionUploadIds,
+    };
+    final clientSubmissionId = _newClientSubmissionId();
+    final expectedTaskId = _taskIdForSubmission(clientSubmissionId);
+    await _ensurePersistedStateLoaded();
+    await _savePersistedPendingTask(
+      expectedTaskId,
+      chatId: chatId,
+      roleId: role.id,
+      isGroup: isGroup,
+      userMessage: userMessage,
+      attachedJson: (attachedJson != null && attachedJson.isNotEmpty)
+          ? attachedJson
+          : null,
+      clientSubmissionId: clientSubmissionId,
+      requestMessage: finalMessage,
+      requestContext: requestContext,
+      submissionUncertain: true,
+    );
+
     final submitResponse = await ApiService.submitChatTask(
       roleId: role.id,
       message: finalMessage,
-      context: {
-        'chat_id': chatId,
-        'is_group': isGroup,
-        'history': history,
-        'core_memory': coreMemory,
-        'moments_context': momentsContext,
-        'attached_json': attachedJson,
-        if (visionUploadIds.isNotEmpty) 'vision_upload_ids': visionUploadIds,
-      },
+      clientSubmissionId: clientSubmissionId,
+      context: requestContext,
     );
 
     // Older servers can finish the request synchronously. Preserve tool
     // metadata in this compatibility path as well.
     if (submitResponse.status == 'completed' && submitResponse.content != null) {
+      await _removePersistedPendingTask(expectedTaskId);
       return _AiReply(
         submitResponse.content!,
         _extractToolEmotions(submitResponse.metadata),
@@ -1383,17 +1561,10 @@ class ChatController extends ChangeNotifier {
 
       // 持久化 pending 任务上下文：即使 App 在等待期间被杀死/重启，
       // 恢复路径仍可凭 task_id 从服务端缓存补齐并渲染这条回复。
-      await _ensurePersistedStateLoaded();
-      await _savePersistedPendingTask(
-        taskId,
-        chatId: chatId,
-        roleId: role.id,
-        isGroup: isGroup,
-        userMessage: userMessage,
-        attachedJson: (attachedJson != null && attachedJson.isNotEmpty)
-            ? attachedJson
-            : null,
-      );
+      await _movePersistedPendingTask(expectedTaskId, taskId);
+      await _updatePersistedPendingTask(taskId, {
+        'submission_uncertain': false,
+      });
 
       try {
         final pushPayload = await completer.future.timeout(
@@ -1512,6 +1683,15 @@ class ChatController extends ChangeNotifier {
     }
 
     // 仅通过 WebSocket 通信，无直连回退
+    if (submitResponse.isTransportError) {
+      await _ensureRecoveryStatusMessage(expectedTaskId);
+      debugPrint(
+        'ChatController: chat submission is awaiting reconnect: ${submitResponse.error}',
+      );
+      return null;
+    }
+
+    await _removePersistedPendingTask(expectedTaskId);
     debugPrint(
       'ChatController: WebSocket chat failed: ${submitResponse.error}',
     );
