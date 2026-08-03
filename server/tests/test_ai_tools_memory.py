@@ -29,16 +29,15 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("occurred_at", parameters["properties"])
         self.assertNotIn("content", parameters["properties"])
 
-    def test_prompt_allows_flexible_repeated_parts_and_reserves_fact(self):
-        prompt = _build_system_prompt({"id": "role-1"})
+    def test_prompt_prioritizes_complete_chinese_reply_tags(self):
+        prompt = _build_system_prompt({"id": "role-1", "persona": "测试人设"})
 
-        self.assertIn("同一种类型在一次回复中可以出现多次", prompt)
-        self.assertIn(
-            "<对话>...</对话><动作>...</动作><对话>...</对话>",
-            prompt,
-        )
-        self.assertIn("用户专属格式", prompt)
-        self.assertIn("绝对不能输出 <事实> 标签", prompt)
+        self.assertIn("消息格式协议 - 最高优先级", prompt)
+        self.assertIn("完整、成对的中文标签", prompt)
+        self.assertIn("<对话>...</对话>、<动作>...</动作>、<心理>...</心理>", prompt)
+        self.assertIn("不得未闭合、错配、嵌套或将标签前后混用", prompt)
+        self.assertIn("严禁使用任何英文或其他别名标签", prompt)
+        self.assertLess(prompt.index("消息格式协议 - 最高优先级"), prompt.index("你的人设：测试人设"))
 
     def test_prompt_and_parser_require_a_standalone_no_reply_directive(self):
         prompt = _build_system_prompt({"id": "role-1"})

@@ -1105,7 +1105,13 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
     from services.ai_service import generate_moment_post
     from services.memory_service import get_memory_context_string,get_context_messages,_get_memory_length
     role_max_ctx = role.get("max_context_rounds") if isinstance(role, dict) else None
-    history = await get_context_messages(event.role_id, limit=_get_memory_length(role_max_ctx), skip_summary=True, max_context_rounds=role_max_ctx)
+    history = await get_context_messages(
+        event.role_id,
+        limit=_get_memory_length(role_max_ctx),
+        skip_summary=True,
+        latest=True,
+        max_context_rounds=role_max_ctx,
+    )
     
     result = await generate_moment_post(role_data=role, history=history)
     

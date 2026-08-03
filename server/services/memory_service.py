@@ -906,6 +906,7 @@ async def get_context_messages(
     user_message: Optional[str] = None,
     conversation_key: Optional[str] = None,
     skip_summary: bool = False,
+    latest: bool = False,
     max_context_rounds: Optional[int] = None,
 ) -> List[Dict]:
     """
@@ -946,6 +947,25 @@ async def get_context_messages(
     elif conversation_key != "all":
         # default_user: 全渠道主用户记忆 + 零前端 + 系统
         where_clause = "WHERE origin IN ('zerochat', 'proactive', 'system') OR (origin LIKE 'onebot%' AND sender = 'user')"
+
+    if latest:
+        with _get_connection(role_id) as conn:
+            query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id DESC LIMIT ?"
+            rows = conn.execute(query_sql, where_params + [effective_limit]).fetchall()
+
+        return [
+            {
+                "role": row[0] or "assistant",
+                "content": ensure_structured_memory_message(
+                    content=row[1],
+                    role=row[0] or "assistant",
+                    timestamp=row[2],
+                    origin=row[3] or DEFAULT_MEMORY_ORIGIN,
+                    sender=row[4] or row[0] or "assistant",
+                ),
+            }
+            for row in reversed(rows)
+        ]
 
     overlap = max(1, int(effective_limit * 0.1))
     slide = effective_limit - overlap
