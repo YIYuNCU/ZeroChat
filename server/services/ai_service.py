@@ -764,6 +764,42 @@ async def generate_with_role(
             result, messages, role_data, tools, vision_context=vision_context
         )
 
+    # Some models prioritize another tool (for example memory or web search)
+    # despite the image-tool instruction. Never let that turn into a reply
+    # which silently ignores an image attached to the current message.
+    if image_data_urls and not result.get("_recognized_current_image"):
+        image_understanding = await execute_recognize_image(
+            image_data_urls,
+            user_message,
+            0,
+        )
+        insertion_index = 1 if messages and messages[0].get("role") == "system" else 0
+        messages.insert(
+            insertion_index,
+            {
+                "role": "system",
+                "content": (
+                    "[Image recognition result - must use]\n"
+                    f"{image_understanding}\n"
+                    "Answer the user's current message using this image information."
+                ),
+            },
+        )
+        result = await _call_with_role_config(
+            role_data,
+            messages,
+            default_temp=1.2,
+            tools=tools,
+        )
+        if result.get("tool_calls"):
+            result = await _handle_tool_calls(
+                result,
+                messages,
+                role_data,
+                tools,
+                vision_context=vision_context,
+            )
+
     return await _consume_inline_emoji_tool_markup(result, role_data)
 
 
@@ -780,6 +816,7 @@ async def _handle_tool_calls(
     若 AI 继续返回 tool_calls 则继续循环，直到获得纯文本回复。
     """
     emojis_called: List[str] = []
+    recognized_current_image = False
     max_rounds = 5
 
     for round_idx in range(max_rounds):
@@ -938,6 +975,7 @@ async def _handle_tool_calls(
                     logger.info(f"Tool call: recognize_image [focus={focus}, image_index={image_index}]")
                     tool_result = await execute_recognize_image(urls, focus, image_index)
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    recognized_current_image = True
                     logger.info(f"Tool result: recognize_image -> {tool_result[:100]}")
 
                 elif func_name == "review_previous_images":
@@ -964,10 +1002,14 @@ async def _handle_tool_calls(
         result = await _call_with_role_config(role_data, messages, default_temp=1.2, tools=tools)
 
         if not result.get("tool_calls"):
+            if recognized_current_image:
+                result["_recognized_current_image"] = True
             result["_emojis_called"] = emojis_called
             return result
 
     logger.warning(f"Tool call loop reached max {max_rounds} rounds, returning last result")
+    if recognized_current_image:
+        result["_recognized_current_image"] = True
     result["_emojis_called"] = emojis_called
     return result
 

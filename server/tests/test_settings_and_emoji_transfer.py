@@ -21,6 +21,7 @@ from services.ai_service import (
     _consume_inline_emoji_tool_markup,
     _handle_tool_calls,
     _normalize_embedding_url,
+    generate_with_role,
 )
 from services.memory_service import _advance_period_cycles
 from services import vision_service
@@ -226,6 +227,38 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
 
         recognize.assert_awaited_once_with(
             [previous_image], "只识别图片中的招牌文字", 0
+        )
+
+    async def test_current_image_falls_back_to_recognition_when_model_skips_tool(self):
+        current_image = "data:image/png;base64,current-image"
+        with patch(
+            "services.ai_service._call_with_role_config",
+            side_effect=[
+                {"success": True, "content": "我先回答文字内容"},
+                {"success": True, "content": "结合图片内容的回答"},
+            ],
+        ) as call_model, patch(
+            "services.ai_service.execute_recognize_image",
+            return_value="图片里是一只猫",
+        ) as recognize:
+            result = await generate_with_role(
+                {"id": "role-1"},
+                "图片里有什么？另外帮我记住这个话题。",
+                vision_context={"image_data_urls": [current_image]},
+            )
+
+        self.assertEqual(result["content"], "结合图片内容的回答")
+        recognize.assert_awaited_once_with(
+            [current_image], "图片里有什么？另外帮我记住这个话题。", 0
+        )
+        self.assertEqual(call_model.await_count, 2)
+        fallback_messages = call_model.await_args_list[1].args[1]
+        self.assertTrue(
+            any(
+                message.get("role") == "system"
+                and "Image recognition result" in message.get("content", "")
+                for message in fallback_messages
+            )
         )
 
     def test_embedding_url_normalization_preserves_provider_base_path(self):
