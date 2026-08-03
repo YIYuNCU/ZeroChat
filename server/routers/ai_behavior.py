@@ -851,7 +851,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
 
     # 图片聚合（tool 模式）：客户端把图片以 vision_upload_ids 随本次 ai_event 传来，
     # 这里解析为 data URL 组成 vision_context，交给管道 → generate_with_role
-    # 会在存在图片时暴露 recognize_image 工具，由 AI 自主决定是否识图（不做前置识别）。
+    # 会在存在图片时暴露 recognize_image 工具，并由提示词要求 AI 在回复前调用（不做前置识别）。
     vision_context: Optional[Dict[str, Any]] = None
     vision_cleanup_dirs: List[Path] = []
     from services import vision_service
@@ -869,8 +869,8 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             }
             vision_service.save_previous_images(role_id, vision_history_scope, data_urls)
             extra_parts.append(
-                f"[图片附件] 用户本次发送了 {len(data_urls)} 张图片。若需了解图片内容以更好地回复，"
-                "请调用 recognize_image 工具，并可在 focus 中说明你想重点关注的细节。"
+                f"[图片附件 - 必须执行] 用户本次发送了 {len(data_urls)} 张图片。"
+                "回复前必须调用 recognize_image 工具；可在 focus 中说明想重点关注的细节。"
             )
             if previous_image_data_urls:
                 extra_parts.append(
@@ -1343,15 +1343,14 @@ async def chat_with_vision(request: VisionRequest):
             return {"reply": reply, "success": True, "mode": mode, "vision_model": vision_model}
 
         # 工具模式：不做前置识图，把 recognize_image 作为工具交给聊天模型，
-        # 由 AI 自主决定是否识图、并可指定识图的重点细节（focus）。
+        # 并由提示词要求 AI 在回复前调用，可指定识图重点（focus）。
         if mode == "tool":
             chat_cfg = _resolve_role_or_global_chat_config(request.role_id)
             role_id_text = str(request.role_id or "").strip()
             chat_model = str(chat_cfg.get("model") or "gpt-3.5-turbo")
-            # 引导（非强制）AI 在存在图片时调用识图工具
             guide_parts = [
-                "[图片附件] 用户本次发送了一张图片。若需了解图片内容以更好地回复，"
-                "请调用 recognize_image 工具，并可在 focus 中说明你想重点关注的细节。"
+                "[图片附件 - 必须执行] 用户本次发送了一张图片。"
+                "回复前必须调用 recognize_image 工具；可在 focus 中说明想重点关注的细节。"
             ]
             vision_context = {"image_data_urls": [image_data_url]}
             reply = ""

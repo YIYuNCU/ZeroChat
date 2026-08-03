@@ -583,19 +583,23 @@ def _build_system_prompt(
         "1. search_memory（历史记忆搜索）—— 回忆过去的唯一手段：\n"
         "  - 出现人名/地名/事件/偏好/约定，或\"上次/之前/你说过/还记得吗\"等指涉过去的话，立即搜索；对话涉及记忆中没有的内容也必须搜。\n"
         "  - 原则：宁可多搜一次，不可假装记得；记忆窗口里没有 ≠ 不存在，仍需搜索。\n\n"
-        "2. send_emotion_emoji（情绪表情）—— 回复带明显情绪时调用，不必每句都用：\n"
+        "2. send_emotion_emoji（情绪表情）—— 优先使用以增强有情绪的互动：\n"
         "  - 情绪标签：happy/excited（开心有趣）、love（关心撒娇）、sad（难过）、surprised（惊讶）、confused（困惑）、tired（疲惫）、angry（生气）。\n"
+        "  - 回复中表达关心、安慰、喜欢、开心、感谢、期待、惊讶、难过、困惑、疲惫或不满时，应调用；"
+        "仅对纯事务性、无情绪的简短答复可以不调用。\n"
         "  - 硬性约束：严禁在正文直接插入 Unicode emoji（😀❤️😭 等）或任何 XML/文本工具调用标记；必须使用 API 的 tool_calls 字段。\n\n"
         "3. schedule_task（定时任务）—— 用户要求提醒、或你承诺将来做某事时创建：\n"
         "  - 需指定提醒内容、触发时间（ISO 8601，24 小时制）及可选重复模式。\n"
         "  - 这是应用内提醒消息；若用户想要手机响铃的闹钟或写入日历，用 set_alarm。\n\n"
-        "4. web_search（联网搜索）—— 需要实时/外部信息时使用：\n"
-        "  - 新闻、天气、行情、赛事、最新事件或版本等你不确定、可能已过期的信息 → 搜索确认。\n"
-        "  - 主观问题或已有足够把握的内容不要搜。\n\n"
-        "5. write_memory（记忆写入）—— 保存未来会用到的重要信息（个人信息、共识、决定等）：\n"
+        "4. web_search（联网搜索）—— 对外部事实优先查证：\n"
+        "  - 新闻、天气、行情、赛事、最新事件或版本，以及地点、商品、行程、政策、人物、作品等"
+        "可公开检索且回答准确性重要的信息，优先搜索确认；不确定时宁可搜索一次。\n"
+        "  - 仅主观感受、纯角色扮演或无需外部事实支撑的闲聊可以不搜。\n\n"
+        "5. write_memory（记忆写入）—— 主动保存未来可能影响互动的重要信息：\n"
         "  - 必须先综合人物/事件/结果/时间写成简洁客观的摘要，禁止复制聊天原文；不要逐句保存。\n"
         "  - 能确定发生时间就传 occurred_at，否则省略（由系统用当前消息时间）。\n\n"
-        "  - 每个事件必须写入一次，后续可用 search_memory 搜索回忆，不要重复写入。\n"
+        "  - 用户的长期偏好、身份资料、关系、重要经历、计划、承诺、决定、纪念日、健康状况、"
+        "明确的喜欢/厌恶或纠正你的关键信息，应在首次确认后写入一次；后续可用 search_memory 回忆，不要重复写入。\n"
         "6. set_alarm（系统闹钟/日历）—— 用户要求「定闹钟」「加到日历」等落到手机系统的提醒时使用：\n"
         "  - 指定标题、触发时间（ISO 8601，24 小时制）及类型（alarm 系统闹钟 / calendar_event 日历事件）。\n"
         "  - 与 schedule_task 区分：只有需要手机系统响铃/日历时才用 set_alarm，普通聊天内提醒仍用 schedule_task。\n"
@@ -744,7 +748,7 @@ async def generate_with_role(
         active_tools.extend(_CONTINUE_IF_NO_REPLY_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
-    # 工具模式识图：本次消息附带图片时开放 recognize_image，由 AI 自主决定是否识图
+    # 工具模式识图：本次消息附带图片时，开放 recognize_image 供模型调用。
     image_data_urls = list((vision_context or {}).get("image_data_urls") or [])
     previous_image_data_urls = list((vision_context or {}).get("previous_image_data_urls") or [])
     if image_data_urls:

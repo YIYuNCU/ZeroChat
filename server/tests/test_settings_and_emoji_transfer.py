@@ -58,6 +58,11 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
                 function["name"],
             )
 
+    def test_recognize_image_tool_requires_a_call_when_present(self):
+        description = _RECOGNIZE_IMAGE_TOOL[0]["function"]["description"]
+
+        self.assertIn("必须在回复前调用一次", description)
+
     async def test_rest_settings_persists_embedding_fields(self):
         update = SettingsUpdate(
             embedding_enabled=True,
