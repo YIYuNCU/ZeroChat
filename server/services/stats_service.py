@@ -105,18 +105,21 @@ def parse_stats_block(text: str) -> Dict[str, str]:
     parsed: Dict[str, str] = {}
     if not text:
         return parsed
-    for block in STATS_BLOCK_RE.findall(text):
-        # 支持 ; 或换行分隔的 key:value 对
-        for pair in re.split(r"[;\n]+", block):
-            pair = pair.strip()
-            if not pair or ":" not in pair and "：" not in pair:
-                continue
-            sep = ":" if ":" in pair else "："
-            k, _, v = pair.partition(sep)
-            k = k.strip()
-            v = v.strip()
-            if k:
-                parsed[k] = v
+    blocks = STATS_BLOCK_RE.findall(text)
+    if len(blocks) != 1:
+        return parsed
+
+    # 支持 ; 或换行分隔的 key:value 对。
+    for pair in re.split(r"[;\n]+", blocks[0]):
+        pair = pair.strip()
+        if not pair or ":" not in pair and "：" not in pair:
+            continue
+        sep = ":" if ":" in pair else "："
+        k, _, v = pair.partition(sep)
+        k = k.strip()
+        v = v.strip()
+        if k:
+            parsed[k] = v
     return parsed
 
 

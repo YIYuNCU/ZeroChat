@@ -434,7 +434,7 @@ def _build_stats_instruction(role_data: Dict, stats_current: Optional[Dict[str, 
         "规则：\n"
         "  - 必须覆盖下方列出的全部数值，取值为数字且必须落在各自的上下限区间内\n"
         "  - 依据数值的作用与当前对话情境合理演化（可增可减，变化幅度要自然）\n"
-        "  - 数值块作为独立的一段输出（用 $ 与其他内容分隔）\n"
+        "  - 数值块作为独立的一段输出，使用单个 $ 与相邻完整标签块分隔\n"
         "当前各数值及其定义：",
     ]
     for item in stats:
@@ -466,6 +466,8 @@ def _build_system_prompt(
 ) -> str:
     """Build system prompt from role data."""
     parts = []
+    stats_config = role_data.get("stats_config") or {}
+    stats_enabled = bool(stats_config.get("enabled") and stats_config.get("stats"))
 
     if not is_onebot:
         parts.append(
@@ -477,13 +479,21 @@ def _build_system_prompt(
             "- 每个开始标签必须紧跟同类型的结束标签；不得未闭合、错配、嵌套或将标签前后混用。"
             "允许多个完整块按实际顺序排列。\n"
             "- 严禁使用任何英文或其他别名标签，例如 <dialog>、<dialogue>、<action>、"
-            "<thought>、<psychology>；也不得输出标签外的散文本。\n"
+            "<thought>、<psychology>。$ 是唯一允许的标签外分隔符，仅用于分隔完整标签块；"
+            "不得置于标签内部、连续使用或替代标签。\n"
             "- <事实>...</事实> 仅可能出现在用户消息中，按已发生事实理解，但绝不能输出该标签。\n"
             "- 仅在已启用【数值系统】时允许额外输出该系统要求的 <数值>...</数值> 块。\n"
             f"- 只有确实无需回复时，整条输出才可以是 {NO_REPLY_DIRECTIVE}。"
             "该指令必须完全独立，不能与正文、数值块、任何标签、工具调用文本或其他字符混用。\n"
             "- 不要解释这些格式规则。"
         )
+        if stats_enabled:
+            parts.append(
+                "【数值块 - 最高优先级】\n"
+                "数值系统已启用。每一次回复都必须且只能包含一个完整的 <数值>...</数值> 块，"
+                "并覆盖全部已配置数值；此要求不可省略。\n"
+                f"数值系统启用时不得输出 {NO_REPLY_DIRECTIVE}，因为它不能与必需的数值块共存。"
+            )
 
     # 安全规则放在最前面，确保最高优先级
     if is_onebot:
@@ -615,9 +625,6 @@ def _build_system_prompt(
                 "不得与任何其他内容混用，且此时不调用表情等面向用户的工具。"
                 "用户提问、表达情绪或期待互动时应正常回复。"
             )
-        parts.append(
-            "适当用 $ 字符分段以便阅读：在对话内容切换时分段，但不要每句都分段。"
-        )
         if not is_onebot:
             stats_instruction = _build_stats_instruction(role_data, stats_current)
             if stats_instruction:

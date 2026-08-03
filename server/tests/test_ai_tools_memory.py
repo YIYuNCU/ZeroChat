@@ -16,6 +16,7 @@ from services.ai_service import (
     is_no_reply_directive,
 )
 from services.memory_service import append_short_term
+from services.stats_service import parse_stats_block
 from services.vector_memory import VectorMemoryStore
 from routers.ai_behavior import _run_memory_ai_pipeline
 from routers.roles import RoleCreate
@@ -37,7 +38,34 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<对话>...</对话>、<动作>...</动作>、<心理>...</心理>", prompt)
         self.assertIn("不得未闭合、错配、嵌套或将标签前后混用", prompt)
         self.assertIn("严禁使用任何英文或其他别名标签", prompt)
+        self.assertIn("$ 是唯一允许的标签外分隔符", prompt)
         self.assertLess(prompt.index("消息格式协议 - 最高优先级"), prompt.index("你的人设：测试人设"))
+
+    def test_stats_enabled_requires_a_stats_block_on_every_reply(self):
+        prompt = _build_system_prompt(
+            {
+                "id": "role-1",
+                "stats_config": {
+                    "enabled": True,
+                    "stats": [{"key": "trust", "name": "信任", "min": 0, "max": 100}],
+                },
+            }
+        )
+
+        self.assertIn("数值块 - 最高优先级", prompt)
+        self.assertIn("每一次回复都必须且只能包含一个完整的 <数值>...</数值> 块", prompt)
+        self.assertIn("数值系统启用时不得输出 <无回复/>", prompt)
+        self.assertIn("使用单个 $ 与相邻完整标签块分隔", prompt)
+
+    def test_stats_parser_rejects_multiple_stats_blocks(self):
+        self.assertEqual(
+            parse_stats_block("<数值>trust:80;mood:60</数值>"),
+            {"trust": "80", "mood": "60"},
+        )
+        self.assertEqual(
+            parse_stats_block("<数值>trust:80</数值><数值>mood:60</数值>"),
+            {},
+        )
 
     def test_prompt_and_parser_require_a_standalone_no_reply_directive(self):
         prompt = _build_system_prompt({"id": "role-1"})
