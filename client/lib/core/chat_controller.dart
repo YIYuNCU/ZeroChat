@@ -730,6 +730,7 @@ class ChatController extends ChangeNotifier {
   /// 进入聊天页
   Future<void> onChatPageEnter(String chatId) async {
     await MessageStore.instance.ensureLoaded(chatId);
+    MessageStore.instance.activateChatWindow(chatId);
     MessageStore.instance.clearUnread(chatId);
     ChatListService.instance.clearUnread(chatId);
     MessageStore.instance.refreshStream(chatId);
@@ -750,6 +751,7 @@ class ChatController extends ChangeNotifier {
 
   /// 退出聊天页
   void onChatPageExit(String chatId) {
+    MessageStore.instance.releaseChatWindow(chatId);
     debugPrint('ChatController: Exited chat $chatId');
   }
 

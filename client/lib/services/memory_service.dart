@@ -446,6 +446,7 @@ class MemoryService {
 
   /// 每个 roleId 的短期记忆本地缓存（内存中）
   static final Map<String, List<Map<String, dynamic>>> _shortTermCache = {};
+  static const int maxShortTermCacheEntries = 200;
 
   /// 每个 roleId 已知的最大条目 id（用于增量拉取）
   static final Map<String, int> _shortTermLastId = {};
@@ -488,6 +489,10 @@ class MemoryService {
         _shortTermCache[rid] = newEntries;
       }
 
+      _shortTermCache[rid] = retainLatestShortTermCacheEntries(
+        _shortTermCache[rid]!,
+      );
+
       // 更新已知的最大 id
       for (final entry in newEntries) {
         final id = entry['id'];
@@ -523,6 +528,22 @@ class MemoryService {
   static void clearShortTermCache(String roleId) {
     _shortTermCache.remove(roleId);
     _shortTermLastId.remove(roleId);
+  }
+
+  @visibleForTesting
+  static List<Map<String, dynamic>> retainLatestShortTermCacheEntries(
+    List<Map<String, dynamic>> entries,
+  ) {
+    final sorted = List<Map<String, dynamic>>.from(entries)
+      ..sort((a, b) {
+        final ia = a['id'] is int ? a['id'] as int : 0;
+        final ib = b['id'] is int ? b['id'] as int : 0;
+        return ia.compareTo(ib);
+      });
+    final start = sorted.length > maxShortTermCacheEntries
+        ? sorted.length - maxShortTermCacheEntries
+        : 0;
+    return sorted.sublist(start);
   }
 
   /// 更新单条短期记忆内容

@@ -383,13 +383,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     }
   }
 
-  void _loadMoreMessages() {
+  Future<void> _loadMoreMessages() async {
     if (_isLoadingMoreMessages || !_scrollController.hasClients) return;
 
-    final totalMessageCount = MessageStore.instance.getMessageCount(
-      widget.chatId,
-    );
-    if (_visibleMessageCount >= totalMessageCount) return;
+    final residentMessageCount = MessageStore.instance
+        .getMessages(widget.chatId)
+        .length;
+    final hasOlderOnDisk = MessageStore.instance.hasOlderMessages(widget.chatId);
+    if (_visibleMessageCount >= residentMessageCount && !hasOlderOnDisk) return;
 
     final oldMaxScrollExtent = _scrollController.position.maxScrollExtent;
     final oldPixels = _scrollController.position.pixels;
@@ -398,9 +399,22 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       _isLoadingMoreMessages = true;
       _loadMoreConfirmNeeded = false;
       _lastLoadMoreConfirmTime = null;
-      _visibleMessageCount += _messagePageSize;
-      if (_visibleMessageCount > totalMessageCount) {
-        _visibleMessageCount = totalMessageCount;
+    });
+
+    var added = 0;
+    if (_visibleMessageCount < residentMessageCount) {
+      added = _messagePageSize;
+    } else {
+      added = await MessageStore.instance.loadOlderMessages(widget.chatId);
+    }
+    if (!mounted) return;
+    setState(() {
+      _visibleMessageCount += added;
+      final currentResidentCount = MessageStore.instance
+          .getMessages(widget.chatId)
+          .length;
+      if (_visibleMessageCount > currentResidentCount) {
+        _visibleMessageCount = currentResidentCount;
       }
     });
 
@@ -552,16 +566,19 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   initialData: MessageStore.instance.getMessages(widget.chatId),
                   builder: (context, snapshot) {
                     final messages = snapshot.data ?? [];
-                    final totalMessagesCount = messages.length;
+      final totalMessagesCount = messages.length;
                     final currentVisibleCount =
                         totalMessagesCount < _visibleMessageCount
                         ? totalMessagesCount
                         : _visibleMessageCount;
                     final visibleStart = totalMessagesCount - currentVisibleCount;
                     final visibleMessages = messages.sublist(visibleStart);
-                    final hasMoreMessages = totalMessagesCount > currentVisibleCount;
+                    final hasMoreMessages =
+                        totalMessagesCount > currentVisibleCount ||
+                        MessageStore.instance.hasOlderMessages(widget.chatId);
                     final remainingMessageCount =
-                        totalMessagesCount - currentVisibleCount;
+                        MessageStore.instance.getMessageCount(widget.chatId) -
+                        currentVisibleCount;
 
                     if (!hasMoreMessages && _loadMoreConfirmNeeded) {
                       WidgetsBinding.instance.addPostFrameCallback((_) {

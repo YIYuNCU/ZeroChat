@@ -208,7 +208,7 @@ class RoleService {
     MemoryService.clearShortTermMemory(roleId);
     // 2. 聊天记录（持久化的消息）
     try {
-      await MessageStore.instance.clearMessages(roleId);
+      await MessageStore.instance.removeChatData(roleId);
     } catch (e) {
       debugPrint('RoleService: clearMessages failed for $roleId: $e');
     }

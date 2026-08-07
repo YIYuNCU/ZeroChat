@@ -250,8 +250,11 @@ class BackgroundRuntimeService {
     final pendingRequests = <String, _PendingRequestState>{};
     Timer? requestWatchTimer;
     Timer? backgroundTaskPollTimer;
+    Timer? foregroundNotificationTimer;
     StreamSubscription<Map<String, dynamic>>? serverPushSubscription;
     final notifiedTaskMessageIds = <String>{};
+    final notifiedTaskMessageOrder = <String>[];
+    const maxNotifiedTaskMessageIds = 800;
     var taskNotifyBaseline = DateTime.now();
 
     if (service is AndroidServiceInstance) {
@@ -289,7 +292,12 @@ class BackgroundRuntimeService {
         message: content,
       );
       if (messageId.isNotEmpty) {
-        notifiedTaskMessageIds.add(messageId);
+        _rememberNotifiedMessageId(
+          messageId,
+          notifiedTaskMessageIds,
+          notifiedTaskMessageOrder,
+          maxNotifiedTaskMessageIds,
+        );
       }
     }
 
@@ -366,6 +374,8 @@ class BackgroundRuntimeService {
         taskNotifyBaseline = await _pollTaskMessagesAndNotify(
           baseline: taskNotifyBaseline,
           notifiedTaskMessageIds: notifiedTaskMessageIds,
+          notifiedTaskMessageOrder: notifiedTaskMessageOrder,
+          maxNotifiedTaskMessageIds: maxNotifiedTaskMessageIds,
         );
       });
     }
@@ -431,12 +441,13 @@ class BackgroundRuntimeService {
     service.on('stopService').listen((event) {
       requestWatchTimer?.cancel();
       backgroundTaskPollTimer?.cancel();
+      foregroundNotificationTimer?.cancel();
       serverPushSubscription?.cancel();
       unawaited(SecureWebSocketClient.instance.close());
       service.stopSelf();
     });
 
-    Timer.periodic(const Duration(minutes: 5), (timer) async {
+    foregroundNotificationTimer = Timer.periodic(const Duration(minutes: 5), (timer) async {
       if (service is AndroidServiceInstance) {
         await service.setForegroundNotificationInfo(
           title: 'ZeroChat 正在后台运行',
@@ -450,6 +461,8 @@ class BackgroundRuntimeService {
   static Future<DateTime> _pollTaskMessagesAndNotify({
     required DateTime baseline,
     required Set<String> notifiedTaskMessageIds,
+    required List<String> notifiedTaskMessageOrder,
+    required int maxNotifiedTaskMessageIds,
   }) async {
     var latestSeen = baseline;
 
@@ -510,7 +523,12 @@ class BackgroundRuntimeService {
             senderName: role?.name ?? 'AI',
             message: content,
           );
-          notifiedTaskMessageIds.add(messageId);
+          _rememberNotifiedMessageId(
+            messageId,
+            notifiedTaskMessageIds,
+            notifiedTaskMessageOrder,
+            maxNotifiedTaskMessageIds,
+          );
         }
       }
     } catch (e) {
@@ -518,6 +536,19 @@ class BackgroundRuntimeService {
     }
 
     return latestSeen;
+  }
+
+  static void _rememberNotifiedMessageId(
+    String messageId,
+    Set<String> ids,
+    List<String> order,
+    int maxSize,
+  ) {
+    if (messageId.isEmpty || !ids.add(messageId)) return;
+    order.add(messageId);
+    while (order.length > maxSize) {
+      ids.remove(order.removeAt(0));
+    }
   }
 
   static Future<void> _waitPendingRequestsAndNotify({

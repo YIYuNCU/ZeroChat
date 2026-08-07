@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:crypto/crypto.dart';
+import 'package:path_provider/path_provider.dart';
 import '../models/message.dart';
 import 'message_parts.dart';
 import '../services/sticker_service.dart';
@@ -23,7 +25,17 @@ class MessageStore extends ChangeNotifier {
   bool _initialized = false;
 
   /// 按 chatId 存储的消息列表
+  // Resident windows only. Full histories are stored as JSONL archives on disk.
   final Map<String, List<Message>> _messages = {};
+  final Map<String, int> _messageCounts = {};
+  final Set<String> _knownChatIds = {};
+  final Set<String> _activeChatWindows = {};
+  String? _archiveDirectoryPath;
+
+  static const int residentMessageLimit = 200;
+  static const int historyPageSize = 50;
+  static const String _archiveChatIdsKey = 'message_store_archive_chat_ids_v1';
+  static const String _archiveCountsKey = 'message_store_archive_counts_v1';
 
   /// 按 chatId 存储的未读计数
   final Map<String, int> _unreadCounts = {};
@@ -57,11 +69,12 @@ class MessageStore extends ChangeNotifier {
       debugPrint('MessageStore: Already initialized');
       return;
     }
-    await _instance._loadAllMessages();
+    await _instance._loadArchiveIndex();
+    await _instance._reclassifyInterruptedOutbox();
     await _instance._syncAllChatsFromBackendIfNeeded();
     _instance._initialized = true;
     debugPrint(
-      'MessageStore initialized with ${_instance._messages.length} chats',
+      'MessageStore initialized with ${_instance._knownChatIds.length} archived chats',
     );
   }
 
@@ -124,16 +137,20 @@ class MessageStore extends ChangeNotifier {
   /// 添加消息（唯一写入入口）
   Future<void> addMessage(String chatId, Message message) async {
     final messageToStore = prepareMessageForLocalInsert(message);
-    _messages[chatId] ??= [];
+    await ensureLoaded(chatId);
     _messages[chatId]!.add(messageToStore);
+    _trimResidentMessages(chatId);
     if (messageToStore.senderId == 'me') {
       _localUserMessageRevision += 1;
     }
     // 内存与 UI 立即更新；落盘走防抖，合并高频写入。
-    _scheduleSaveMessages(chatId);
+    await _appendMessagesToArchive(chatId, [messageToStore]);
     _notifyMessageUpdate(chatId);
+    if (!_activeChatWindows.contains(chatId)) {
+      _messages.remove(chatId);
+    }
     debugPrint(
-      'MessageStore: Added message to $chatId (total: ${_messages[chatId]!.length})',
+      'MessageStore: Added message to $chatId (total: ${getMessageCount(chatId)})',
     );
 
     // 异步同步到后端（不阻塞 UI）
@@ -150,10 +167,15 @@ class MessageStore extends ChangeNotifier {
 
   /// 批量添加消息
   Future<void> addMessages(String chatId, List<Message> messages) async {
-    _messages[chatId] ??= [];
+    if (messages.isEmpty) return;
+    await ensureLoaded(chatId);
     _messages[chatId]!.addAll(messages);
-    await _saveMessages(chatId);
+    _trimResidentMessages(chatId);
+    await _appendMessagesToArchive(chatId, messages);
     _notifyMessageUpdate(chatId);
+    if (!_activeChatWindows.contains(chatId)) {
+      _messages.remove(chatId);
+    }
   }
 
   /// 删除消息
@@ -167,7 +189,7 @@ class MessageStore extends ChangeNotifier {
       if (isUserMessage) {
         _localUserMessageRevision += 1;
       }
-      await _saveMessages(chatId);
+      await _removeArchivedMessage(chatId, messageId);
       _notifyMessageUpdate(chatId);
 
       // 同步到后端（fire-and-forget）
@@ -205,7 +227,7 @@ class MessageStore extends ChangeNotifier {
       _localUserMessageRevision += 1;
     }
 
-    await _saveMessages(chatId);
+    await _replaceArchivedMessage(chatId, messages[index]);
     _notifyMessageUpdate(chatId);
     final shouldSyncBackend =
         content != null || type != null || quotedPreviewText != null;
@@ -371,7 +393,43 @@ class MessageStore extends ChangeNotifier {
 
   /// 获取消息数量
   int getMessageCount(String chatId) {
-    return _messages[chatId]?.length ?? 0;
+    return _messageCounts[chatId] ?? _messages[chatId]?.length ?? 0;
+  }
+
+  bool hasOlderMessages(String chatId) {
+    return getMessageCount(chatId) > (_messages[chatId]?.length ?? 0);
+  }
+
+  Future<int> loadOlderMessages(String chatId, {int count = historyPageSize}) async {
+    await ensureLoaded(chatId);
+    final resident = _messages[chatId]!;
+    if (resident.isEmpty) return 0;
+
+    final archive = await _readArchivedMessages(chatId);
+    final firstResidentId = resident.first.id;
+    final firstResidentIndex = archive.indexWhere((m) => m.id == firstResidentId);
+    if (firstResidentIndex <= 0) return 0;
+
+    final start = (firstResidentIndex - count)
+        .clamp(0, firstResidentIndex)
+        .toInt();
+    final older = archive.sublist(start, firstResidentIndex);
+    resident.insertAll(0, older);
+    _notifyMessageUpdate(chatId);
+    return older.length;
+  }
+
+  void releaseChatWindow(String chatId) {
+    _activeChatWindows.remove(chatId);
+    _messages.remove(chatId);
+    final streamController = _streamControllers.remove(chatId);
+    if (streamController != null) {
+      unawaited(streamController.close());
+    }
+  }
+
+  void activateChatWindow(String chatId) {
+    _activeChatWindows.add(chatId);
   }
 
   /// 获取最后一条消息
@@ -383,8 +441,37 @@ class MessageStore extends ChangeNotifier {
   /// 清空指定聊天的消息
   Future<void> clearMessages(String chatId) async {
     _messages[chatId]?.clear();
-    await _saveMessages(chatId);
+    _messageCounts[chatId] = 0;
+    _knownChatIds.add(chatId);
+    await _writeArchivedMessages(chatId, const <Message>[]);
     _notifyMessageUpdate(chatId);
+  }
+
+  Future<void> removeChatData(String chatId) async {
+    _saveDebounceTimers.remove(chatId)?.cancel();
+    _messages.remove(chatId);
+    _messageCounts.remove(chatId);
+    _knownChatIds.remove(chatId);
+    _unreadCounts.remove(chatId);
+    _placeholderRepairInProgress.removeWhere(
+      (key) => key.startsWith('$chatId::'),
+    );
+    _placeholderRepairLastAttempt.removeWhere(
+      (key, _) => key.startsWith('$chatId::'),
+    );
+    final streamController = _streamControllers.remove(chatId);
+    if (streamController != null) {
+      await streamController.close();
+    }
+
+    final file = await _archiveFile(chatId);
+    if (await file.exists()) {
+      await file.delete();
+    }
+    await StorageService.remove('messages_v2_$chatId');
+    await StorageService.remove('messages_$chatId');
+    await _persistArchiveIndex();
+    notifyListeners();
   }
 
   // ========== 未读计数管理 ==========
@@ -408,30 +495,40 @@ class MessageStore extends ChangeNotifier {
 
   // ========== 持久化 ==========
 
-  /// 加载所有消息
-  Future<void> _loadAllMessages() async {
-    final chatIds =
-        StorageService.getStringList('message_store_chat_ids') ?? [];
-    debugPrint('MessageStore: Loading ${chatIds.length} chats');
-    for (final chatId in chatIds) {
-      await _loadMessages(chatId);
+  Future<void> _loadArchiveIndex() async {
+    _knownChatIds
+      ..clear()
+      ..addAll(StorageService.getStringList(_archiveChatIdsKey) ?? const []);
+    _knownChatIds.addAll(
+      StorageService.getStringList('message_store_chat_ids') ?? const [],
+    );
+
+    final counts = StorageService.getJson(_archiveCountsKey) ?? const {};
+    for (final entry in counts.entries) {
+      final count = entry.value;
+      if (count is int && count >= 0) {
+        _messageCounts[entry.key] = count;
+      }
     }
-    _reclassifyInterruptedOutbox();
   }
 
   /// 启动时把上次运行遗留的在途（sending）用户消息重分类为 failed：
   /// 进程已重启，其同步循环不复存在，标记为 failed 以显示重发入口，
   /// 并可被 drainOutbox() 自动重发。
-  void _reclassifyInterruptedOutbox() {
+  Future<void> _reclassifyInterruptedOutbox() async {
     var reclassified = 0;
-    for (final list in _messages.values) {
+    for (final chatId in _knownChatIds.toList()) {
+      final list = await _readArchivedMessages(chatId);
+      var changed = false;
       for (var i = 0; i < list.length; i++) {
         final m = list[i];
         if (m.senderId == 'me' && m.sendStatus == MessageSendStatus.sending) {
           list[i] = m.copyWith(sendStatus: MessageSendStatus.failed);
           reclassified += 1;
+          changed = true;
         }
       }
+      if (changed) await _writeArchivedMessages(chatId, list);
     }
     if (reclassified > 0) {
       debugPrint(
@@ -442,33 +539,39 @@ class MessageStore extends ChangeNotifier {
 
   /// 加载指定聊天的消息
   Future<void> _loadMessages(String chatId) async {
-    final key = 'messages_v2_$chatId';
-    final jsonList = StorageService.getStringList(key);
-
-    if (jsonList != null && jsonList.isNotEmpty) {
-      try {
-        _messages[chatId] = jsonList.map((str) {
-          return Message.fromStorageString(str);
-        }).toList();
-        debugPrint(
-          'MessageStore: Loaded ${_messages[chatId]!.length} messages for $chatId',
-        );
-      } catch (e) {
-        debugPrint('MessageStore: Error loading messages for $chatId: $e');
-        _messages[chatId] = [];
+    final archive = await _readArchivedMessages(chatId);
+    if (archive.isEmpty && !(await _archiveFile(chatId)).existsSync()) {
+      final legacy = await _readLegacyMessages(chatId);
+      if (legacy.isNotEmpty) {
+        await _writeArchivedMessages(chatId, legacy);
+        await StorageService.remove('messages_v2_$chatId');
+        await StorageService.remove('messages_$chatId');
+        archive.addAll(legacy);
       }
-    } else {
-      // 尝试加载旧格式
-      await _loadMessagesLegacy(chatId);
     }
+
+    _knownChatIds.add(chatId);
+    _messageCounts[chatId] = archive.length;
+    _messages[chatId] = _residentTail(archive);
+    await _persistArchiveIndex();
+    debugPrint(
+      'MessageStore: Loaded ${_messages[chatId]!.length}/${archive.length} messages for $chatId',
+    );
   }
 
-  /// 加载旧格式消息并迁移
-  Future<void> _loadMessagesLegacy(String chatId) async {
-    final key = 'messages_$chatId';
-    final jsonList = StorageService.getStringList(key);
-    if (jsonList != null && jsonList.isNotEmpty) {
-      _messages[chatId] = jsonList.map((json) {
+  Future<List<Message>> _readLegacyMessages(String chatId) async {
+    final v2 = StorageService.getStringList('messages_v2_$chatId');
+    if (v2 != null && v2.isNotEmpty) {
+      try {
+        return v2.map(Message.fromStorageString).toList();
+      } catch (e) {
+        debugPrint('MessageStore: Error reading legacy v2 messages for $chatId: $e');
+      }
+    }
+
+    final legacy = StorageService.getStringList('messages_$chatId');
+    if (legacy == null || legacy.isEmpty) return <Message>[];
+    return legacy.map((json) {
         final parts = json.split('|||');
         if (parts.length >= 4) {
           return Message(
@@ -489,65 +592,130 @@ class MessageStore extends ChangeNotifier {
           timestamp: DateTime.now(),
         );
       }).toList();
-      // 迁移到新格式
-      await _saveMessages(chatId);
-      debugPrint(
-        'MessageStore: Migrated ${_messages[chatId]!.length} messages for $chatId',
-      );
+  }
+
+  Future<Directory> _archiveDirectory() async {
+    final cached = _archiveDirectoryPath;
+    if (cached != null) return Directory(cached);
+    final documents = await getApplicationDocumentsDirectory();
+    final directory = Directory('${documents.path}${Platform.pathSeparator}message_archives');
+    if (!await directory.exists()) {
+      await directory.create(recursive: true);
+    }
+    _archiveDirectoryPath = directory.path;
+    return directory;
+  }
+
+  Future<File> _archiveFile(String chatId) async {
+    final directory = await _archiveDirectory();
+    final fileName = base64UrlEncode(utf8.encode(chatId)).replaceAll('=', '');
+    return File('${directory.path}${Platform.pathSeparator}$fileName.jsonl');
+  }
+
+  Future<List<Message>> _readArchivedMessages(String chatId) async {
+    final file = await _archiveFile(chatId);
+    if (!await file.exists()) return <Message>[];
+    final messages = <Message>[];
+    try {
+      await for (final line in file
+          .openRead()
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        if (line.trim().isEmpty) continue;
+        try {
+          messages.add(Message.fromStorageString(line));
+        } catch (e) {
+          debugPrint('MessageStore: skipped invalid archive record for $chatId: $e');
+        }
+      }
+    } catch (e) {
+      debugPrint('MessageStore: failed to read archive for $chatId: $e');
+    }
+    return messages;
+  }
+
+  Future<void> _writeArchivedMessages(String chatId, List<Message> messages) async {
+    final file = await _archiveFile(chatId);
+    final temp = File('${file.path}.tmp');
+    final contents = messages.map((message) => message.toStorageString()).join('\n');
+    await temp.writeAsString(contents.isEmpty ? '' : '$contents\n', flush: true);
+    try {
+      await temp.rename(file.path);
+    } on FileSystemException {
+      // Windows cannot replace an existing file through rename(). The fallback
+      // still keeps the old archive until the temporary file is complete.
+      if (await file.exists()) {
+        await file.delete();
+      }
+      await temp.rename(file.path);
+    }
+    _knownChatIds.add(chatId);
+    _messageCounts[chatId] = messages.length;
+    await _persistArchiveIndex();
+  }
+
+  Future<void> _appendMessagesToArchive(String chatId, List<Message> messages) async {
+    final file = await _archiveFile(chatId);
+    await file.writeAsString(
+      messages.map((message) => message.toStorageString()).join('\n') + '\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+    _knownChatIds.add(chatId);
+    _messageCounts[chatId] = (_messageCounts[chatId] ?? 0) + messages.length;
+    await _persistArchiveIndex();
+  }
+
+  Future<void> _replaceArchivedMessage(String chatId, Message replacement) async {
+    final archive = await _readArchivedMessages(chatId);
+    final index = archive.indexWhere((message) => message.id == replacement.id);
+    if (index < 0) return;
+    archive[index] = replacement;
+    await _writeArchivedMessages(chatId, archive);
+  }
+
+  Future<void> _removeArchivedMessage(String chatId, String messageId) async {
+    final archive = await _readArchivedMessages(chatId);
+    final initialLength = archive.length;
+    archive.removeWhere((message) => message.id == messageId);
+    if (archive.length != initialLength) {
+      await _writeArchivedMessages(chatId, archive);
     }
   }
 
-  /// 立即将指定聊天的消息落盘（全量重写该 chat 的 list）
-  Future<void> _saveMessages(String chatId) async {
-    // 已有挂起的防抖写入则取消，避免重复写。
-    _saveDebounceTimers.remove(chatId)?.cancel();
-    final key = 'messages_v2_$chatId';
-    final messages = _messages[chatId] ?? [];
-    final jsonList = messages.map((m) => m.toStorageString()).toList();
-    await StorageService.setStringList(key, jsonList);
-
-    // 保存聊天 ID 列表
-    final chatIds =
-        StorageService.getStringList('message_store_chat_ids') ?? [];
-    if (!chatIds.contains(chatId)) {
-      chatIds.add(chatId);
-      await StorageService.setStringList('message_store_chat_ids', chatIds);
-    }
+  List<Message> _residentTail(List<Message> archive) {
+    final start = archive.length > residentMessageLimit
+        ? archive.length - residentMessageLimit
+        : 0;
+    return List<Message>.from(archive.sublist(start));
   }
 
-  /// 防抖落盘：内存已即时更新，这里把落盘合并到一个短窗口内一次完成。
-  void _scheduleSaveMessages(String chatId) {
-    _saveDebounceTimers[chatId]?.cancel();
-    _saveDebounceTimers[chatId] = Timer(_saveDebounceWindow, () {
-      _saveDebounceTimers.remove(chatId);
-      // fire-and-forget：落盘失败仅记录日志，内存仍是权威来源。
-      unawaited(
-        _saveMessages(chatId).catchError((Object e) {
-          debugPrint('MessageStore: debounced save failed for $chatId: $e');
-        }),
-      );
-    });
+  void _trimResidentMessages(String chatId) {
+    final resident = _messages[chatId];
+    if (resident == null || resident.length <= residentMessageLimit) return;
+    resident.removeRange(0, resident.length - residentMessageLimit);
+  }
+
+  Future<void> _persistArchiveIndex() async {
+    await StorageService.setStringList(_archiveChatIdsKey, _knownChatIds.toList());
+    await StorageService.setJson(_archiveCountsKey, _messageCounts);
   }
 
   /// 立即 flush 所有挂起的防抖写入（app 进入后台/退出时调用，避免丢数据）。
   Future<void> flushPendingSaves() async {
     final pendingChatIds = _saveDebounceTimers.keys.toList();
-    if (pendingChatIds.isEmpty) return;
     for (final chatId in pendingChatIds) {
       _saveDebounceTimers.remove(chatId)?.cancel();
     }
-    for (final chatId in pendingChatIds) {
-      await _saveMessages(chatId);
+    if (pendingChatIds.isNotEmpty) {
+      debugPrint('MessageStore: cancelled ${pendingChatIds.length} obsolete save timers');
     }
-    debugPrint(
-      'MessageStore: flushed ${pendingChatIds.length} pending message saves',
-    );
   }
 
   Future<void> _syncAllChatsFromBackendIfNeeded() async {
     try {
       final requestedAtRevision = _localUserMessageRevision;
-      final localMd5 = _calculateLocalChatsMd5();
+      final localMd5 = await _calculateLocalChatsMd5();
       final data = await SecureWebSocketClient.instance.request(
         'chat_snapshot',
         {'client_md5': localMd5},
@@ -581,7 +749,7 @@ class MessageStore extends ChangeNotifier {
           continue;
         }
 
-        final previousIds = (_messages[chatId] ?? const <Message>[])
+        final previousIds = (await _readArchivedMessages(chatId))
             .map((message) => message.id)
             .toSet();
         final messages = <Message>[];
@@ -642,8 +810,12 @@ class MessageStore extends ChangeNotifier {
                   message.id.contains('_task_')),
         );
         final newUnreadCount = newBackgroundMessages.length;
-        _messages[chatId] = messages;
-        await _saveMessages(chatId);
+        await _writeArchivedMessages(chatId, messages);
+        if (_activeChatWindows.contains(chatId)) {
+          _messages[chatId] = _residentTail(messages);
+        } else {
+          _messages.remove(chatId);
+        }
         if (messages.isNotEmpty) {
           final lastMessage = messages.last;
           ChatListService.instance.updateChat(
@@ -676,12 +848,21 @@ class MessageStore extends ChangeNotifier {
     await _syncAllChatsFromBackendIfNeeded();
   }
 
-  String _calculateLocalChatsMd5() {
+  Future<String> _calculateLocalChatsMd5() async {
     final canonical = <String, List<Map<String, dynamic>>>{};
 
-    final chatIds = _messages.keys.toList()..sort();
+    final chatIds = _knownChatIds.toList()..sort();
     for (final chatId in chatIds) {
-      final list = _messages[chatId] ?? const <Message>[];
+      var list = await _readArchivedMessages(chatId);
+      if (list.isEmpty) {
+        final legacy = await _readLegacyMessages(chatId);
+        if (legacy.isNotEmpty) {
+          await _writeArchivedMessages(chatId, legacy);
+          await StorageService.remove('messages_v2_$chatId');
+          await StorageService.remove('messages_$chatId');
+          list = legacy;
+        }
+      }
       final serialized =
           list
               // 排除尚未同步到后端的本地用户消息（sending/failed）：MD5 只代表
