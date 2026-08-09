@@ -255,8 +255,8 @@ async def _post_chat(
             # 按角色累计 token 用量与缓存量（无角色的辅助调用不计入）
             if stats_role_id:
                 try:
-                    from services.memory_service import record_usage
-                    record_usage(stats_role_id, usage, model)
+                    from services.memory_service import record_usage, _run_db
+                    await _run_db(stats_role_id, record_usage, stats_role_id, usage, model)
                 except Exception as exc:
                     logger.warning("record_usage failed: %s", exc)
         result = {"success": True, "content": content, "user_content": messages[-1], "error": None}
@@ -282,9 +282,10 @@ async def _post_chat(
             len(tools) if tools else 0,
             resp_body[:1000],
         )
-        return {"success": False, "content": None, "error": f"HTTP Error: {str(e)}"}
+        return {"success": False, "content": None, "error": "AI 接口请求失败"}
     except Exception as e:
-        return {"success": False, "content": None, "error": str(e)}
+        logger.error("AI API 调用异常: url=%s, model=%s: %s", api_url, model, e, exc_info=True)
+        return {"success": False, "content": None, "error": "AI 接口请求失败"}
 
 async def call_ai(
     messages: List[Dict[str, str]],

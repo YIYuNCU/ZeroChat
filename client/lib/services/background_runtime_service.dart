@@ -10,6 +10,7 @@ import 'role_service.dart';
 import 'secure_websocket_client.dart';
 import 'settings_service.dart';
 import 'storage_service.dart';
+import 'secure_storage_service.dart';
 
 /// 后台运行服务
 /// Android: 启动前台服务，保证应用切到后台后仍保持运行。
@@ -304,6 +305,7 @@ class BackgroundRuntimeService {
     Future<void>(() async {
       try {
         await StorageService.init();
+        await SecureStorageService.init();
         await SettingsService.init();
         await RoleService.init();
         await NotificationService.instance.init();

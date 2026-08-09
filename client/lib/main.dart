@@ -11,6 +11,7 @@ import 'pages/profile_page.dart';
 import 'pages/create_group_page.dart';
 import 'widgets/tab_bar.dart';
 import 'services/storage_service.dart';
+import 'services/secure_storage_service.dart';
 import 'services/role_service.dart';
 import 'services/memory_service.dart';
 import 'services/task_service.dart';
@@ -34,6 +35,7 @@ void main() async {
 
   // ========== 最小初始化（仅本地存储，无网络请求） ==========
   await StorageService.init();
+  await SecureStorageService.init();
   await SettingsService.init();
 
   // 设置状态栏样式

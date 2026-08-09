@@ -17,11 +17,12 @@ class SecureBackendResponse {
 }
 
 class SecureBackendClient {
-  static const String defaultAuthToken = 'ZEROCHAT_FIXED_TOKEN_2026';
-  static const String defaultEncryptionSecret = 'ZEROCHAT_TRANSFER_SECRET_2026';
+  static String _authToken = '';
+  static String _encryptionSecret = '';
 
-  static String _authToken = defaultAuthToken;
-  static String _encryptionSecret = defaultEncryptionSecret;
+  /// 是否已配置鉴权 token 与加密 secret。未配置时应阻止连接并提示用户填写。
+  static bool get isSecurityConfigured =>
+      _authToken.isNotEmpty && _encryptionSecret.isNotEmpty;
 
   /// 常规请求（get/post/put/delete/getRaw/postRawJson）的读写超时。
   static const Duration _connectReadTimeout = Duration(seconds: 15);
@@ -74,13 +75,9 @@ class SecureBackendClient {
     required String authToken,
     required String encryptionSecret,
   }) {
-    final normalizedToken = authToken.trim();
-    final normalizedSecret = encryptionSecret.trim();
-
-    _authToken = normalizedToken.isEmpty ? defaultAuthToken : normalizedToken;
-    _encryptionSecret = normalizedSecret.isEmpty
-        ? defaultEncryptionSecret
-        : normalizedSecret;
+    // 不再回退到内置默认值：未配置即为空，由调用方在连接前校验并提示用户填写。
+    _authToken = authToken.trim();
+    _encryptionSecret = encryptionSecret.trim();
   }
 
   static Map<String, String> get authHeaders => {'X-Auth-Token': _authToken};

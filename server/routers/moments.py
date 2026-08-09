@@ -15,7 +15,7 @@ router = APIRouter()
 DATA_DIR = Path(__file__).parent.parent / "data"
 MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
 MOMENTS_HASH_FILE = DATA_DIR / "moments" / "posts.hash"
-from core.utils import is_tool_role_id
+from core.utils import is_tool_role_id, atomic_write_json
 
 DEFAULT_HASH_LIMIT = 50
 
@@ -143,9 +143,7 @@ def load_moments() -> List[dict]:
     return []
 
 def save_moments(moments: List[dict]):
-    MOMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(MOMENTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(moments, f, indent=2, ensure_ascii=False)
+    atomic_write_json(MOMENTS_FILE, moments)
     _refresh_default_moments_hash_cache()
 
 @router.get("/moments")

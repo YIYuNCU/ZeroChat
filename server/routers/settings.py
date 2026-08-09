@@ -7,7 +7,10 @@ import hashlib
 from pydantic import BaseModel, ConfigDict
 from fastapi import APIRouter, HTTPException, Query
 
+import logging
 from core.utils import ensure_path_within_root, ensure_simple_path_segment, mask_api_key
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -160,7 +163,8 @@ async def get_available_models():
             else:
                 return {"success": False, "error": f"HTTP {response.status_code}", "models": []}
     except Exception as e:
-        return {"success": False, "error": str(e), "models": []}
+        logger.warning("获取模型列表失败 url=%s: %s", api_url, e)
+        return {"success": False, "error": "无法连接到 API 或请求失败", "models": []}
 
 # 头像上传
 from fastapi import UploadFile, File

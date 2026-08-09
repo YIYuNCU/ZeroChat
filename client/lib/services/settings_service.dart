@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'storage_service.dart';
+import 'secure_storage_service.dart';
 import 'intent_service.dart';
 import 'secure_backend_client.dart';
 import 'secure_websocket_client.dart';
@@ -34,9 +35,8 @@ class SettingsService extends ChangeNotifier {
 
   // ========== 后端服务器 ==========
   String _backendUrl = 'http://localhost:8000';
-  String _backendAuthToken = SecureBackendClient.defaultAuthToken;
-  String _backendEncryptionSecret =
-      SecureBackendClient.defaultEncryptionSecret;
+  String _backendAuthToken = '';
+  String _backendEncryptionSecret = '';
 
   // ========== API 配置 ==========
 
@@ -152,21 +152,21 @@ class SettingsService extends ChangeNotifier {
     );
     _userAvatarHash = StorageService.getString('user_avatar_hash') ?? '';
 
-    // 主聊天 API
+    // 主聊天 API（api_key 走安全存储）
     _chatApiUrl = StorageService.getString('chat_api_url') ?? '';
-    _chatApiKey = StorageService.getString('chat_api_key') ?? '';
+    _chatApiKey = SecureStorageService.getString('chat_api_key');
     _chatModel = StorageService.getString('chat_model') ?? 'gpt-3.5-turbo';
 
     // 意图识别 API
     _intentEnabled = StorageService.getBool('intent_enabled') ?? false;
     _intentApiUrl = StorageService.getString('intent_api_url') ?? '';
-    _intentApiKey = StorageService.getString('intent_api_key') ?? '';
+    _intentApiKey = SecureStorageService.getString('intent_api_key');
     _intentModel = StorageService.getString('intent_model') ?? 'gpt-3.5-turbo';
 
     // 图像识别 API
     _visionEnabled = StorageService.getBool('vision_enabled') ?? false;
     _visionApiUrl = StorageService.getString('vision_api_url') ?? '';
-    _visionApiKey = StorageService.getString('vision_api_key') ?? '';
+    _visionApiKey = SecureStorageService.getString('vision_api_key');
     _visionModel =
         StorageService.getString('vision_model') ?? 'gpt-4-vision-preview';
     _visionMode = StorageService.getString('vision_mode') ?? 'standalone';
@@ -174,7 +174,7 @@ class SettingsService extends ChangeNotifier {
     // 向量记忆 API
     _embeddingEnabled = StorageService.getBool('embedding_enabled') ?? false;
     _embeddingApiUrl = StorageService.getString('embedding_api_url') ?? '';
-    _embeddingApiKey = StorageService.getString('embedding_api_key') ?? '';
+    _embeddingApiKey = SecureStorageService.getString('embedding_api_key');
     _embeddingModel =
         StorageService.getString('embedding_model') ?? 'text-embedding-3-small';
 
@@ -189,15 +189,12 @@ class SettingsService extends ChangeNotifier {
     _coverImageUrl = StorageService.getString('cover_image_url') ?? '';
     _chatBackgroundUrl = StorageService.getString('chat_background_url') ?? '';
 
-    // 后端服务器
+    // 后端服务器（token/secret 走安全存储；未配置时保持空，不再回退到内置默认值）
     _backendUrl =
         StorageService.getString('backend_url') ?? 'http://localhost:8000';
-    _backendAuthToken =
-      StorageService.getString('backend_auth_token') ??
-      SecureBackendClient.defaultAuthToken;
+    _backendAuthToken = SecureStorageService.getString('backend_auth_token');
     _backendEncryptionSecret =
-      StorageService.getString('backend_encryption_secret') ??
-      SecureBackendClient.defaultEncryptionSecret;
+        SecureStorageService.getString('backend_encryption_secret');
 
     SecureBackendClient.configureSecurity(
       authToken: _backendAuthToken,
@@ -318,7 +315,7 @@ class SettingsService extends ChangeNotifier {
     _chatApiKey = key;
     _chatModel = model;
     await StorageService.setString('chat_api_url', url);
-    await StorageService.setString('chat_api_key', key);
+    await SecureStorageService.setString('chat_api_key', key);
     await StorageService.setString('chat_model', model);
     notifyListeners();
   }
@@ -336,7 +333,7 @@ class SettingsService extends ChangeNotifier {
     _intentModel = model;
     await StorageService.setBool('intent_enabled', enabled);
     await StorageService.setString('intent_api_url', url);
-    await StorageService.setString('intent_api_key', key);
+    await SecureStorageService.setString('intent_api_key', key);
     await StorageService.setString('intent_model', model);
 
     // 实时更新 IntentService 配置
@@ -367,7 +364,7 @@ class SettingsService extends ChangeNotifier {
     }
     await StorageService.setBool('vision_enabled', enabled);
     await StorageService.setString('vision_api_url', url);
-    await StorageService.setString('vision_api_key', key);
+    await SecureStorageService.setString('vision_api_key', key);
     await StorageService.setString('vision_model', model);
     await StorageService.setString('vision_mode', _visionMode);
     notifyListeners();
@@ -386,7 +383,7 @@ class SettingsService extends ChangeNotifier {
     _embeddingModel = model;
     await StorageService.setBool('embedding_enabled', enabled);
     await StorageService.setString('embedding_api_url', url);
-    await StorageService.setString('embedding_api_key', key);
+    await SecureStorageService.setString('embedding_api_key', key);
     await StorageService.setString('embedding_model', model);
     notifyListeners();
   }
@@ -555,8 +552,8 @@ class SettingsService extends ChangeNotifier {
     _backendAuthToken = authToken;
     _backendEncryptionSecret = encryptionSecret;
 
-    await StorageService.setString('backend_auth_token', authToken);
-    await StorageService.setString(
+    await SecureStorageService.setString('backend_auth_token', authToken);
+    await SecureStorageService.setString(
       'backend_encryption_secret',
       encryptionSecret,
     );

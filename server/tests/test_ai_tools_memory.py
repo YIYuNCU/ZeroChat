@@ -17,7 +17,7 @@ from services.ai_service import (
 )
 from services.memory_service import append_short_term
 from services.stats_service import parse_stats_block
-from services.vector_memory import VectorMemoryStore
+from services.vector_memory import VectorMemoryStore, close_all_vector_connections
 from routers.ai_behavior import _run_memory_ai_pipeline
 from routers.roles import RoleCreate
 
@@ -186,6 +186,8 @@ class SearchMemoryToolTests(unittest.IsolatedAsyncioTestCase):
                 source="ai_tool",
             )
             result = store.search([0.2, 0.4], top_k=1)
+            # 连接现按线程复用，需在删除临时目录前显式关闭，否则 Windows 无法删除文件。
+            close_all_vector_connections()
 
         self.assertEqual(result[0]["timestamp"], "2026-07-10T10:00:00")
         self.assertTrue(result[0]["created_at"])

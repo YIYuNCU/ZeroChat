@@ -296,7 +296,10 @@ class ChatController extends ChangeNotifier {
     if (pendingMessages.isEmpty) return;
     if (_processingChats.contains(chatId)) {
       debugPrint('ChatController: Already processing $chatId, queueing');
-      _pendingMessages[chatId] = pendingMessages;
+      // 处理期间可能已有新消息入队（notifyInputActivity 追加到同一 chatId）。
+      // 直接赋值会丢弃这些新项，因此把已取出的旧批次插回队首，保持时间顺序。
+      final queued = _pendingMessages.putIfAbsent(chatId, () => []);
+      queued.insertAll(0, pendingMessages);
       return;
     }
 

@@ -3,7 +3,9 @@ AI 行为统一入口
 处理所有 AI 事件：聊天、主动消息、定时任务、朋友圈
 """
 import asyncio
+import functools
 import json
+import logging
 import random
 import re
 import shutil
@@ -15,8 +17,10 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 
-from core.utils import is_tool_role_id
+from core.utils import is_tool_role_id, atomic_write_json, load_moments_posts
 from services.memory_service import trigger_memory_summary
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -126,7 +130,7 @@ def _normalize_history_items(raw_history: Any) -> List[Dict[str, str]]:
     return normalized
 
 
-def _normalize_core_memory(raw_core_memory: Any) -> List[str]:
+def _normalize_core_memory_list(raw_core_memory: Any) -> List[str]:
     if not isinstance(raw_core_memory, list):
         return []
     result: List[str] = []
@@ -178,16 +182,7 @@ def _sanitize_reply_content(reply: Any) -> str:
 
 
 def _load_moments_posts() -> List[Dict[str, Any]]:
-    if not MOMENTS_FILE.exists():
-        return []
-    try:
-        with open(MOMENTS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-    except Exception:
-        return []
-    return []
+    return load_moments_posts(MOMENTS_FILE)
 
 
 def _load_moments_hint_state(role_id: str) -> Dict[str, Any]:
@@ -200,27 +195,28 @@ def _load_moments_hint_state(role_id: str) -> Dict[str, Any]:
     state_file = ROLES_DIR / role_id / "moments" / "moments_hint_state.json"
     if state_file.exists():
         try:
-            print(f"加载朋友圈提示状态：角色 {role_id} 的状态文件已找到，正在加载...")
+            logger.debug("加载朋友圈提示状态：角色 %s 的状态文件已找到，正在加载...", role_id)
             with open(state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
         except Exception as e:
-            print(f"加载朋友圈提示状态失败: {e}")
-            pass
+            logger.warning("加载朋友圈提示状态失败: %s", e)
     return {"hinted_no_reply_post_ids": [], "hinted_user_post_ids": []}
 
 
 def _save_moments_hint_state(role_id: str, state: Dict[str, Any]) -> None:
     state_file = ROLES_DIR / role_id / "moments" / "moments_hint_state.json"
     try:
-        print(f"保存朋友圈提示状态：角色 {role_id} 的状态已更新，hinted_no_reply_post_ids={state.get('hinted_no_reply_post_ids')}, hinted_user_post_ids={state.get('hinted_user_post_ids')}")
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(state_file, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+        logger.debug(
+            "保存朋友圈提示状态：角色 %s 的状态已更新，no_reply=%s user=%s",
+            role_id,
+            state.get("hinted_no_reply_post_ids"),
+            state.get("hinted_user_post_ids"),
+        )
+        atomic_write_json(state_file, state)
     except Exception as e:
-        print(f"保存朋友圈提示状态失败: {e}")
-        pass
+        logger.warning("保存朋友圈提示状态失败: %s", e)
 
 
 def _build_moments_chat_context(role_id: str, max_items: int = 4) -> str:
@@ -342,7 +338,7 @@ async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) ->
     """
     rand = random.random()
     if rand > 0.25:  # 75% 概率跳过情绪检测
-        print(f"情绪检测随机跳过：{rand:.2f} > 0.25")
+        logger.debug("情绪检测随机跳过：%.2f > 0.25", rand)
         return None
     from services.ai_service import call_ai_direct
 
@@ -533,9 +529,10 @@ async def _run_memory_ai_pipeline(
     from services.memory_service import (
         get_context_messages,
         get_memory_context_string,
-append_short_term,
+        append_short_term,
         trigger_memory_summary,
         _get_memory_length,
+        _run_db,
     )
     local_context = event_context or {}
     is_main_user = (user_sender == "user")
@@ -594,7 +591,7 @@ append_short_term,
             all_items.sort(key=_get_msg_time)
             history = all_items[-memory_length:]
         except Exception as e:
-            print(f"混合记忆上下文构建失败：{e}")
+            logger.warning("混合记忆上下文构建失败：%s", e)
             history = backend_history if backend_history else _normalize_history_items(local_context.get("history"))
     else:
         client_history = _normalize_history_items(local_context.get("history"))
@@ -603,8 +600,8 @@ append_short_term,
     # 向量记忆已封装为 search_memory 工具，由 AI 主动调用
     vector_memories: List[Dict[str, Any]] = []
 
-    backend_memory_context = (get_memory_context_string(role_id) or "").strip()
-    client_core_memory = _normalize_core_memory(local_context.get("core_memory"))
+    backend_memory_context = (await _run_db(role_id, get_memory_context_string, role_id) or "").strip()
+    client_core_memory = _normalize_core_memory_list(local_context.get("core_memory"))
     client_memory_context = "\n".join(client_core_memory).strip()
     memory_context = backend_memory_context if backend_memory_context else client_memory_context
 
@@ -624,7 +621,7 @@ append_short_term,
             from services import stats_service
             stats_current = stats_service.get_current_values(role_id, role)
         except Exception as e:
-            print(f"数值状态读取失败：{e}")
+            logger.warning("数值状态读取失败：%s", e)
 
     result = await generate_with_role(
         role_data=role,
@@ -661,7 +658,7 @@ append_short_term,
             from services import stats_service
             stats_service.update_from_reply(role_id, role, ai_reply)
         except Exception as e:
-            print(f"数值状态更新失败：{e}")
+            logger.warning("数值状态更新失败：%s", e)
 
     if include_user_memory:
         user_memory_content = str(user_message or "").strip()
@@ -669,30 +666,36 @@ append_short_term,
             user_memory_content = str(
                 result.get("user_content", {"content": user_message}).get("content", user_message)
             )
-        append_short_term(
-            role_id,
-            "user",
-            user_memory_content,
-            task_id=task_id,
-            request_id=normalized_request_id,
-            json_memory=attached_json,
-            origin=origin,
-            sender=user_sender,
-            sender_id=sender_id,
-            group_id=group_id,
+        await _run_db(
+            role_id, functools.partial(
+                append_short_term,
+                role_id,
+                "user",
+                user_memory_content,
+                task_id=task_id,
+                request_id=normalized_request_id,
+                json_memory=attached_json,
+                origin=origin,
+                sender=user_sender,
+                sender_id=sender_id,
+                group_id=group_id,
+            )
         )
     if include_assistant_memory and not no_reply:
-        append_short_term(
-            role_id,
-            "assistant",
-            ai_reply,
-            task_id=task_id,
-            request_id=normalized_request_id,
-            json_memory=attached_json,
-            origin=origin,
-            sender=role.get("name") or "assistant",
-            sender_id=sender_id,
-            group_id=group_id,
+        await _run_db(
+            role_id, functools.partial(
+                append_short_term,
+                role_id,
+                "assistant",
+                ai_reply,
+                task_id=task_id,
+                request_id=normalized_request_id,
+                json_memory=attached_json,
+                origin=origin,
+                sender=role.get("name") or "assistant",
+                sender_id=sender_id,
+                group_id=group_id,
+            )
         )
 
     new_core = None
@@ -749,7 +752,7 @@ def _resolve_vision_uploads(upload_ids: List[str]) -> tuple[List[str], List[Path
             b64 = _base64.b64encode(image_bytes).decode("utf-8")
             data_urls.append(f"data:{mime_type};base64,{b64}")
         except Exception as e:
-            print(f"解析识图上传失败 upload_id={upload_id}: {e}")
+            logger.warning("解析识图上传失败 upload_id=%s: %s", upload_id, e)
     return data_urls, cleanup_dirs
 
 
@@ -806,11 +809,11 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     else:
         result = "noneed"
     if result != "noneed" and result is not None:
-        print(f"衔接事件生成：角色 {role.get('name')} 生成了新的衔接事件记忆: {result}")
+        logger.info("衔接事件生成：角色 %s 生成了新的衔接事件记忆: %s", role.get("name"), result)
     elif result == "noneed":
         pass
     else:
-        print(f"衔接事件生成：角色 {role.get('name')} 没有生成新的衔接事件记忆，AI 可能未能正确判断或发生错误")
+        logger.info("衔接事件生成：角色 %s 没有生成新的衔接事件记忆", role.get("name"))
     # 合并额外上下文
     extra_parts: List[str] = []
     backend_moments_context = _build_moments_chat_context(role_id)
@@ -917,11 +920,14 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     new_core = pipeline_result.get("new_core")
 
     vector_memory_count = pipeline_result.get("vector_memory_count", 0)
-    print(f"AI 事件触发：角色 {role.get('name')} 收到消息，历史消息数：{len(history)}, 额外上下文长度：{len(extra_context) if extra_context else 0}, 向量记忆数：{vector_memory_count}")
+    logger.info(
+        "AI 事件触发：角色 %s 收到消息，历史消息数：%d, 额外上下文长度：%d, 向量记忆数：%s",
+        role.get("name"), len(history), len(extra_context) if extra_context else 0, vector_memory_count,
+    )
     if new_core != "noneed" and new_core is not None:
-        print(f"记忆总结触发：角色 {role.get('name')} 生成了新的核心记忆{new_core}")
+        logger.info("记忆总结触发：角色 %s 生成了新的核心记忆%s", role.get("name"), new_core)
     elif new_core is None:
-        print(f"记忆总结触发：角色 {role.get('name')} 没有生成新的核心记忆")
+        logger.info("记忆总结触发：角色 %s 没有生成新的核心记忆", role.get("name"))
     elif new_core == "noneed":
         pass
     # 用户发消息后重置主动消息冷却计时
@@ -1196,16 +1202,9 @@ class VisionRequest(BaseModel):
 
 
 def _normalize_chat_completions_endpoint(api_url: str) -> str:
-    value = str(api_url or "").strip().rstrip("/")
-    if not value:
-        return ""
-    if value.endswith("/chat/completions"):
-        return value
-    if value.endswith("/v1"):
-        return f"{value}/chat/completions"
-    if "/v1/" in value:
-        return f"{value.rstrip('/')}/chat/completions"
-    return f"{value}/v1/chat/completions"
+    # 统一委托给 vision_service 的规范化实现，避免两份逻辑漂移（D3）。
+    from services.vision_service import normalize_chat_completions_endpoint
+    return normalize_chat_completions_endpoint(api_url)
 
 
 def _resolve_role_or_global_chat_config(role_id: Optional[str]) -> Dict[str, str]:
@@ -1246,15 +1245,16 @@ async def _post_chat_completion(api_url: str, api_key: str, body: Dict[str, Any]
     if not endpoint or not api_key:
         raise HTTPException(status_code=400, detail="AI API 未配置")
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            },
-            json=body,
-        )
+    from services.ai_service import _get_http_client
+    client = _get_http_client()
+    response = await client.post(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        json=body,
+    )
 
     if response.status_code != 200:
         raise HTTPException(

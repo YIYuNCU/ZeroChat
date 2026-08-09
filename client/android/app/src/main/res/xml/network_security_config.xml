@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置（H6）：默认禁止明文流量，强制远程后端走 HTTPS/WSS，
+  避免鉴权 token 与消息内容在网络上明文传输。
+  仅对本机回环与 Android 模拟器宿主放行明文，用于本地开发调试。
+  注意：Android network-security-config 的 domain 仅匹配确切主机/IP，不支持
+  网段（CIDR），因此无法在此枚举任意局域网 IP；自建 LAN(http) 后端场景由
+  运行时告警（SecureWebSocketClient._buildWsUri）提示，建议此类部署启用 HTTPS。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <!-- Android 模拟器访问宿主机 -->
+        <domain includeSubdomains="true">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

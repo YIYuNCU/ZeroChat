@@ -21,6 +21,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSoc
 from pydantic import BaseModel
 
 from transport.onebot_ws import manager as ws_manager
+from core.utils import is_safe_external_url
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -245,9 +246,9 @@ def _transform_event(event: OneBotEvent, self_id: Optional[int] = None) -> Optio
 # ========== 签名验证 ==========
 
 def _verify_signature(raw_body: bytes, secret: str, signature_header: str) -> bool:
-    """验证 OneBot V11 HMAC-SHA1 签名"""
+    """验证 OneBot V11 HMAC-SHA1 签名。空 secret 不放行（调用方应在更早处拒绝）。"""
     if not secret:
-        return True
+        return False
     if not signature_header or not signature_header.startswith("sha1="):
         return False
     expected = "sha1=" + hmac.new(
@@ -385,6 +386,10 @@ async def _describe_onebot_images(image_urls: List[str]) -> List[str]:
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for url in image_urls[:max_images]:
+            # SSRF 防护：入站图片 URL 不可信，禁止指向内网/环回/元数据地址
+            if not is_safe_external_url(url):
+                logger.warning(f"OneBot 图片下载拒绝（URL 未通过 SSRF 校验）: {url[:80]}")
+                continue
             try:
                 # 从 QQ CDN 下载图片
                 resp = await client.get(url, headers={
@@ -1125,52 +1130,57 @@ async def onebot_ws_endpoint(websocket: WebSocket, role_id: str):
         return
 
     # 鉴权：支持 Authorization header、query param、首条消息 token
+    # OneBot 通道豁免全局鉴权，安全完全依赖 per-role secret。启用但未配置 secret 视为
+    # 配置错误，一律拒绝——绝不把空 secret 当作“关闭鉴权”。
     expected_secret = str(onebot_config.get("secret") or "").strip()
     first_data: Optional[Dict] = None
 
-    if expected_secret:
-        auth_ok = False
+    if not expected_secret:
+        logger.warning(f"OneBot WS 拒绝：角色 {role_id} 已启用 OneBot 但未配置 secret")
+        await websocket.accept()
+        await websocket.close(code=1008, reason="OneBot secret not configured")
+        return
 
-        # 1. Authorization: Bearer <token>
-        auth_header = websocket.headers.get("authorization", "")
-        if auth_header.lower().startswith("bearer "):
-            if hmac.compare_digest(auth_header[7:].strip(), expected_secret):
+    auth_ok = False
+
+    # 1. Authorization: Bearer <token>
+    auth_header = websocket.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        if hmac.compare_digest(auth_header[7:].strip(), expected_secret):
+            auth_ok = True
+
+    # 2. X-OneBot-Secret header
+    if not auth_ok:
+        x_secret = websocket.headers.get("x-onebot-secret", "")
+        if hmac.compare_digest(x_secret, expected_secret):
+            auth_ok = True
+
+    # 3. Query param
+    if not auth_ok:
+        if hmac.compare_digest(websocket.query_params.get("access_token", ""), expected_secret):
+            auth_ok = True
+
+    # 4. 首条消息 token 字段
+    if not auth_ok:
+        try:
+            first_text = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+            first_data = json.loads(first_text)
+            body_token = str(
+                first_data.get("token")
+                or first_data.get("access_token")
+                or first_data.get("secret")
+                or ""
+            ).strip()
+            if hmac.compare_digest(body_token, expected_secret):
                 auth_ok = True
+        except (asyncio.TimeoutError, Exception):
+            pass
 
-        # 2. X-OneBot-Secret header
-        if not auth_ok:
-            x_secret = websocket.headers.get("x-onebot-secret", "")
-            if hmac.compare_digest(x_secret, expected_secret):
-                auth_ok = True
-
-        # 3. Query param
-        if not auth_ok:
-            if hmac.compare_digest(websocket.query_params.get("access_token", ""), expected_secret):
-                auth_ok = True
-
-        # 4. 首条消息 token 字段
-        if not auth_ok:
-            try:
-                first_text = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
-                first_data = json.loads(first_text)
-                body_token = str(
-                    first_data.get("token")
-                    or first_data.get("access_token")
-                    or first_data.get("secret")
-                    or ""
-                ).strip()
-                if hmac.compare_digest(body_token, expected_secret):
-                    auth_ok = True
-            except (asyncio.TimeoutError, Exception):
-                pass
-
-        if not auth_ok:
-            logger.warning(f"OneBot WS 鉴权失败: role={role_id}")
-            await websocket.accept()
-            await websocket.close(code=1008, reason="Invalid token")
-            return
-    else:
-        logger.info(f"OneBot WS 跳过鉴权（secret 为空）: role={role_id}")
+    if not auth_ok:
+        logger.warning(f"OneBot WS 鉴权失败: role={role_id}")
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Invalid token")
+        return
 
     # 接受连接
     await websocket.accept()
@@ -1328,33 +1338,37 @@ async def handle_onebot_event(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # 鉴权
+    # 鉴权：OneBot 通道豁免全局 X-Auth-Token 与加密，安全完全依赖 per-role secret。
+    # 因此启用 OneBot 但未设置 secret 视为配置错误，一律拒绝——绝不把空 secret 当作“关闭鉴权”。
     expected_secret = str(onebot_config.get("secret") or "").strip()
-    if expected_secret:
-        auth_ok = False
-        x_signature = request.headers.get("x-signature", "")
-        if x_signature:
-            auth_ok = _verify_signature(raw_body, expected_secret, x_signature)
-        if not auth_ok:
-            for header_name in ("x-onebot-secret", "authorization", "x-auth-token"):
-                val = request.headers.get(header_name, "").strip()
-                if val:
-                    if header_name == "authorization" and val.lower().startswith("bearer "):
-                        val = val[7:].strip()
-                    if hmac.compare_digest(val, expected_secret):
-                        auth_ok = True
-                    break
-        if not auth_ok:
-            if hmac.compare_digest(request.query_params.get("access_token", ""), expected_secret):
-                auth_ok = True
-        if not auth_ok and isinstance(body, dict):
-            body_token = str(
-                body.get("token") or body.get("access_token") or body.get("secret") or ""
-            ).strip()
-            if hmac.compare_digest(body_token, expected_secret):
-                auth_ok = True
-        if not auth_ok:
-            raise HTTPException(status_code=401, detail="Invalid OneBot secret")
+    if not expected_secret:
+        logger.warning(f"OneBot HTTP 拒绝：角色 {role_id} 已启用 OneBot 但未配置 secret")
+        raise HTTPException(status_code=401, detail="OneBot secret not configured")
+
+    auth_ok = False
+    x_signature = request.headers.get("x-signature", "")
+    if x_signature:
+        auth_ok = _verify_signature(raw_body, expected_secret, x_signature)
+    if not auth_ok:
+        for header_name in ("x-onebot-secret", "authorization", "x-auth-token"):
+            val = request.headers.get(header_name, "").strip()
+            if val:
+                if header_name == "authorization" and val.lower().startswith("bearer "):
+                    val = val[7:].strip()
+                if hmac.compare_digest(val, expected_secret):
+                    auth_ok = True
+                break
+    if not auth_ok:
+        if hmac.compare_digest(request.query_params.get("access_token", ""), expected_secret):
+            auth_ok = True
+    if not auth_ok and isinstance(body, dict):
+        body_token = str(
+            body.get("token") or body.get("access_token") or body.get("secret") or ""
+        ).strip()
+        if hmac.compare_digest(body_token, expected_secret):
+            auth_ok = True
+    if not auth_ok:
+        raise HTTPException(status_code=401, detail="Invalid OneBot secret")
 
     event = OneBotEvent(**body)
     try:
@@ -1423,7 +1437,7 @@ async def handle_onebot_event(
         reply_text = _strip_action_descriptions(reply_text)
     except Exception as e:
         logger.error(f"OneBot AI 处理失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="内部处理错误")
 
     # 如果有 WS 连接，尝试通过 WS 发送回复
     conn = ws_manager.get_connection(role_id)

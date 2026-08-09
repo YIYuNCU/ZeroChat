@@ -75,6 +75,16 @@ class SecureWebSocketClient {
   Stream<void> get onReconnectedStream => _reconnectedController.stream;
 
   Future<void> ensureConnected() async {
+    // 未配置鉴权 token / 加密 secret 时不再回退到内置默认值，直接阻止连接，
+    // 提示用户到设置页填写（避免用无效默认值反复失败连接）。
+    if (!SecureBackendClient.isSecurityConfigured) {
+      debugPrint(
+        'SecureWebSocketClient: 后端鉴权未配置（Token/加密密钥为空），'
+        '请在「设置 → 后端服务器」中填写后再连接。',
+      );
+      throw StateError('后端鉴权未配置，请先在设置中填写 Token 与加密密钥');
+    }
+
     final existing = _socket;
     if (existing != null && existing.readyState == WebSocket.open) {
       _resetBackoff();
@@ -272,9 +282,24 @@ class SecureWebSocketClient {
     return Duration(seconds: bounded + 2);
   }
 
+  /// 判断主机是否为本机回环（本地开发允许明文）。
+  static bool _isLoopbackHost(String host) {
+    final h = host.toLowerCase();
+    return h == 'localhost' || h == '127.0.0.1' || h == '::1';
+  }
+
   Uri _buildWsUri({required String backendUrl}) {
     final uri = Uri.parse(backendUrl);
     final wsScheme = uri.scheme == 'https' ? 'wss' : 'ws';
+
+    // 明文传输告警：非回环主机仍用 http/ws 时，鉴权 header 与流量将走明文，
+    // 存在中间人窃听/篡改风险。本地回环放行以便开发调试。
+    if (wsScheme == 'ws' && !_isLoopbackHost(uri.host)) {
+      debugPrint(
+        'SecureWebSocketClient: ⚠️ 正在通过明文 ws:// 连接非本机后端 '
+        '(${uri.host})，鉴权 token 与消息内容不加密传输。建议后端启用 HTTPS/WSS。',
+      );
+    }
 
     return Uri(
       scheme: wsScheme,

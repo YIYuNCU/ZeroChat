@@ -158,26 +158,30 @@ class ApiService {
       messages.add({'role': 'user', 'content': message});
 
       // ========== 详细调试日志 ==========
-      debugPrint('═══════════════════════════════════════════════════════════');
-      debugPrint(
-        '🔷 API Request: role=${role.name}, messages=${messages.length}',
-      );
-      debugPrint(
-        '📝 System Prompt: ${fullSystemPrompt.length > 200 ? '${fullSystemPrompt.substring(0, 200)}...' : fullSystemPrompt}',
-      );
-      debugPrint('💬 User Message: $message');
-      if (history != null && history.isNotEmpty) {
-        debugPrint('📜 History: ${history.length} messages');
-        for (var i = 0; i < history.length && i < 3; i++) {
-          debugPrint(
-            '   └─ ${history[i]['role']}: ${history[i]['content']?.toString().substring(0, history[i]['content']!.length > 50 ? 50 : history[i]['content']!.length)}...',
-          );
+      // 仅在 debug 构建打印会话内容；debugPrint 在 release 不会被自动移除，
+      // 直接打印 system prompt / 用户消息 / 历史 / AI 回复会在生产日志泄漏隐私。
+      if (kDebugMode) {
+        debugPrint('═══════════════════════════════════════════════════════════');
+        debugPrint(
+          '🔷 API Request: role=${role.name}, messages=${messages.length}',
+        );
+        debugPrint(
+          '📝 System Prompt: ${fullSystemPrompt.length > 200 ? '${fullSystemPrompt.substring(0, 200)}...' : fullSystemPrompt}',
+        );
+        debugPrint('💬 User Message: $message');
+        if (history != null && history.isNotEmpty) {
+          debugPrint('📜 History: ${history.length} messages');
+          for (var i = 0; i < history.length && i < 3; i++) {
+            debugPrint(
+              '   └─ ${history[i]['role']}: ${history[i]['content']?.toString().substring(0, history[i]['content']!.length > 50 ? 50 : history[i]['content']!.length)}...',
+            );
+          }
         }
+        debugPrint(
+          '⚙️ Params: temp=${role.temperature}, freq=${role.frequencyPenalty}, pres=${role.presencePenalty}',
+        );
+        debugPrint('───────────────────────────────────────────────────────────');
       }
-      debugPrint(
-        '⚙️ Params: temp=${role.temperature}, freq=${role.frequencyPenalty}, pres=${role.presencePenalty}',
-      );
-      debugPrint('───────────────────────────────────────────────────────────');
 
       final response = await SecureBackendClient.postRawJson(
         '$_effectiveUrl/chat/completions',
@@ -202,21 +206,24 @@ class ApiService {
         final data = jsonDecode(response.body);
         final content = data['choices']?[0]?['message']?['content'] as String?;
         if (content != null) {
-          debugPrint(
-            '🤖 AI Response: ${content.length > 300 ? '${content.substring(0, 300)}...' : content}',
-          );
-          debugPrint(
-            '═══════════════════════════════════════════════════════════',
-          );
+          if (kDebugMode) {
+            debugPrint(
+              '🤖 AI Response: ${content.length > 300 ? '${content.substring(0, 300)}...' : content}',
+            );
+            debugPrint(
+              '═══════════════════════════════════════════════════════════',
+            );
+          }
           return ApiResponse.success(content.trim());
         }
         return ApiResponse.error('AI 返回内容为空');
       } else {
-        final errorBody = response.body;
-        debugPrint('❌ API Error: $errorBody');
-        debugPrint(
-          '═══════════════════════════════════════════════════════════',
-        );
+        if (kDebugMode) {
+          debugPrint('❌ API Error: ${response.body}');
+          debugPrint(
+            '═══════════════════════════════════════════════════════════',
+          );
+        }
         return ApiResponse.error('API 请求失败 (${response.statusCode})');
       }
     } catch (e) {

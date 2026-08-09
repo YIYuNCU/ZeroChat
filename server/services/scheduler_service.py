@@ -3,6 +3,7 @@
 管理定时任务、主动消息、朋友圈 AI 行为
 """
 import json
+import hashlib
 import random
 import asyncio
 import logging
@@ -12,10 +13,11 @@ from typing import Optional, Dict, List, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
 
-from core.utils import is_tool_role_id
+from core.utils import is_tool_role_id, load_moments_posts, atomic_write_json
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
@@ -89,8 +91,7 @@ def _persist_next_proactive_time(
     proactive_config["next_trigger_time"] = serialized
     role["proactive_config"] = proactive_config
     role["updated_at"] = datetime.now().isoformat()
-    with open(profile_file, "w", encoding="utf-8") as f:
-        json.dump(role, f, ensure_ascii=False, indent=2)
+    atomic_write_json(profile_file, role)
 
 
 def schedule_proactive_for_role(role_id: str, *, reset: bool = False):
@@ -218,21 +219,40 @@ def schedule_task(task: Dict):
     trigger_time = task.get("trigger_time")
     if not trigger_time:
         return
-    
+
+    repeat = str(task.get("repeat") or "none").strip().lower()
+
     try:
         run_time = datetime.fromisoformat(trigger_time)
-        if run_time < datetime.now():
-            return  # 过期任务不调度
-        
+
+        if repeat == "daily":
+            # 每日在同一时刻触发；trigger_time 只用于确定时/分/秒，日期可为过去。
+            trigger = CronTrigger(
+                hour=run_time.hour, minute=run_time.minute, second=run_time.second
+            )
+        elif repeat == "weekly":
+            # 每周在同一星期几、同一时刻触发。
+            trigger = CronTrigger(
+                day_of_week=run_time.weekday(),
+                hour=run_time.hour,
+                minute=run_time.minute,
+                second=run_time.second,
+            )
+        else:
+            # 一次性任务：过期则不调度。
+            if run_time < datetime.now():
+                return
+            trigger = DateTrigger(run_date=run_time)
+
         scheduler.add_job(
             _trigger_task,
-            DateTrigger(run_date=run_time),
+            trigger,
             id=job_id,
             args=[task],
             replace_existing=True
         )
-        
-        logger.info(f"Scheduled task {task_id} at {run_time}")
+
+        logger.info(f"Scheduled task {task_id} at {run_time} (repeat={repeat})")
     except Exception as e:
         logger.error(f"Failed to schedule task {task_id}: {e}")
 
@@ -252,7 +272,11 @@ async def _trigger_task(task: Dict):
             }
         })
 
-    mark_task_completed(str(task.get("id", "")).strip())
+    # 仅一次性任务在触发后标记完成；daily/weekly 重复任务保持 enabled，
+    # 由 CronTrigger 持续触发（重启后 _init_scheduled_tasks 会按 repeat 重建）。
+    repeat = str(task.get("repeat") or "none").strip().lower()
+    if repeat not in ("daily", "weekly"):
+        mark_task_completed(str(task.get("id", "")).strip())
 
 
 def unschedule_task(task_id: str):
@@ -282,9 +306,7 @@ def mark_task_completed(task_id: str):
                 break
 
         if dirty:
-            TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(TASKS_FILE, "w", encoding="utf-8") as f:
-                json.dump(tasks, f, indent=2, ensure_ascii=False)
+            atomic_write_json(TASKS_FILE, tasks)
     except Exception as e:
         logger.warning(f"Failed to mark task completed ({task_id}): {e}")
 
@@ -309,9 +331,7 @@ def _load_followups() -> Dict[str, Dict]:
 def _save_followups(data: Dict[str, Dict]):
     """写回续写状态表"""
     try:
-        FOLLOWUPS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(FOLLOWUPS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(FOLLOWUPS_FILE, data)
     except Exception as e:
         logger.warning(f"Failed to save followups: {e}")
 
@@ -540,8 +560,10 @@ async def _check_moment_posts():
             continue
         last = last_posts.get(role_id)
         if last is None:
-            # 从未发过：视为需要补发；按角色 ID 做轻微错峰，避免所有新角色同一小时齐发
-            if (now.hour + hash(role_id)) % 6 == 0:
+            # 从未发过：视为需要补发；按角色 ID 做轻微错峰，避免所有新角色同一小时齐发。
+            # 用稳定哈希（md5）而非内置 hash()，后者受 PYTHONHASHSEED 影响每次启动结果不同。
+            role_stagger = int(hashlib.md5(role_id.encode("utf-8")).hexdigest(), 16)
+            if (now.hour + role_stagger) % 6 == 0:
                 forced.append(role)
             else:
                 optional.append(role)
@@ -576,17 +598,7 @@ async def _check_moment_posts():
 
 
 def _load_moments_posts() -> List[Dict]:
-    moments_file = DATA_DIR / "moments" / "posts.json"
-    if not moments_file.exists():
-        return []
-    try:
-        with open(moments_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-    except Exception as e:
-        logger.warning(f"加载朋友圈数据失败: {e}")
-    return []
+    return load_moments_posts(DATA_DIR / "moments" / "posts.json")
 
 
 def _load_non_tool_roles() -> List[Dict]:

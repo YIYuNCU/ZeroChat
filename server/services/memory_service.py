@@ -31,13 +31,17 @@ def get_memory_json(role_id: str) -> Path:
     return role_dir / "memory.json"
 
 # 连接池缓存 + WAL 模式
-_CONNECTION_POOL: Dict[str, sqlite3.Connection] = {}
-_POOL_LOCK = None
-try:
-    import threading
-    _POOL_LOCK = threading.Lock()
-except ImportError:
-    pass
+# 键为 (thread_id, role_id)：sqlite3 连接对象不可跨线程并发使用，事件循环线程与线程池
+# worker 各自持有独立连接，靠 WAL + busy_timeout 协调对同一文件的并发访问。
+import threading
+
+_CONNECTION_POOL: Dict[tuple, sqlite3.Connection] = {}
+_POOL_LOCK = threading.Lock()
+
+# 已完成 schema 初始化/迁移的 DB 路径集合（进程级），避免每个 worker 线程
+# 的冷连接都重跑 PRAGMA 扫描 + 潜在 rebuild。迁移本身幂等，这里仅做去重加速。
+_SCHEMA_READY: set = set()
+_SCHEMA_READY_LOCK = threading.Lock()
 
 _EXECUTOR = None
 def _get_executor():
@@ -52,15 +56,37 @@ async def _run_db(role_id: str, fn, *args, **kwargs):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_get_executor(), fn, *args, **kwargs)
 
+# 持有 fire-and-forget 任务的强引用，避免被 GC 提前回收；完成后记录异常并移除。
+_BACKGROUND_TASKS: "set[asyncio.Task]" = set()
+
+def _spawn_background(coro, description: str = "background task"):
+    """安排后台协程，保留强引用并在完成时记录异常。"""
+    task = asyncio.ensure_future(coro)
+    _BACKGROUND_TASKS.add(task)
+
+    def _done(t: "asyncio.Task"):
+        _BACKGROUND_TASKS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.warning("%s failed: %s", description, exc)
+
+    task.add_done_callback(_done)
+    return task
+
 def close_all_connections():
     """关闭所有缓存的数据库连接（服务关闭时调用）"""
     global _CONNECTION_POOL
-    for conn in _CONNECTION_POOL.values():
-        try:
-            conn.close()
-        except Exception:
-            pass
-    _CONNECTION_POOL.clear()
+    with _POOL_LOCK:
+        for conn in _CONNECTION_POOL.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _CONNECTION_POOL.clear()
+    with _SCHEMA_READY_LOCK:
+        _SCHEMA_READY.clear()
 
 def _init_db(conn: sqlite3.Connection):
     conn.execute(
@@ -178,6 +204,17 @@ def _set_meta(conn: sqlite3.Connection, key: str, value: Optional[str]):
     conn.execute(
         "INSERT OR REPLACE INTO memory_meta (key, value) VALUES (?, ?)",
         (key, value)
+    )
+
+_USAGE_LOCK = threading.Lock()
+
+def _increment_meta(conn: sqlite3.Connection, key: str, delta: int):
+    """原子累加整型 meta，避免并发响应对同一 key 的 last-writer-wins 丢计数。"""
+    conn.execute(
+        """INSERT INTO memory_meta (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET
+               value = CAST(COALESCE(value, '0') AS INTEGER) + ?""",
+        (key, str(delta), delta),
     )
 
 def _normalize_core_memory(value: Any) -> str:
@@ -552,27 +589,40 @@ def _maybe_migrate_from_json(role_id: str, conn: sqlite3.Connection):
 
 def _get_connection(role_id: str) -> sqlite3.Connection:
     db_path = get_memory_db(role_id)
-    # 检查缓存连接
-    cached = _CONNECTION_POOL.get(role_id)
+    # 按 (线程, 角色) 缓存连接，避免跨线程共享同一连接对象
+    pool_key = (threading.get_ident(), role_id)
+
+    with _POOL_LOCK:
+        cached = _CONNECTION_POOL.get(pool_key)
     if cached is not None:
         try:
             cached.execute("SELECT 1")
             return cached
         except (sqlite3.ProgrammingError, sqlite3.OperationalError):
-            _CONNECTION_POOL.pop(role_id, None)
+            with _POOL_LOCK:
+                _CONNECTION_POOL.pop(pool_key, None)
+            # 连接失效通常意味着底层 DB 文件被删除/重建；清除 schema 就绪标记，
+            # 以便对重建后的 DB 重新执行建表/迁移。
+            with _SCHEMA_READY_LOCK:
+                _SCHEMA_READY.discard(str(db_path))
 
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    _init_db(conn)
-    _maybe_migrate_from_json(role_id, conn)
 
-    if _POOL_LOCK:
-        with _POOL_LOCK:
-            _CONNECTION_POOL[role_id] = conn
-    else:
-        _CONNECTION_POOL[role_id] = conn
+    db_key = str(db_path)
+    with _SCHEMA_READY_LOCK:
+        schema_done = db_key in _SCHEMA_READY
+    if not schema_done:
+        # 首次遇到该 DB：跑一次建表/迁移（幂等）。后续线程的冷连接跳过。
+        _init_db(conn)
+        _maybe_migrate_from_json(role_id, conn)
+        with _SCHEMA_READY_LOCK:
+            _SCHEMA_READY.add(db_key)
+
+    with _POOL_LOCK:
+        _CONNECTION_POOL[pool_key] = conn
     return conn
 
 def load_memory(role_id: str) -> Dict:
@@ -879,7 +929,7 @@ async def trigger_chat_summary(
         messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
     except Exception as e:
-        print(f"构建记忆总结提示时发生错误：{e}")
+        logger.warning("构建记忆总结提示时发生错误：%s", e)
         return None
     try:
         result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1))
@@ -893,9 +943,9 @@ async def trigger_chat_summary(
                               group_id=conv_group_id, sender_id=conv_sender_id)
             return new_memory
         else:
-            print(f"记忆总结失败：{result}")
+            logger.warning("记忆总结失败：%s", result)
     except Exception as e:
-        print(f"调用 AI 进行记忆总结时发生错误：{e}")
+        logger.warning("调用 AI 进行记忆总结时发生错误：%s", e)
         return None
 
     return None
@@ -949,10 +999,12 @@ async def get_context_messages(
         where_clause = "WHERE origin IN ('zerochat', 'proactive', 'system') OR (origin LIKE 'onebot%' AND sender = 'user')"
 
     if latest:
-        with _get_connection(role_id) as conn:
-            query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id DESC LIMIT ?"
-            rows = conn.execute(query_sql, where_params + [effective_limit]).fetchall()
+        def _fetch_latest():
+            with _get_connection(role_id) as conn:
+                query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id DESC LIMIT ?"
+                return conn.execute(query_sql, where_params + [effective_limit]).fetchall()
 
+        rows = await _run_db(role_id, _fetch_latest)
         return [
             {
                 "role": row[0] or "assistant",
@@ -970,23 +1022,26 @@ async def get_context_messages(
     overlap = max(1, int(effective_limit * 0.1))
     slide = effective_limit - overlap
     virtual_start_key = f"virtual_block_start:{conversation_key or 'default'}"
-    need_trigger_summary = False
 
-    with _get_connection(role_id) as conn:
-        count_sql = f"SELECT COUNT(*) FROM short_term {where_clause}"
-        total = conn.execute(count_sql, where_params).fetchone()[0]
+    def _compute_virtual_start():
+        with _get_connection(role_id) as conn:
+            count_sql = f"SELECT COUNT(*) FROM short_term {where_clause}"
+            total_local = conn.execute(count_sql, where_params).fetchone()[0]
+            if total_local == 0:
+                return 0, 0, False
+            vstart = int(_get_meta(conn, virtual_start_key, "0"))
+            trigger = False
+            if not skip_summary and total_local - vstart >= effective_limit:
+                vstart += slide
+                if total_local - vstart >= effective_limit:
+                    vstart = total_local - effective_limit + overlap
+                _set_meta(conn, virtual_start_key, str(vstart))
+                trigger = True
+            return total_local, vstart, trigger
 
-        if total == 0:
-            return []
-
-        virtual_start = int(_get_meta(conn, virtual_start_key, "0"))
-
-        if not skip_summary and total - virtual_start >= effective_limit:
-            virtual_start += slide
-            if total - virtual_start >= effective_limit:
-                virtual_start = total - effective_limit + overlap
-            _set_meta(conn, virtual_start_key, str(virtual_start))
-            need_trigger_summary = True
+    total, virtual_start, need_trigger_summary = await _run_db(role_id, _compute_virtual_start)
+    if total == 0:
+        return []
 
     if need_trigger_summary:
         conv_origin = "system"
@@ -1008,10 +1063,12 @@ async def get_context_messages(
             logger.error(f"触发对话总结失败，无法获取新的上下文消息")
 
     query_offset = virtual_start
-    with _get_connection(role_id) as conn:
-        query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?"
-        rows = conn.execute(query_sql, where_params + [effective_limit, query_offset]).fetchall()
+    def _fetch_context():
+        with _get_connection(role_id) as conn:
+            query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?"
+            return conn.execute(query_sql, where_params + [effective_limit, query_offset]).fetchall()
 
+    rows = await _run_db(role_id, _fetch_context)
     context = [
         {
             "role": row[0] or "assistant",
@@ -1053,7 +1110,8 @@ async def get_relevant_memories(
         return []
 
     store = VectorMemoryStore(role_id)
-    if store.count() == 0:
+    # count/search 都是同步 SQLite + numpy 计算，卸载到线程池避免阻塞事件循环。
+    if await _run_db(role_id, store.count) == 0:
         return []
 
     from services.ai_service import generate_embedding
@@ -1061,7 +1119,9 @@ async def get_relevant_memories(
     if not result["success"] or not result["embedding"]:
         return []
 
-    results = store.search(result["embedding"], top_k=top_k, min_score=min_score)
+    results = await _run_db(
+        role_id, store.search, result["embedding"], top_k, min_score
+    )
     return [
         {
             "text": _extract_semantic_text(r["text"]),
@@ -1155,7 +1215,7 @@ async def sequential_memory_generation(
         if not should_generate_sequential_memory(role_id):
             return "noneed"
     except Exception as e:
-        print(f"检查是否需要生成衔接记忆时发生错误：{e}")
+        logger.warning("检查是否需要生成衔接记忆时发生错误：%s", e)
         return None
     # 导入 AI 服务
     from services.ai_service import call_ai_direct
@@ -1194,7 +1254,7 @@ async def sequential_memory_generation(
         messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
     except Exception as e:
-        print(f"构建衔接记忆提示时发生错误：{e}")
+        logger.warning("构建衔接记忆提示时发生错误：%s", e)
         return None
     try:
         result = await call_ai_direct(messages=messages, model=worker.get("ai_model"), api_url=worker.get("ai_api_url"), api_key=worker.get("ai_api_key"), temperature=worker.get("ai_temperature", 1.2))
@@ -1206,18 +1266,18 @@ async def sequential_memory_generation(
             append_short_term(role_id, "assistant", f"衔接记忆内容：{new_memory}", origin="system", sender="sequential_memory")
             # 将衔接记忆存入向量记忆库（工具角色跳过）
             if not is_tool_role_id(role_id):
-                try:
-                    asyncio.ensure_future(embed_and_store(
+                _spawn_background(
+                    embed_and_store(
                         role_id, new_memory, role="assistant",
                         source="sequential", min_text_length=5
-                    ))
-                except Exception:
-                    pass
+                    ),
+                    description=f"embed_and_store(sequential, role={role_id})",
+                )
             return new_memory
         else:
-            print(f"衔接记忆生成失败：{result}")
+            logger.warning("衔接记忆生成失败：%s", result)
     except Exception as e:
-        print(f"调用 AI 生成衔接记忆时发生错误：{e}")
+        logger.warning("调用 AI 生成衔接记忆时发生错误：%s", e)
         return None
 
 async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]:
@@ -1231,7 +1291,7 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
         if not should_summarize(role_data.get("id", role_id)):
             return "noneed"
     except Exception as e:
-        print(f"检查是否需要总结核心记忆时发生错误：{e}")
+        logger.warning("检查是否需要总结核心记忆时发生错误：%s", e)
         return None
     # 导入 AI 服务
     from services.ai_service import call_ai_direct
@@ -1260,7 +1320,7 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
         messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
     except Exception as e:
-        print(f"构建记忆总结提示时发生错误：{e}")
+        logger.warning("构建记忆总结提示时发生错误：%s", e)
         return None
     try:
         result = await call_ai_direct(messages=messages, model=role_data.get("ai_model"), api_url=role_data.get("ai_api_url"), api_key=role_data.get("ai_api_key"), temperature=role_data.get("ai_temperature", 0.1))
@@ -1269,18 +1329,18 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
             update_core_memory(role_need_change, new_core)
             # 将核心记忆存入向量记忆库（工具角色跳过）
             if not is_tool_role_id(role_id):
-                try:
-                    asyncio.ensure_future(embed_and_store(
+                _spawn_background(
+                    embed_and_store(
                         role_id, new_core, role="assistant",
                         source="core_summary", min_text_length=5
-                    ))
-                except Exception:
-                    pass
+                    ),
+                    description=f"embed_and_store(core_summary, role={role_id})",
+                )
             return new_core
         else:
-            print(f"记忆总结失败：{result}")
+            logger.warning("记忆总结失败：%s", result)
     except Exception as e:
-        print(f"调用 AI 进行记忆总结时发生错误：{e}")
+        logger.warning("调用 AI 进行记忆总结时发生错误：%s", e)
         return None
 
     return None
@@ -1431,23 +1491,15 @@ def record_usage(role_id: str, usage: Optional[Dict[str, Any]], model: Optional[
         return
     try:
         parsed = _parse_usage_fields(usage)
-        with _get_connection(role_id) as conn:
+        # usage_by_model_json 是 JSON blob 的读-改-写，SQLite 行级锁无法保证，
+        # 用进程内锁串行化整段累加；每次响应仅调用一次，竞争可忽略。
+        with _USAGE_LOCK, _get_connection(role_id) as conn:
             for field, key in _USAGE_TOTAL_KEYS.items():
                 if field == "request_count":
                     continue
-                current = _get_meta(conn, key, "0")
-                try:
-                    current_int = int(current)
-                except (TypeError, ValueError):
-                    current_int = 0
-                _set_meta(conn, key, str(current_int + parsed[field]))
+                _increment_meta(conn, key, parsed[field])
 
-            count = _get_meta(conn, _USAGE_TOTAL_KEYS["request_count"], "0")
-            try:
-                count_int = int(count)
-            except (TypeError, ValueError):
-                count_int = 0
-            _set_meta(conn, _USAGE_TOTAL_KEYS["request_count"], str(count_int + 1))
+            _increment_meta(conn, _USAGE_TOTAL_KEYS["request_count"], 1)
 
             # 按模型累计（用量最大排前）
             model_key = (model or "").strip() or "未知"

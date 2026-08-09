@@ -167,7 +167,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
             _buildTextField(
               'Token',
               _backendTokenController,
-              SecureBackendClient.defaultAuthToken,
+              '请填写后端鉴权 Token',
               obscure: _backendTokenObscured,
               onToggleObscure: () {
                 setState(() {
@@ -179,7 +179,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
             _buildTextField(
               '加密密钥',
               _backendEncryptionSecretController,
-              SecureBackendClient.defaultEncryptionSecret,
+              '请填写后端传输加密密钥',
               obscure: _backendEncryptionSecretObscured,
               onToggleObscure: () {
                 setState(() {

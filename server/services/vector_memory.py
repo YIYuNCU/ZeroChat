@@ -4,12 +4,33 @@
 """
 import json
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+import numpy as np
+
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
+
+# 按 (thread_id, role_id) 复用连接；连接对象不可跨线程并发使用。
+_VEC_CONNECTION_POOL: Dict[tuple, sqlite3.Connection] = {}
+_VEC_POOL_LOCK = threading.Lock()
+
+# 向量库保留上限：写入后自动裁剪，避免全表扫描随数据无限增长。
+_VECTOR_RETENTION_LIMIT = 2000
+
+
+def close_all_vector_connections():
+    """关闭所有缓存的向量库连接（服务关闭时调用）。"""
+    with _VEC_POOL_LOCK:
+        for conn in _VEC_CONNECTION_POOL.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _VEC_CONNECTION_POOL.clear()
 
 
 class VectorMemoryStore:
@@ -34,9 +55,32 @@ class VectorMemoryStore:
         self.role_id = role_id
 
     def _get_conn(self) -> sqlite3.Connection:
+        """获取按 (线程, 角色) 复用的连接。
+
+        向量库与 memory_service 指向同一 memory.sqlite，因此统一开启 WAL +
+        busy_timeout 以避免日志模式冲突和 database is locked。DDL 每连接只跑一次。
+        """
+        pool_key = (threading.get_ident(), self.role_id)
+
+        with _VEC_POOL_LOCK:
+            cached = _VEC_CONNECTION_POOL.get(pool_key)
+        if cached is not None:
+            try:
+                cached.execute("SELECT 1")
+                return cached
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                with _VEC_POOL_LOCK:
+                    _VEC_CONNECTION_POOL.pop(pool_key, None)
+
         db_path = ROLES_DIR / self.role_id / "memory.sqlite"
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         self._init_vector_table(conn)
+
+        with _VEC_POOL_LOCK:
+            _VEC_CONNECTION_POOL[pool_key] = conn
         return conn
 
     def _init_vector_table(self, conn: sqlite3.Connection):
@@ -46,110 +90,114 @@ class VectorMemoryStore:
 
     def store(self, text: str, embedding: List[float], role: str = "assistant",
               timestamp: Optional[str] = None, source: str = "chat"):
-        """存储一条向量记忆"""
+        """存储一条向量记忆（写入后自动裁剪到保留上限）"""
         conn = self._get_conn()
-        try:
+        conn.execute(
+            """INSERT INTO vector_embeddings (text, embedding, role, timestamp, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (text, json.dumps(embedding), role,
+             timestamp or datetime.now().isoformat(),
+             source, datetime.now().isoformat())
+        )
+        conn.commit()
+        self._trim_to_limit(conn)
+
+    def store_batch(self, items: List[Dict[str, Any]]):
+        """批量存储向量记忆（写入后自动裁剪到保留上限）"""
+        conn = self._get_conn()
+        now = datetime.now().isoformat()
+        for item in items:
             conn.execute(
                 """INSERT INTO vector_embeddings (text, embedding, role, timestamp, source, created_at)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                (text, json.dumps(embedding), role,
-                 timestamp or datetime.now().isoformat(),
-                 source, datetime.now().isoformat())
+                (item["text"], json.dumps(item["embedding"]),
+                 item.get("role", "assistant"),
+                 item.get("timestamp") or now,
+                 item.get("source", "chat"), now)
             )
-            conn.commit()
-        finally:
-            conn.close()
+        conn.commit()
+        self._trim_to_limit(conn)
 
-    def store_batch(self, items: List[Dict[str, Any]]):
-        """批量存储向量记忆"""
-        conn = self._get_conn()
-        try:
-            now = datetime.now().isoformat()
-            for item in items:
-                conn.execute(
-                    """INSERT INTO vector_embeddings (text, embedding, role, timestamp, source, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (item["text"], json.dumps(item["embedding"]),
-                     item.get("role", "assistant"),
-                     item.get("timestamp") or now,
-                     item.get("source", "chat"), now)
-                )
-            conn.commit()
-        finally:
-            conn.close()
+    def _trim_to_limit(self, conn: sqlite3.Connection):
+        """保留最新 _VECTOR_RETENTION_LIMIT 条，删除更早记录，抑制全表扫描规模。"""
+        conn.execute(
+            """DELETE FROM vector_embeddings WHERE id NOT IN (
+                SELECT id FROM vector_embeddings ORDER BY id DESC LIMIT ?
+            )""",
+            (_VECTOR_RETENTION_LIMIT,),
+        )
+        conn.commit()
 
     def search(self, query_embedding: List[float], top_k: int = 5,
                min_score: float = 0.0) -> List[Dict]:
         """
-        搜索与查询向量最相似的记忆
-
-        Args:
-            query_embedding: 查询向量
-            top_k: 返回 top-k 结果
-            min_score: 最低相似度阈值
+        搜索与查询向量最相似的记忆（numpy 向量化余弦）
 
         Returns:
         [{"id": int, "text": str, "role": str, "timestamp": str,
           "source": str, "created_at": str, "score": float}, ...]
         """
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT id, text, embedding, role, timestamp, source, created_at "
-                "FROM vector_embeddings"
-            ).fetchall()
+        rows = conn.execute(
+            "SELECT id, text, embedding, role, timestamp, source, created_at "
+            "FROM vector_embeddings"
+        ).fetchall()
+        if not rows:
+            return []
 
-            scored = []
-            for row in rows:
-                stored_emb = json.loads(row[2])
-                score = _cosine_similarity(query_embedding, stored_emb)
-                if score >= min_score:
-                    scored.append({
-                        "id": row[0],
-                        "text": row[1],
-                        "role": row[3],
-                        "timestamp": row[4],
-                        "source": row[5],
-                        "created_at": row[6],
-                        "score": round(score, 4),
-                    })
+        query = np.asarray(query_embedding, dtype=np.float32)
+        q_norm = np.linalg.norm(query)
+        if q_norm == 0:
+            return []
 
-            scored.sort(key=lambda x: x["score"], reverse=True)
-            return scored[:top_k]
-        finally:
-            conn.close()
+        scored: List[Dict] = []
+        for row in rows:
+            try:
+                emb = np.asarray(json.loads(row[2]), dtype=np.float32)
+            except (ValueError, TypeError):
+                continue
+            if emb.shape != query.shape:
+                continue
+            e_norm = np.linalg.norm(emb)
+            if e_norm == 0:
+                continue
+            score = float(np.dot(query, emb) / (q_norm * e_norm))
+            if score >= min_score:
+                scored.append({
+                    "id": row[0],
+                    "text": row[1],
+                    "role": row[3],
+                    "timestamp": row[4],
+                    "source": row[5],
+                    "created_at": row[6],
+                    "score": round(score, 4),
+                })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:top_k]
 
     def count(self) -> int:
         """返回当前角色的向量记忆数量"""
         conn = self._get_conn()
-        try:
-            row = conn.execute("SELECT COUNT(*) FROM vector_embeddings").fetchone()
-            return row[0] if row else 0
-        finally:
-            conn.close()
+        row = conn.execute("SELECT COUNT(*) FROM vector_embeddings").fetchone()
+        return row[0] if row else 0
 
     def delete_old(self, keep_count: int = 500):
         """保留最新的 keep_count 条，删除更早的向量记忆"""
         conn = self._get_conn()
-        try:
-            conn.execute(
-                """DELETE FROM vector_embeddings WHERE id NOT IN (
-                    SELECT id FROM vector_embeddings ORDER BY id DESC LIMIT ?
-                )""",
-                (keep_count,)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute(
+            """DELETE FROM vector_embeddings WHERE id NOT IN (
+                SELECT id FROM vector_embeddings ORDER BY id DESC LIMIT ?
+            )""",
+            (keep_count,)
+        )
+        conn.commit()
 
     def clear(self):
         """清空所有向量记忆"""
         conn = self._get_conn()
-        try:
-            conn.execute("DELETE FROM vector_embeddings")
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute("DELETE FROM vector_embeddings")
+        conn.commit()
 
     def list_all(self, limit: int = 500, offset: int = 0) -> List[Dict]:
         """列出向量记忆（不返回 embedding 向量本体，避免传输冗余数据）。
@@ -159,38 +207,13 @@ class VectorMemoryStore:
               "source": str, "created_at": str}, ...]，按 id 倒序（最新在前）。
         """
         conn = self._get_conn()
-        try:
-            rows = conn.execute(
-                "SELECT id, text, role, timestamp, source, created_at "
-                "FROM vector_embeddings ORDER BY id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
-            return [
-                {
-                    "id": row[0],
-                    "text": row[1],
-                    "role": row[2],
-                    "timestamp": row[3],
-                    "source": row[4],
-                    "created_at": row[5],
-                }
-                for row in rows
-            ]
-        finally:
-            conn.close()
-
-    def get_by_id(self, memory_id: int) -> Optional[Dict]:
-        """按主键获取单条向量记忆（不含 embedding 本体）。"""
-        conn = self._get_conn()
-        try:
-            row = conn.execute(
-                "SELECT id, text, role, timestamp, source, created_at "
-                "FROM vector_embeddings WHERE id = ?",
-                (memory_id,),
-            ).fetchone()
-            if not row:
-                return None
-            return {
+        rows = conn.execute(
+            "SELECT id, text, role, timestamp, source, created_at "
+            "FROM vector_embeddings ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [
+            {
                 "id": row[0],
                 "text": row[1],
                 "role": row[2],
@@ -198,36 +221,49 @@ class VectorMemoryStore:
                 "source": row[4],
                 "created_at": row[5],
             }
-        finally:
-            conn.close()
+            for row in rows
+        ]
+
+    def get_by_id(self, memory_id: int) -> Optional[Dict]:
+        """按主键获取单条向量记忆（不含 embedding 本体）。"""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT id, text, role, timestamp, source, created_at "
+            "FROM vector_embeddings WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "text": row[1],
+            "role": row[2],
+            "timestamp": row[3],
+            "source": row[4],
+            "created_at": row[5],
+        }
 
     def delete_by_id(self, memory_id: int) -> bool:
         """按主键删除单条向量记忆，返回是否删除成功。"""
         conn = self._get_conn()
-        try:
-            cursor = conn.execute(
-                "DELETE FROM vector_embeddings WHERE id = ?", (memory_id,)
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-        finally:
-            conn.close()
+        cursor = conn.execute(
+            "DELETE FROM vector_embeddings WHERE id = ?", (memory_id,)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
     def update_text(self, memory_id: int, new_text: str,
                     new_embedding: List[float]) -> bool:
         """更新单条向量记忆的文本与嵌入向量，返回是否更新成功。"""
         conn = self._get_conn()
-        try:
-            cursor = conn.execute(
-                "UPDATE vector_embeddings SET text = ?, embedding = ?, timestamp = ? "
-                "WHERE id = ?",
-                (new_text, json.dumps(new_embedding),
-                 datetime.now().isoformat(), memory_id),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-        finally:
-            conn.close()
+        cursor = conn.execute(
+            "UPDATE vector_embeddings SET text = ?, embedding = ?, timestamp = ? "
+            "WHERE id = ?",
+            (new_text, json.dumps(new_embedding),
+             datetime.now().isoformat(), memory_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:

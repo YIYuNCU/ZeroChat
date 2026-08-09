@@ -113,9 +113,17 @@ app.add_middleware(
         r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
         r"|^https?://((10\.81)|(192\.168))\.\d{1,3}\.\d{1,3}(:\d+)?$"
     ),
+    # 鉴权走自定义 header（非 cookie）。收紧到实际使用的方法与请求头，
+    # 避免 allow_credentials=True 与 "*" methods/headers 并存（既有风险，浏览器亦拒绝）。
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Auth-Token",
+        "X-Signature",
+        "X-Onebot-Secret",
+    ],
 )
 # 路径白名单：最后注册 → 最外层执行，扫描探测在进入日志/鉴权前即被 404
 app.add_middleware(PathWhitelistMiddleware, logger=logger)
