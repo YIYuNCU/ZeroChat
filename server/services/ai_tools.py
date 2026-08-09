@@ -692,9 +692,14 @@ _SEND_EMOTION_EMOJI_TOOL = [{
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
+# 云端表情专用分类：不参与情绪随机抽取与情绪列举
+CLOUD_EMOJI_CATEGORY = "__cloud__"
+
 
 def _pick_emoji_file(role_id: str, emotion: str) -> Optional[Path]:
     """从角色的表情目录中随机选取一个表情文件，目录不存在或为空时返回 None"""
+    if emotion == CLOUD_EMOJI_CATEGORY:
+        return None
     emoji_dir = DATA_DIR / "roles" / role_id / "emojis" / emotion
     if not emoji_dir.exists() or not emoji_dir.is_dir():
         return None
@@ -709,7 +714,7 @@ def _get_available_emotions(role_id: str) -> List[str]:
         return []
     return [
         d.name for d in emoji_root.iterdir()
-        if d.is_dir() and any(
+        if d.is_dir() and d.name != CLOUD_EMOJI_CATEGORY and any(
             f.is_file() and f.suffix.lower() in _IMAGE_EXTS for f in d.iterdir()
         )
     ]

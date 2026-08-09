@@ -12,6 +12,12 @@ class EmojiTransferService {
   EmojiTransferService._();
 
   static const int _maxFileSize = 12 * 1024 * 1024;
+
+  /// Bounded cache budget so downloaded emoji assets never grow without limit.
+  /// Applied to the whole `emoji_cache/` directory after each successful write.
+  static const int _maxCacheFiles = 500;
+  static const int _maxCacheBytes = 200 * 1024 * 1024;
+
   static final Map<String, Future<String?>> _inFlight = {};
 
   static bool isTransferReference(String value) =>
@@ -84,6 +90,7 @@ class EmojiTransferService {
       }
       if (await target.exists()) await target.delete();
       await temp.rename(target.path);
+      await _enforceCacheBudget(cacheDir);
       return target.path;
     } catch (error) {
       debugPrint('EmojiTransferService: transfer failed: $error');
@@ -130,5 +137,73 @@ class EmojiTransferService {
       debugPrint('EmojiTransferService: local cache lookup failed: $error');
     }
     return null;
+  }
+
+  /// Keeps the on-disk emoji cache bounded by file count and total bytes.
+  /// Stale `.part` files are dropped first, then the oldest complete files are
+  /// evicted until both limits are satisfied. Cleanup failures are non-fatal
+  /// and never interrupt rendering of a freshly downloaded sticker.
+  static Future<void> _enforceCacheBudget(Directory cacheDir) async {
+    try {
+      if (!await cacheDir.exists()) return;
+
+      final files = <File>[];
+      await for (final entry in cacheDir.list(followLinks: false)) {
+        if (entry is! File) continue;
+        final name = entry.path.split(Platform.pathSeparator).last;
+        if (name.endsWith('.part')) {
+          // Orphaned partial downloads are always safe to remove.
+          try {
+            await entry.delete();
+          } catch (_) {}
+          continue;
+        }
+        files.add(entry);
+      }
+
+      if (files.length <= _maxCacheFiles) {
+        var totalBytes = 0;
+        for (final file in files) {
+          totalBytes += await _safeLength(file);
+        }
+        if (totalBytes <= _maxCacheBytes) return;
+      }
+
+      // Sort oldest-first by modification time so recent stickers survive.
+      final stats = <File, ({int size, DateTime modified})>{};
+      for (final file in files) {
+        try {
+          final stat = await file.stat();
+          stats[file] = (size: stat.size, modified: stat.modified);
+        } catch (_) {
+          stats[file] = (size: 0, modified: DateTime.fromMillisecondsSinceEpoch(0));
+        }
+      }
+      files.sort(
+        (a, b) => stats[a]!.modified.compareTo(stats[b]!.modified),
+      );
+
+      var count = files.length;
+      var totalBytes = files.fold<int>(0, (sum, f) => sum + stats[f]!.size);
+
+      for (final file in files) {
+        if (count <= _maxCacheFiles && totalBytes <= _maxCacheBytes) break;
+        try {
+          await file.delete();
+          count -= 1;
+          totalBytes -= stats[file]!.size;
+        } catch (_) {}
+      }
+    } catch (error) {
+      debugPrint('EmojiTransferService: cache cleanup failed: $error');
+    }
+  }
+
+  static Future<int> _safeLength(File file) async {
+    try {
+      return await file.length();
+    } catch (_) {
+      return 0;
+    }
   }
 }

@@ -45,7 +45,8 @@ class _PendingChatItem {
 /// The server can return tool side effects alongside the assistant text.
 class _AiReply {
   final String content;
-  final List<String> emojisCalled;
+  // 元素可为 String（情绪名，走随机）或 Map（精确表情 {category, filename}）
+  final List<dynamic> emojisCalled;
 
   const _AiReply(this.content, this.emojisCalled);
 }
@@ -1310,13 +1311,24 @@ class ChatController extends ChangeNotifier {
     );
   }
 
-  List<String> _extractToolEmotions(Map<String, dynamic>? metadata) {
+  List<dynamic> _extractToolEmotions(Map<String, dynamic>? metadata) {
     final rawEmotions = metadata?['emojis_called'];
-    if (rawEmotions is! List) return const <String>[];
-    return rawEmotions
-        .map((value) => value.toString().trim())
-        .where((value) => value.isNotEmpty)
-        .toList();
+    if (rawEmotions is! List) return const <dynamic>[];
+    final result = <dynamic>[];
+    for (final value in rawEmotions) {
+      // 精确表情项：{category, filename} —— 保留为 Map 供精确投递
+      if (value is Map) {
+        final category = value['category']?.toString().trim() ?? '';
+        final filename = value['filename']?.toString().trim() ?? '';
+        if (category.isNotEmpty && filename.isNotEmpty) {
+          result.add({'category': category, 'filename': filename});
+        }
+        continue;
+      }
+      final text = value.toString().trim();
+      if (text.isNotEmpty) result.add(text);
+    }
+    return result;
   }
 
   Future<void> _updatePersistedPendingTask(
@@ -1736,7 +1748,7 @@ class ChatController extends ChangeNotifier {
     String roleId,
     String rawReply, {
     required bool isGroup,
-    List<String> toolEmotions = const <String>[],
+    List<dynamic> toolEmotions = const <dynamic>[],
   }) async {
     final segments = SegmentSender.splitMessage(rawReply);
     final availableEmojiCategories = await _loadAvailableEmojiCategories(
@@ -1851,8 +1863,22 @@ class ChatController extends ChangeNotifier {
     // model responses do not render the same tool call twice.
     final unmatchedTextEmotions = List<String>.from(renderedTextEmotions);
     for (final rawEmotion in toolEmotions) {
+      // 精确表情项：直接按 category/filename 投递，跳过随机抽取
+      if (rawEmotion is Map) {
+        final category = rawEmotion['category']?.toString() ?? '';
+        final filename = rawEmotion['filename']?.toString() ?? '';
+        if (category.isNotEmpty && filename.isNotEmpty) {
+          await _appendPreciseSticker(
+            chatId: chatId,
+            roleId: roleId,
+            category: category,
+            filename: filename,
+          );
+        }
+        continue;
+      }
       final emotion = StickerService.resolveAvailableEmotion(
-        rawEmotion: rawEmotion,
+        rawEmotion: rawEmotion.toString(),
         availableCategories: availableEmojiCategories,
         defaultCategory: defaultEmojiCategory,
       );
@@ -1874,6 +1900,31 @@ class ChatController extends ChangeNotifier {
     if (!isGroup) {
       _hideTyping(chatId);
     }
+  }
+
+  /// 精确表情投递：按 category/filename 构造稳定的 ws-emoji 引用，
+  /// 跳过 emoji_random 随机抽取，交由 EmojiTransferService 下载并本地缓存渲染。
+  Future<void> _appendPreciseSticker({
+    required String chatId,
+    required String roleId,
+    required String category,
+    required String filename,
+  }) async {
+    final ref =
+        'ws-emoji://role/${Uri.encodeComponent(roleId)}'
+        '/${Uri.encodeComponent(category)}'
+        '/${Uri.encodeComponent(filename)}';
+    final stickerId =
+        '${DateTime.now().microsecondsSinceEpoch}_sticker_${ref.hashCode}';
+    await Future.delayed(Duration(milliseconds: 300 + _random.nextInt(500)));
+    await MessageStore.instance.addMessage(chatId, Message(
+      id: stickerId,
+      senderId: roleId,
+      receiverId: 'me',
+      content: StickerService.createStickerMessageContent(category, ref),
+      type: MessageType.sticker,
+      timestamp: DateTime.now(),
+    ));
   }
 
   Future<void> _appendAiSticker({

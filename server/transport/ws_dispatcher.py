@@ -1269,6 +1269,9 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         emotion = str(payload.get("emotion") or "").strip().lower()
         if not role_id or not emotion:
             raise ValueError("role_id or emotion missing")
+        # 云端表情分类不参与随机抽取（仅按精确文件名投递）
+        if emotion == "__cloud__":
+            return {"found": False, "emotion": emotion}
 
         emoji_dir = roles.ROLES_DIR / role_id / "emojis" / emotion
         if not emoji_dir.exists():
@@ -1290,7 +1293,10 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
     if action == "role_emoji_categories_list":
         role_id = str(payload.get("role_id") or "").strip()
         emojis_dir = roles.get_role_dir(role_id) / "emojis"
-        categories = sorted([d.name for d in emojis_dir.iterdir() if d.is_dir()]) if emojis_dir.exists() else []
+        categories = sorted([
+            d.name for d in emojis_dir.iterdir()
+            if d.is_dir() and d.name != "__cloud__"
+        ]) if emojis_dir.exists() else []
         return {"role_id": role_id, "categories": categories}
 
     if action == "role_emoji_category_create":
@@ -1314,6 +1320,9 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
     if action == "role_emojis_list":
         role_id = str(payload.get("role_id") or "").strip()
         category = roles._normalize_category_name(str(payload.get("category") or ""))
+        # 云端表情分类不在表情管理 UI 中列举
+        if category == "__cloud__":
+            return {"role_id": role_id, "category": category, "emojis": []}
         emoji_dir = roles.get_role_dir(role_id) / "emojis" / category
         if not emoji_dir.exists():
             return {"role_id": role_id, "category": category, "emojis": []}

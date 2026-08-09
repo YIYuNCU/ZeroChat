@@ -429,14 +429,38 @@ async def _describe_onebot_images(image_urls: List[str]) -> List[str]:
 
 # ========== 表情图片查找 ==========
 
-def _resolve_emojis(emotions: List[str], role_id: str) -> List[Path]:
-    """根据情绪名称列表直接查找对应的表情图片（由工具调用驱动，共享 ai_tools 处理逻辑）"""
+def _resolve_emojis(emotions: List[Any], role_id: str) -> List[Path]:
+    """把 emojis_called 列表解析为表情图片路径。
+
+    元素可为：
+      - str 情绪名 —— 走本地情绪目录随机抽取（共享 ai_tools 逻辑）；
+      - dict {"category": ..., "filename": ...} —— 精确定位某张缓存图片（如云端表情）。
+    """
     from services.ai_tools import _pick_emoji_file
+    from core.utils import ensure_path_within_root, ensure_simple_path_segment
 
     image_paths: List[Path] = []
     seen: set = set()
-    for emotion in emotions:
-        e = emotion.lower()
+    for item in emotions:
+        if isinstance(item, dict):
+            category = str(item.get("category") or "").strip()
+            filename = str(item.get("filename") or "").strip()
+            key = f"{category}/{filename}"
+            if not category or not filename or key in seen:
+                continue
+            seen.add(key)
+            try:
+                safe_cat = ensure_simple_path_segment(category, "category")
+                safe_name = ensure_simple_path_segment(filename, "filename")
+                root = ROLES_DIR / role_id / "emojis"
+                path = ensure_path_within_root(root / safe_cat / safe_name, root)
+            except ValueError:
+                continue
+            if path.exists() and path.is_file():
+                image_paths.append(path)
+            continue
+
+        e = str(item).lower()
         if e in seen:
             continue
         seen.add(e)

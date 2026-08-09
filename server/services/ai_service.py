@@ -605,6 +605,9 @@ def _build_system_prompt(
         "  - 指定标题、触发时间（ISO 8601，24 小时制）及类型（alarm 系统闹钟 / calendar_event 日历事件）。\n"
         "  - 与 schedule_task 区分：只有需要手机系统响铃/日历时才用 set_alarm，普通聊天内提醒仍用 schedule_task。\n"
     )
+    # 可选表情包插件的工具指引（存在时并入）
+    if _emoji_plugin is not None and getattr(_emoji_plugin, "PROMPT", ""):
+        parts.append(_emoji_plugin.PROMPT)
     # 角色人设（优先级低于系统级指令）
     persona = role_data.get("persona", "")
     system_prompt = role_data.get("system_prompt", "")
@@ -694,6 +697,13 @@ from services.ai_tools import (
     execute_recognize_image,
 )
 
+# 可选表情包插件：存在则并入工具集/提示词/分发，缺失则完全回退到内置行为。
+try:
+    from services import emoji_ivs_plugin as _emoji_plugin
+except Exception as _emoji_plugin_err:  # noqa: BLE001
+    _emoji_plugin = None
+    logger.debug("可选表情包插件未加载: %s", _emoji_plugin_err)
+
 
 async def generate_with_role(
     role_data: Dict,
@@ -740,6 +750,8 @@ async def generate_with_role(
     active_tools = list(_SCHEDULE_TASK_TOOL)
     active_tools.extend(_SEARCH_MEMORY_TOOL)
     active_tools.extend(_SEND_EMOTION_EMOJI_TOOL)
+    if _emoji_plugin is not None:
+        active_tools.extend(getattr(_emoji_plugin, "TOOLS", []))
     active_tools.extend(_WEB_SEARCH_TOOL)
     active_tools.extend(_WRITE_MEMORY_TOOL)
     # set_alarm 作用于用户设备的系统闹钟/日历，仅对有设备的 ZeroChat 场景开放
@@ -816,7 +828,8 @@ async def _handle_tool_calls(
     每轮执行所有工具调用，将结果注入消息历史后重新调用 AI，
     若 AI 继续返回 tool_calls 则继续循环，直到获得纯文本回复。
     """
-    emojis_called: List[str] = []
+    # 元素可为 str（情绪名，走随机）或 dict（精确云端文件 {category, filename}）
+    emojis_called: List[Any] = []
     recognized_current_image = False
     max_rounds = 5
 
@@ -932,6 +945,17 @@ async def _handle_tool_calls(
                         err = "参数不完整：emotion 为必填"
                         messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: send_emotion_emoji -> {err}")
+
+                elif _emoji_plugin is not None and func_name in getattr(_emoji_plugin, "TOOL_NAMES", set()):
+                    logger.info(f"Tool call: {func_name} [args={str(args)[:120]}]")
+                    delivered = await _emoji_plugin.execute(role_data, args)
+                    if delivered:
+                        emojis_called.extend(delivered)
+                        tool_result = f"已发送表情（{len(delivered)} 个）"
+                    else:
+                        tool_result = "没有找到匹配的表情包"
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: {func_name} -> {tool_result}")
 
                 elif func_name == "web_search":
                     query = str(args.get("query", "")).strip()

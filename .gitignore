@@ -207,6 +207,7 @@ __marimo__/
 
 server/config/
 server/data/**
+server/services/emoji_ivs_plugin.py
 client/web/
 client/windows/
 .flutter-plugins/
