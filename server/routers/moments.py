@@ -129,6 +129,10 @@ class MomentCreate(BaseModel):
     content: str
     image_urls: Optional[List[str]] = []
 
+class MomentUpdate(BaseModel):
+    content: str
+    image_urls: Optional[List[str]] = None
+
 class CommentCreate(BaseModel):
     author_id: str
     author_name: str
@@ -215,6 +219,19 @@ async def get_moment(post_id: str):
     moments = load_moments()
     for m in moments:
         if m["id"] == post_id:
+            return m
+    return {"error": "not found"}
+
+@router.put("/moments/{post_id}")
+async def update_moment(post_id: str, body: MomentUpdate):
+    """编辑朋友圈正文"""
+    moments = load_moments()
+    for m in moments:
+        if m["id"] == post_id:
+            m["content"] = body.content
+            if body.image_urls is not None:
+                m["image_urls"] = body.image_urls
+            save_moments(moments)
             return m
     return {"error": "not found"}
 

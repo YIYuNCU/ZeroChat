@@ -22,14 +22,24 @@ class ChatBubble extends StatelessWidget {
   final String? avatarHash;
   final String senderName;
 
-  /// 长按回调
+  /// 长按回调：非空时长按弹出上下文菜单（复制/引用/提醒/收藏/多选/删除）。
+  /// 为 null 时（如收藏详情页只读展示）长按无操作。
   final VoidCallback? onLongPress;
+
+  /// 复制回调
+  final VoidCallback? onCopy;
 
   /// 引用回调
   final VoidCallback? onQuote;
 
+  /// 提醒回调
+  final VoidCallback? onRemind;
+
   /// 收藏回调
   final VoidCallback? onFavorite;
+
+  /// 进入多选回调
+  final VoidCallback? onMultiSelect;
 
   /// 删除回调
   final VoidCallback? onDelete;
@@ -45,8 +55,11 @@ class ChatBubble extends StatelessWidget {
     this.avatarHash,
     this.senderName = '',
     this.onLongPress,
+    this.onCopy,
     this.onQuote,
+    this.onRemind,
     this.onFavorite,
+    this.onMultiSelect,
     this.onDelete,
     this.onRetry,
   });
@@ -659,11 +672,16 @@ class ChatBubble extends StatelessWidget {
     }
   }
 
-  /// 显示长按菜单
+  /// 显示长按上下文菜单：复制 / 引用 / 提醒 / 收藏 / 多选 / 删除。
   void _showContextMenu(BuildContext context) {
-    // 如果有 onLongPress 回调，优先使用它（用于多选模式）
-    if (onLongPress != null) {
-      onLongPress!();
+    // 无任何交互回调时（如只读展示）不弹菜单。
+    if (onLongPress == null &&
+        onCopy == null &&
+        onQuote == null &&
+        onRemind == null &&
+        onFavorite == null &&
+        onMultiSelect == null &&
+        onDelete == null) {
       return;
     }
 
@@ -677,39 +695,75 @@ class ChatBubble extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 多选
-            ListTile(
-              leading: const Icon(Icons.checklist, color: Color(0xFF07C160)),
-              title: const Text('多选'),
-              onTap: () {
-                Navigator.pop(context);
-                onLongPress?.call();
-              },
-            ),
-            const Divider(height: 1),
-            // 引用
-            ListTile(
-              leading: const Icon(Icons.reply, color: Color(0xFF2196F3)),
-              title: const Text('引用'),
-              onTap: () {
-                Navigator.pop(context);
-                onQuote?.call();
-              },
-            ),
-            const Divider(height: 1),
-            // 删除
-            ListTile(
-              leading: const Icon(Icons.delete_outline, color: Colors.red),
-              title: const Text('删除'),
-              onTap: () {
-                Navigator.pop(context);
-                onDelete?.call();
-              },
-            ),
+            if (onCopy != null)
+              _buildMenuItem(
+                context,
+                icon: Icons.copy,
+                color: const Color(0xFF333333),
+                label: '复制',
+                onTap: onCopy,
+              ),
+            if (onQuote != null)
+              _buildMenuItem(
+                context,
+                icon: Icons.reply,
+                color: const Color(0xFF2196F3),
+                label: '引用',
+                onTap: onQuote,
+              ),
+            if (onRemind != null)
+              _buildMenuItem(
+                context,
+                icon: Icons.alarm,
+                color: const Color(0xFFFF9800),
+                label: '提醒',
+                onTap: onRemind,
+              ),
+            if (onFavorite != null)
+              _buildMenuItem(
+                context,
+                icon: Icons.star_border,
+                color: const Color(0xFFFFB300),
+                label: '收藏',
+                onTap: onFavorite,
+              ),
+            if (onMultiSelect != null)
+              _buildMenuItem(
+                context,
+                icon: Icons.checklist,
+                color: const Color(0xFF07C160),
+                label: '多选',
+                onTap: onMultiSelect,
+              ),
+            if (onDelete != null)
+              _buildMenuItem(
+                context,
+                icon: Icons.delete_outline,
+                color: Colors.red,
+                label: '删除',
+                onTap: onDelete,
+              ),
             const SizedBox(height: 8),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildMenuItem(
+    BuildContext context, {
+    required IconData icon,
+    required Color color,
+    required String label,
+    VoidCallback? onTap,
+  }) {
+    return ListTile(
+      leading: Icon(icon, color: color),
+      title: Text(label),
+      onTap: () {
+        Navigator.pop(context);
+        onTap?.call();
+      },
     );
   }
 

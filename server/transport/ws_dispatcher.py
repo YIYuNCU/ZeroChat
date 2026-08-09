@@ -1013,6 +1013,20 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         )
         return await moments.create_moment(moment)
 
+    if action == "moments_update":
+        from routers import moments
+
+        post_id = str(payload.get("post_id") or "").strip()
+        body = moments.MomentUpdate(
+            content=str(payload.get("content") or ""),
+            image_urls=(
+                list(payload.get("image_urls"))
+                if payload.get("image_urls") is not None
+                else None
+            ),
+        )
+        return await moments.update_moment(post_id, body)
+
     if action == "moments_delete":
         from routers import moments
 

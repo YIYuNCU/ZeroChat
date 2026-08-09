@@ -3,6 +3,7 @@
 使用嵌入向量实现语义级别的记忆检索，增强长期记忆的稳定性
 """
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
@@ -333,13 +336,28 @@ async def embed_and_store(
     """
     text = _extract_semantic_text(content)
     if len(text) < min_text_length:
+        logger.info(
+            "向量记忆跳过：文本过短 role=%s source=%s len=%d(<%d)",
+            role_id, source, len(text), min_text_length,
+        )
         return False
 
     from services.ai_service import generate_embedding
     result = await generate_embedding(text)
     if not result["success"] or not result["embedding"]:
+        logger.warning(
+            "向量记忆写入失败：embedding 生成失败 role=%s source=%s error=%s",
+            role_id, source, result.get("error", "unknown"),
+        )
         return False
 
-    store = VectorMemoryStore(role_id)
-    store.store(text, result["embedding"], role=role, timestamp=timestamp, source=source)
+    try:
+        store = VectorMemoryStore(role_id)
+        store.store(text, result["embedding"], role=role, timestamp=timestamp, source=source)
+    except Exception as e:
+        logger.warning(
+            "向量记忆写入失败：存储异常 role=%s source=%s error=%s",
+            role_id, source, e,
+        )
+        return False
     return True

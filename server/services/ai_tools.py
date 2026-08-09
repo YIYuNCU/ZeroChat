@@ -635,7 +635,12 @@ async def execute_write_memory(
     try:
         result = await generate_embedding(summary)
         if not result["success"] or not result["embedding"]:
-            return f"记忆写入失败：{result.get('error', '嵌入向量生成失败')}"
+            err = result.get("error", "嵌入向量生成失败")
+            logger.warning(
+                "向量记忆写入失败：embedding 生成失败 role=%s source=ai_tool error=%s",
+                role_id, err,
+            )
+            return f"记忆写入失败：{err}"
 
         store = VectorMemoryStore(role_id)
         store.store(

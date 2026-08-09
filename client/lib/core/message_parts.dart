@@ -91,12 +91,76 @@ class MessageParts {
     dotAll: true,
   );
 
+  /// 别名标签 → 中文规范标签映射。
+  ///
+  /// AI 偶尔会把规范标签写成英文或近义词（如 `<message>`、`<action>`），或中英
+  /// 混用。这些标签不被 [_partRe] 识别，会连同字面量一起当作对话渲染。归一化在
+  /// 解析前把它们改写回中文标签，在渲染时生效，因此对存量历史消息同样有效。
+  /// 服务端 `services/message_format.py` 有等价映射，两端需保持同步。
+  static const Map<String, List<String>> _tagAliases = {
+    '对话': ['message', 'dialogue', 'dialog', 'talk', 'speech', 'say'],
+    '动作': ['action', 'act', 'move', 'motion'],
+    '心理': ['thought', 'psychology', 'psych', 'mind', 'inner', 'think', 'feeling'],
+    '事实': ['fact', 'facts'],
+    '数值': ['stats', 'stat', 'value', 'values', 'status'],
+  };
+
+  static const List<String> _noReplyAliases = [
+    'no_reply',
+    'noreply',
+    'no-reply',
+    'noresponse',
+    'no_response',
+  ];
+
+  /// 预编译的归一化规则：每条 (正则, 替换文本)。
+  static final List<MapEntry<RegExp, String>> _normalizeRules = _buildRules();
+
+  static List<MapEntry<RegExp, String>> _buildRules() {
+    final rules = <MapEntry<RegExp, String>>[];
+    // 无回复别名（含自闭合/成对两种写法）统一为规范指令。
+    for (final alias in _noReplyAliases) {
+      final e = RegExp.escape(alias);
+      rules.add(MapEntry(
+        RegExp('<\\s*$e\\s*/?\\s*>(?:\\s*</\\s*$e\\s*>)?', caseSensitive: false),
+        noReplyDirective,
+      ));
+    }
+    // 成对别名标签：开标签与闭标签分别改写为对应中文标签。
+    for (final entry in _tagAliases.entries) {
+      final zh = entry.key;
+      for (final alias in entry.value) {
+        final e = RegExp.escape(alias);
+        rules.add(MapEntry(
+          RegExp('<\\s*$e\\s*>', caseSensitive: false),
+          '<$zh>',
+        ));
+        rules.add(MapEntry(
+          RegExp('<\\s*/\\s*$e\\s*>', caseSensitive: false),
+          '</$zh>',
+        ));
+      }
+    }
+    return rules;
+  }
+
+  /// 把英文/别名/混用标签归一化为中文规范标签。
+  static String normalizeTags(String content) {
+    if (content.isEmpty || !content.contains('<')) return content;
+    var result = content;
+    for (final rule in _normalizeRules) {
+      result = result.replaceAll(rule.key, rule.value);
+    }
+    return result;
+  }
+
   /// [allowFact] 为 false 时，意外出现在 AI 回复中的事实块会降级为普通对话。
   static MessageParts parse(
-    String content, {
+    String rawContent, {
     bool allowFact = true,
     bool allowNoReply = true,
   }) {
+    final content = normalizeTags(rawContent);
     if (isNoReplyDirective(content)) {
       return MessageParts(
         parts: [

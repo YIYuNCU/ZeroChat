@@ -176,9 +176,20 @@ def _sanitize_reply_content(reply: Any) -> str:
             if local:
                 parts.append(local)
         if parts:
-            return "\n".join(parts).strip()
+            return _normalize_reply_tags("\n".join(parts).strip())
 
-    return text
+    return _normalize_reply_tags(text)
+
+
+def _normalize_reply_tags(text: str) -> str:
+    """把 AI 回复里的英文/别名结构标签归一化为中文规范标签。
+
+    使别名标签（如 <message>/<action>）在入库和后续解析（数值块、无回复判断）
+    时也能被正确识别，避免连同字面量泄漏到客户端。
+    """
+    from services.message_format import normalize_tags
+
+    return normalize_tags(text)
 
 
 def _load_moments_posts() -> List[Dict[str, Any]]:
@@ -1118,16 +1129,31 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
         latest=True,
         max_context_rounds=role_max_ctx,
     )
-    
+
+    # 剥离历史消息中的对话标签，避免模型把聊天格式示范到朋友圈正文里。
+    from services.message_format import strip_to_plain
+    if history:
+        for msg in history:
+            if isinstance(msg, dict) and msg.get("content"):
+                stripped = strip_to_plain(str(msg["content"]))
+                if stripped:
+                    msg["content"] = stripped
+
     result = await generate_moment_post(role_data=role, history=history)
-    
+
     if not result["success"]:
         return AIResponse(success=False, action="ignore", error=result["error"])
-    
+
+    from services.message_format import strip_to_plain
+
+    # 兜底：即使模型无视 prompt 输出了对话/动作标签，也在此剥离为纯文本，
+    # 避免 <动作> 等标签泄漏到朋友圈正文。
+    content = strip_to_plain(result.get("content") or "")
+
     return AIResponse(
         success=True,
         action="post",
-        content=result["content"],
+        content=content,
         metadata={"role_name": role.get("name")}
     )
 
@@ -1153,11 +1179,15 @@ async def handle_moment_comment(role: Dict, event: AIEvent) -> AIResponse:
     
     if not result["success"]:
         return AIResponse(success=False, action="ignore", error=result["error"])
-    
+
+    from services.message_format import strip_to_plain
+
+    content = strip_to_plain(result.get("content") or "")
+
     return AIResponse(
         success=True,
         action="comment",
-        content=result["content"],
+        content=content,
         metadata={"role_name": role.get("name")}
     )
 

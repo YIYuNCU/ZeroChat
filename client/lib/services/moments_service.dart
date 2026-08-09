@@ -220,6 +220,20 @@ class MomentsService extends ChangeNotifier {
     }
   }
 
+  /// 编辑动态正文
+  Future<void> updatePost(String postId, {required String content}) async {
+    try {
+      await SecureWebSocketClient.instance.request('moments_update', {
+        'post_id': postId,
+        'content': content,
+      });
+      await fetchFromBackend();
+      debugPrint('MomentsService: Updated post $postId on backend');
+    } catch (e) {
+      debugPrint('MomentsService: Update post failed: $e');
+    }
+  }
+
   /// 点赞/取消点赞
   Future<void> toggleLike(String postId) async {
     final index = _posts.indexWhere((p) => p.id == postId);

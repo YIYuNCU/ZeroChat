@@ -1,17 +1,21 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/message.dart';
 import '../models/emoji_item.dart';
 import '../models/role.dart';
+import '../core/message_parts.dart';
 import '../widgets/chat_bubble.dart';
 import '../widgets/input_bar.dart';
 import '../core/chat_controller.dart';
 import '../core/message_store.dart';
 import '../services/role_service.dart';
 import '../services/favorite_service.dart';
+import '../services/notification_service.dart';
 import '../services/settings_service.dart';
 import 'chat_settings_page.dart';
 import 'group_settings_page.dart';
+import 'share_screenshot_page.dart';
 
 /// 引用状态
 class QuoteState {
@@ -347,6 +351,82 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   /// 删除消息
   void _deleteMessage(Message message) async {
     await MessageStore.instance.deleteMessage(widget.chatId, message.id);
+  }
+
+  /// 复制消息（剥离格式标签后只复制对话文本）
+  void _copyMessage(Message message) {
+    final isMe = message.senderId == 'me';
+    final text = MessageParts.previewText(message.content, isUserMessage: isMe);
+    final copyText = text.trim().isNotEmpty ? text : message.content;
+    Clipboard.setData(ClipboardData(text: copyText));
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('已复制')));
+  }
+
+  /// 收藏单条消息（复用批量收藏的单元素版本）
+  Future<void> _favoriteSingleMessage(Message message) async {
+    await FavoriteService.instance.createCollection(
+      chatId: widget.chatId,
+      chatName: widget.chatName,
+      userName: '我',
+      roleName: _currentRole.name,
+      messages: [message],
+      getSenderName: (senderId) {
+        final role = RoleService.getRoleById(senderId);
+        return role?.name ?? widget.chatName;
+      },
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('已收藏')));
+  }
+
+  /// 从消息设置定时提醒：选日期 + 时间，到点用本地通知提醒。
+  Future<void> _remindMessage(Message message, String senderName) async {
+    final now = DateTime.now();
+    final date = await showDatePicker(
+      context: context,
+      initialDate: now,
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 365)),
+    );
+    if (date == null || !mounted) return;
+
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(now.add(const Duration(hours: 1))),
+    );
+    if (time == null || !mounted) return;
+
+    final triggerTime = DateTime(
+      date.year,
+      date.month,
+      date.day,
+      time.hour,
+      time.minute,
+    );
+    if (triggerTime.isBefore(DateTime.now())) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('提醒时间不能早于当前时间')));
+      return;
+    }
+
+    final isMe = message.senderId == 'me';
+    final body = MessageParts.previewText(message.content, isUserMessage: isMe);
+    final ok = await NotificationService.instance.scheduleReminder(
+      id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      title: '来自「$senderName」的提醒',
+      body: body.trim().isNotEmpty ? body : message.content,
+      triggerTime: triggerTime,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(ok ? '已设置提醒' : '提醒设置失败')),
+    );
   }
 
   void _onScroll() {
@@ -782,6 +862,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   : _favoriteSelectedMessages,
             ),
             _buildToolbarButton(
+              icon: Icons.image_outlined,
+              label: '生成截图',
+              onTap: _selectedMessageIds.isEmpty
+                  ? null
+                  : _shareSelectedMessages,
+            ),
+            _buildToolbarButton(
               icon: Icons.delete_outline,
               label: '删除',
               onTap: _selectedMessageIds.isEmpty
@@ -824,6 +911,28 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     for (final id in _selectedMessageIds) {
       await MessageStore.instance.deleteMessage(widget.chatId, id);
     }
+    _exitMultiSelectMode();
+  }
+
+  /// 生成选中消息的分享截图
+  void _shareSelectedMessages() {
+    final all = MessageStore.instance.getMessages(widget.chatId);
+    // 按消息在列表中的原始顺序保留选中项。
+    final selected = all
+        .where((m) => _selectedMessageIds.contains(m.id))
+        .toList();
+    if (selected.isEmpty) return;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ShareScreenshotPage(
+          chatName: widget.chatName,
+          roleName: _currentRole.name,
+          messages: selected,
+        ),
+      ),
+    );
     _exitMultiSelectMode();
   }
 
@@ -984,7 +1093,11 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       avatarHash: isMe ? null : role?.avatarHash,
       senderName: senderName,
       onLongPress: () => _enterMultiSelectMode(message),
+      onCopy: () => _copyMessage(message),
       onQuote: () => _setQuote(message),
+      onRemind: () => _remindMessage(message, senderName),
+      onFavorite: () => _favoriteSingleMessage(message),
+      onMultiSelect: () => _enterMultiSelectMode(message),
       onDelete: () => _deleteMessage(message),
       onRetry: () => _retryFailedMessage(message),
     );

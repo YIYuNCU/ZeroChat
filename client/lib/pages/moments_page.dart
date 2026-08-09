@@ -631,14 +631,26 @@ class _MomentsPageState extends State<MomentsPage> {
               if (post.isFromUser) ...[
                 const Divider(height: 1),
                 ListTile(
-                  leading: const Icon(Icons.delete_outline, color: Colors.red),
-                  title: const Text('删除'),
+                  leading: const Icon(
+                    Icons.edit_outlined,
+                    color: Color(0xFF333333),
+                  ),
+                  title: const Text('编辑'),
                   onTap: () {
                     Navigator.pop(context);
-                    _confirmDelete(post);
+                    _showEditDialog(post);
                   },
                 ),
               ],
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.delete_outline, color: Colors.red),
+                title: const Text('删除'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _confirmDelete(post);
+                },
+              ),
               const SizedBox(height: 12),
             ],
           ),
@@ -727,6 +739,41 @@ class _MomentsPageState extends State<MomentsPage> {
               Navigator.pop(context);
             },
             child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showEditDialog(MomentPost post) {
+    final controller = TextEditingController(text: post.content);
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('编辑动态'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: null,
+          minLines: 3,
+          decoration: const InputDecoration(
+            hintText: '说点什么...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              final text = controller.text.trim();
+              if (text.isEmpty) return;
+              MomentsService.instance.updatePost(post.id, content: text);
+              Navigator.pop(context);
+            },
+            child: const Text('保存'),
           ),
         ],
       ),

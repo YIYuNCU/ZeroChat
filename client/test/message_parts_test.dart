@@ -80,4 +80,43 @@ void main() {
       expect(mixed.dialogue, '<无回复/>还有正文');
     });
   });
+
+  group('MessageParts tag normalization', () {
+    test('maps English alias tags to Chinese canonical tags', () {
+      final parsed = MessageParts.parse(
+        '<message>你好呀</message><action>挥手</action><thought>有点开心</thought>',
+      );
+
+      expect(parsed.parts.map((part) => part.type), [
+        MessagePartType.dialogue,
+        MessagePartType.action,
+        MessagePartType.psychology,
+      ]);
+      expect(parsed.parts.map((part) => part.text), ['你好呀', '挥手', '有点开心']);
+    });
+
+    test('alias matching is case-insensitive and tolerant of spaces', () {
+      final parsed = MessageParts.parse('< Action >点头</ Action >');
+
+      expect(parsed.parts.single.type, MessagePartType.action);
+      expect(parsed.parts.single.text, '点头');
+    });
+
+    test('handles mixed Chinese-open English-close tags', () {
+      final parsed = MessageParts.parse('<对话>混用</message>');
+
+      expect(parsed.parts.single.type, MessagePartType.dialogue);
+      expect(parsed.parts.single.text, '混用');
+    });
+
+    test('normalizes no-reply alias variants to the directive', () {
+      expect(MessageParts.parse('<no_reply/>').isNoReply, isTrue);
+      expect(MessageParts.parse('<noreply></noreply>').isNoReply, isTrue);
+      expect(MessageParts.parse('  <no-reply/>  ').isNoReply, isTrue);
+    });
+
+    test('leaves plain content without tags untouched', () {
+      expect(MessageParts.normalizeTags('普通文本没有标签'), '普通文本没有标签');
+    });
+  });
 }
