@@ -34,6 +34,7 @@ void main() {
           '<对话>第一句</对话>'
           '<动作>抬手</动作>'
           '<对话>第二句</对话>'
+          '<声音>裙摆沙沙作响</声音>'
           '<心理>有些犹豫</心理>'
           '<动作>放下手</动作>',
         ),
@@ -41,7 +42,7 @@ void main() {
       ),
     );
 
-    final labels = ['第一句', '抬手', '第二句', '有些犹豫', '放下手'];
+    final labels = ['第一句', '抬手', '第二句', '裙摆沙沙作响', '有些犹豫', '放下手'];
     final positions = labels
         .map((label) => tester.getTopLeft(find.text(label)).dy)
         .toList();
@@ -50,6 +51,15 @@ void main() {
     for (var index = 1; index < positions.length; index++) {
       expect(positions[index], greaterThan(positions[index - 1]));
     }
+  });
+
+  testWidgets('renders sound blocks with a distinct icon', (tester) async {
+    await tester.pumpWidget(
+      _bubble(_message('<对话>我在这里</对话><声音>衣料轻响</声音>'), isSender: false),
+    );
+
+    expect(find.text('衣料轻响'), findsOneWidget);
+    expect(find.byIcon(Icons.volume_up_outlined), findsOneWidget);
   });
 
   testWidgets('only user facts receive fact styling', (tester) async {

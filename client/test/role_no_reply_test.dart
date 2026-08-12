@@ -11,4 +11,14 @@ void main() {
     expect(restored.showNoReply, isTrue);
     expect(restored.toJson()['show_no_reply'], isTrue);
   });
+
+  test('showSound defaults on and survives JSON round-trip', () {
+    final defaultRole = Role(id: 'role-1', name: '测试角色', systemPrompt: '测试');
+    final hiddenRole = defaultRole.copyWith(showSound: false);
+    final restored = Role.fromJson(hiddenRole.toJson());
+
+    expect(defaultRole.showSound, isTrue);
+    expect(restored.showSound, isFalse);
+    expect(restored.toJson()['show_sound'], isFalse);
+  });
 }

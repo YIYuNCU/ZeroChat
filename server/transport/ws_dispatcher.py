@@ -517,6 +517,9 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
             "show_action": (
                 role_model.show_action if role_model.show_action is not None else True
             ),
+            "show_sound": (
+                role_model.show_sound if role_model.show_sound is not None else True
+            ),
             "show_psychology": (
                 role_model.show_psychology
                 if role_model.show_psychology is not None

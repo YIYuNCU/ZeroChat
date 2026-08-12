@@ -8,6 +8,7 @@ void main() {
         '<对话>第一句</对话>'
         '<动作>抬手</动作>'
         '<对话>第二句</对话>'
+        '<声音>裙摆沙沙作响</声音>'
         '<心理>有些犹豫</心理>'
         '<动作>放下手</动作>',
       );
@@ -16,6 +17,7 @@ void main() {
         MessagePartType.dialogue,
         MessagePartType.action,
         MessagePartType.dialogue,
+        MessagePartType.sound,
         MessagePartType.psychology,
         MessagePartType.action,
       ]);
@@ -23,6 +25,7 @@ void main() {
         '第一句',
         '抬手',
         '第二句',
+        '裙摆沙沙作响',
         '有些犹豫',
         '放下手',
       ]);
@@ -63,6 +66,25 @@ void main() {
       expect(parsed.parts.last.stats, {'trust': '11'});
     });
 
+    test('parses sound blocks and keeps dialogue-only previews clean', () {
+      final parsed = MessageParts.parse(
+        '<对话>等一下</对话><声音>衣料轻轻摩擦</声音>',
+      );
+
+      expect(parsed.parts.map((part) => part.type), [
+        MessagePartType.dialogue,
+        MessagePartType.sound,
+      ]);
+      expect(parsed.sound, '衣料轻轻摩擦');
+      expect(
+        MessageParts.previewText(
+          '<对话>等一下</对话><声音>衣料轻轻摩擦</声音>',
+          isUserMessage: false,
+        ),
+        '等一下',
+      );
+    });
+
     test('treats incomplete tags as ordinary dialogue', () {
       final parsed = MessageParts.parse('<动作>尚未闭合');
 
@@ -100,6 +122,13 @@ void main() {
 
       expect(parsed.parts.single.type, MessagePartType.action);
       expect(parsed.parts.single.text, '点头');
+    });
+
+    test('maps sound aliases to the canonical tag', () {
+      final parsed = MessageParts.parse('< Audio >轻轻的呼吸声</ Audio >');
+
+      expect(parsed.parts.single.type, MessagePartType.sound);
+      expect(parsed.parts.single.text, '轻轻的呼吸声');
     });
 
     test('handles mixed Chinese-open English-close tags', () {

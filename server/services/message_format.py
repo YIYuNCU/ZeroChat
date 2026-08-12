@@ -4,7 +4,7 @@ AI 偶尔会把规范的中文结构标签写成英文或近义词（如 ``<mess
 或中英混用。这些别名标签不被客户端解析器识别，会连同字面量一起渲染。此模块提供：
 
 - :func:`normalize_tags` —— 把别名/混用标签改写回中文规范标签。
-- :func:`strip_to_plain` —— 归一化后仅保留对话正文，丢弃动作/心理/数值等块，
+- :func:`strip_to_plain` —— 归一化后仅保留对话正文，丢弃动作/声音/心理/数值等块，
   供朋友圈等纯文本场景使用。
 
 与客户端 ``client/lib/core/message_parts.dart`` 的映射保持同步。
@@ -18,6 +18,7 @@ NO_REPLY_DIRECTIVE = "<无回复/>"
 _TAG_ALIASES: Dict[str, List[str]] = {
     "对话": ["message", "dialogue", "dialog", "talk", "speech", "say"],
     "动作": ["action", "act", "move", "motion"],
+    "声音": ["sound", "audio", "noise"],
     "心理": ["thought", "psychology", "psych", "mind", "inner", "think", "feeling"],
     "事实": ["fact", "facts"],
     "数值": ["stats", "stat", "value", "values", "status"],
@@ -53,7 +54,7 @@ def _build_rules() -> List[Tuple[re.Pattern, str]]:
 _NORMALIZE_RULES = _build_rules()
 
 # 归一化后用于按类型抽取正文的正则（与客户端 _partRe 对齐）。
-_PART_RE = re.compile(r"<(对话|动作|心理|事实|数值)>(.*?)</\1>", re.DOTALL)
+_PART_RE = re.compile(r"<(对话|动作|声音|心理|事实|数值)>(.*?)</\1>", re.DOTALL)
 
 
 def normalize_tags(text: str) -> str:
@@ -67,10 +68,10 @@ def normalize_tags(text: str) -> str:
 
 
 def strip_to_plain(text: str) -> str:
-    """归一化后仅保留对话正文，丢弃动作/心理/数值等结构块。
+    """归一化后仅保留对话正文，丢弃动作/声音/心理/数值等结构块。
 
     - ``<对话>`` 块保留其正文，按原文顺序拼接。
-    - ``<动作>/<心理>/<数值>/<事实>`` 块整体丢弃。
+    - ``<动作>/<声音>/<心理>/<数值>/<事实>`` 块整体丢弃。
     - 标签外的裸文本视为对话保留。
     - 若整条是无回复指令，返回空串。
     """

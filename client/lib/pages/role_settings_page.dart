@@ -41,6 +41,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late List<StatItem> _statItems;
   // 消息部分显隐
   late bool _showAction;
+  late bool _showSound;
   late bool _showPsychology;
   late bool _showStats;
   late bool _showNoReply;
@@ -95,6 +96,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _statsEnabled = widget.role.statsConfig.enabled;
     _statItems = List<StatItem>.from(widget.role.statsConfig.stats);
     _showAction = widget.role.showAction;
+    _showSound = widget.role.showSound;
     _showPsychology = widget.role.showPsychology;
     _showStats = widget.role.showStats;
     _showNoReply = widget.role.showNoReply;
@@ -526,6 +528,13 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                 subtitle: '气泡中显示 <数值> 部分',
                 value: _showStats,
                 onChanged: (v) => setState(() => _showStats = v),
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildSwitchRow(
+                title: '显示声音',
+                subtitle: '气泡中显示 <声音> 部分',
+                value: _showSound,
+                onChanged: (v) => setState(() => _showSound = v),
               ),
               const Divider(height: 1, indent: 16),
               _buildSwitchRow(
@@ -981,6 +990,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         stats: List<StatItem>.from(_statItems),
       ),
       showAction: _showAction,
+      showSound: _showSound,
       showPsychology: _showPsychology,
       showStats: _showStats,
       showNoReply: _showNoReply,

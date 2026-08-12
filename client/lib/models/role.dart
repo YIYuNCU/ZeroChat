@@ -57,6 +57,7 @@ class Role {
 
   // 消息部分显隐（对话始终显示）
   final bool showAction;
+  final bool showSound;
   final bool showPsychology;
   final bool showStats;
   final bool showNoReply;
@@ -96,6 +97,7 @@ class Role {
     OneBotConfig? onebotConfig,
     StatsConfig? statsConfig,
     this.showAction = true,
+    this.showSound = true,
     this.showPsychology = true,
     this.showStats = true,
     this.showNoReply = false,
@@ -159,6 +161,7 @@ class Role {
     OneBotConfig? onebotConfig,
     StatsConfig? statsConfig,
     bool? showAction,
+    bool? showSound,
     bool? showPsychology,
     bool? showStats,
     bool? showNoReply,
@@ -194,6 +197,7 @@ class Role {
       onebotConfig: onebotConfig ?? this.onebotConfig,
       statsConfig: statsConfig ?? this.statsConfig,
       showAction: showAction ?? this.showAction,
+      showSound: showSound ?? this.showSound,
       showPsychology: showPsychology ?? this.showPsychology,
       showStats: showStats ?? this.showStats,
       showNoReply: showNoReply ?? this.showNoReply,
@@ -298,6 +302,7 @@ class Role {
             )
           : const StatsConfig(),
       showAction: json['show_action'] as bool? ?? true,
+      showSound: json['show_sound'] as bool? ?? true,
       showPsychology: json['show_psychology'] as bool? ?? true,
       showStats: json['show_stats'] as bool? ?? true,
       showNoReply: json['show_no_reply'] as bool? ?? false,
@@ -341,6 +346,7 @@ class Role {
       'onebot_config': onebotConfig.toJson(),
       'stats_config': statsConfig.toJson(),
       'show_action': showAction,
+      'show_sound': showSound,
       'show_psychology': showPsychology,
       'show_stats': showStats,
       'show_no_reply': showNoReply,

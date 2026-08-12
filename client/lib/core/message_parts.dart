@@ -1,9 +1,9 @@
 /// 聊天消息中的格式化片段类型。
-enum MessagePartType { dialogue, action, psychology, fact, stats, noReply }
+enum MessagePartType { dialogue, action, sound, psychology, fact, stats, noReply }
 
 /// 单个格式化片段。
 ///
-/// [text] 用于对话、动作、心理和事实；[stats] 仅用于数值片段。
+/// [text] 用于对话、动作、声音、心理和事实；[stats] 仅用于数值片段。
 class MessagePart {
   final MessagePartType type;
   final String text;
@@ -17,6 +17,7 @@ class MessagePart {
 /// 支持：
 /// - `<对话>...</对话>`
 /// - `<动作>...</动作>`
+/// - `<声音>...</声音>`
 /// - `<心理>...</心理>`
 /// - `<事实>...</事实>`（仅用户侧允许特殊展示）
 /// - `<数值>键:值;键:值;...</数值>`
@@ -30,7 +31,7 @@ class MessageParts {
 
   const MessageParts({required this.parts});
 
-  /// 生成聊天列表/通知的预览文本：只保留对话，剥离动作/心理/数值等格式化片段。
+  /// 生成聊天列表/通知的预览文本：只保留对话，剥离动作/声音/心理/数值等格式化片段。
   ///
   /// [isUserMessage] 为 true 时（用户侧）允许解析事实块，且在无对话内容时回退到
   /// 纯文本正文；AI 侧无对话（如纯动作）时返回空串，避免泄露 `<动作>` 等原始标签。
@@ -49,6 +50,7 @@ class MessageParts {
   String get dialogue => _joinedText(MessagePartType.dialogue);
 
   String? get action => _nullableJoinedText(MessagePartType.action);
+  String? get sound => _nullableJoinedText(MessagePartType.sound);
   String? get psychology => _nullableJoinedText(MessagePartType.psychology);
   String? get fact => _nullableJoinedText(MessagePartType.fact);
   bool get isNoReply =>
@@ -66,6 +68,7 @@ class MessageParts {
   }
 
   bool get hasAction => action != null;
+  bool get hasSound => sound != null;
   bool get hasPsychology => psychology != null;
   bool get hasFact => fact != null;
   bool get hasStats => stats != null;
@@ -87,7 +90,7 @@ class MessageParts {
   }
 
   static final RegExp _partRe = RegExp(
-    r'<(对话|动作|心理|事实|数值)>(.*?)</\1>',
+    r'<(对话|动作|声音|心理|事实|数值)>(.*?)</\1>',
     dotAll: true,
   );
 
@@ -100,6 +103,7 @@ class MessageParts {
   static const Map<String, List<String>> _tagAliases = {
     '对话': ['message', 'dialogue', 'dialog', 'talk', 'speech', 'say'],
     '动作': ['action', 'act', 'move', 'motion'],
+    '声音': ['sound', 'audio', 'noise'],
     '心理': ['thought', 'psychology', 'psych', 'mind', 'inner', 'think', 'feeling'],
     '事实': ['fact', 'facts'],
     '数值': ['stats', 'stat', 'value', 'values', 'status'],
@@ -186,6 +190,9 @@ class MessageParts {
         switch (tag) {
           case '动作':
             result.add(MessagePart(type: MessagePartType.action, text: body));
+            break;
+          case '声音':
+            result.add(MessagePart(type: MessagePartType.sound, text: body));
             break;
           case '心理':
             result.add(

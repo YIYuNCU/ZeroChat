@@ -35,7 +35,8 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("消息格式协议 - 最高优先级", prompt)
         self.assertIn("完整、成对的中文标签", prompt)
-        self.assertIn("<对话>...</对话>、<动作>...</动作>、<心理>...</心理>", prompt)
+        self.assertIn("<对话>...</对话>、<动作>...</动作>、<声音>...</声音>、<心理>...</心理>", prompt)
+        self.assertIn("非对白声音", prompt)
         self.assertIn("不得未闭合、错配、嵌套或将标签前后混用", prompt)
         self.assertIn("严禁使用任何英文或其他别名标签", prompt)
         self.assertIn("$ 是唯一允许的标签外分隔符", prompt)
@@ -81,6 +82,13 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(hidden.show_no_reply)
         self.assertTrue(visible.show_no_reply)
+
+    def test_role_schema_exposes_frontend_sound_visibility(self):
+        hidden = RoleCreate(id="role-1", name="测试")
+        visible = RoleCreate(id="role-1", name="测试", show_sound=True)
+
+        self.assertIsNone(hidden.show_sound)
+        self.assertTrue(visible.show_sound)
 
     def test_chat_messages_have_no_direct_vector_write_path(self):
         self.assertNotIn("embed_and_store", inspect.getsource(append_short_term))

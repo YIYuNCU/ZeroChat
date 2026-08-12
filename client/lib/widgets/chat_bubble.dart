@@ -227,7 +227,7 @@ class ChatBubble extends StatelessWidget {
     );
   }
 
-  /// 构建消息正文各片段（对话/动作/心理/事实/数值）。
+  /// 构建消息正文各片段（对话/动作/声音/心理/事实/数值）。
   List<Widget> _buildBodyParts() {
     final parts = MessageParts.parse(
       message.content,
@@ -236,6 +236,7 @@ class ChatBubble extends StatelessWidget {
     );
     final role = isSender ? null : RoleService.getRoleById(message.senderId);
     final showAction = role?.showAction ?? true;
+    final showSound = role?.showSound ?? true;
     final showPsychology = role?.showPsychology ?? true;
     final showStats = role?.showStats ?? true;
     final widgets = <Widget>[];
@@ -256,6 +257,9 @@ class ChatBubble extends StatelessWidget {
           break;
         case MessagePartType.action:
           if (showAction) addPart(_buildAction(part.text));
+          break;
+        case MessagePartType.sound:
+          if (showSound) addPart(_buildSound(part.text));
           break;
         case MessagePartType.psychology:
           if (showPsychology) addPart(_buildPsychology(part.text));
@@ -329,6 +333,34 @@ class ChatBubble extends StatelessWidget {
         color: Color(0xFF888888),
         height: 1.3,
       ),
+    );
+  }
+
+  Widget _buildSound(String text) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(top: 2, right: 4),
+          child: Icon(
+            Icons.volume_up_outlined,
+            size: 15,
+            color: Color(0xFF5E8BA8),
+          ),
+        ),
+        Flexible(
+          child: Text(
+            text,
+            style: const TextStyle(
+              fontSize: 14,
+              fontStyle: FontStyle.italic,
+              color: Color(0xFF4F7892),
+              height: 1.3,
+            ),
+          ),
+        ),
+      ],
     );
   }
 

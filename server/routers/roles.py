@@ -192,6 +192,7 @@ class RoleCreate(BaseModel):
 
     # 消息部分显隐（对话始终显示）
     show_action: Optional[bool] = None
+    show_sound: Optional[bool] = None
     show_psychology: Optional[bool] = None
     show_stats: Optional[bool] = None
     show_no_reply: Optional[bool] = None
@@ -222,6 +223,7 @@ class RoleUpdate(BaseModel):
     onebot_config: Optional[OneBotConfig] = None
     stats_config: Optional[StatsConfig] = None
     show_action: Optional[bool] = None
+    show_sound: Optional[bool] = None
     show_psychology: Optional[bool] = None
     show_stats: Optional[bool] = None
     show_no_reply: Optional[bool] = None
@@ -513,6 +515,7 @@ async def create_role(role: RoleCreate, request: Request):
             "enabled": False, "stats": []
         },
         "show_action": role.show_action if role.show_action is not None else True,
+        "show_sound": role.show_sound if role.show_sound is not None else True,
         "show_psychology": role.show_psychology if role.show_psychology is not None else True,
         "show_stats": role.show_stats if role.show_stats is not None else True,
         "show_no_reply": role.show_no_reply if role.show_no_reply is not None else False,

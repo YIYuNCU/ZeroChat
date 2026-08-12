@@ -11,6 +11,9 @@ class NormalizeTagsTests(unittest.TestCase):
     def test_case_insensitive_and_spaces(self):
         self.assertEqual(normalize_tags("< Action >点头</ Action >"), "<动作>点头</动作>")
 
+    def test_maps_sound_aliases_to_chinese(self):
+        self.assertEqual(normalize_tags("<audio>裙摆沙沙作响</audio>"), "<声音>裙摆沙沙作响</声音>")
+
     def test_mixed_chinese_open_english_close(self):
         self.assertEqual(normalize_tags("<对话>混用</message>"), "<对话>混用</对话>")
 
@@ -27,6 +30,10 @@ class StripToPlainTests(unittest.TestCase):
     def test_keeps_dialogue_drops_action(self):
         text = "<对话>今天天气不错</对话><动作>抬头看天</动作>"
         self.assertEqual(strip_to_plain(text), "今天天气不错")
+
+    def test_drops_sound_blocks(self):
+        text = "<对话>等一下</对话><声音>布料轻轻摩擦</声音>"
+        self.assertEqual(strip_to_plain(text), "等一下")
 
     def test_strips_english_alias_tags(self):
         text = "<message>出门散步</message><action>戴帽子</action>"

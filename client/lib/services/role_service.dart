@@ -370,6 +370,7 @@ class RoleService {
                     )
                   : null,
               showAction: json['show_action'] as bool? ?? true,
+              showSound: json['show_sound'] as bool? ?? true,
               showPsychology: json['show_psychology'] as bool? ?? true,
               showStats: json['show_stats'] as bool? ?? true,
               showNoReply: json['show_no_reply'] as bool? ?? false,
@@ -515,6 +516,7 @@ class RoleService {
           'onebot_config': role.onebotConfig.toJson(),
           'stats_config': role.statsConfig.toJson(),
           'show_action': role.showAction,
+          'show_sound': role.showSound,
           'show_psychology': role.showPsychology,
           'show_stats': role.showStats,
           'show_no_reply': role.showNoReply,
