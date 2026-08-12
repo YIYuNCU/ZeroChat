@@ -2036,7 +2036,7 @@ class ChatController extends ChangeNotifier {
       case MessageType.image:
         return '[图片]';
       default:
-        // 预览只展示对话，剥离动作/心理/数值等格式化片段。
+        // 预览只展示对话，剥离动作/声音/心理/数值等格式化片段。
         return MessageParts.previewText(
           message.content,
           isUserMessage: message.senderId == 'me',

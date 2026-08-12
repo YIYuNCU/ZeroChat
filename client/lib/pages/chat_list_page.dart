@@ -97,7 +97,7 @@ class _ChatListPageState extends State<ChatListPage> {
   }
 
   /// 获取消息的显示文本（表情包和图片显示为 [图片]）
-  /// 首屏预览只渲染对话，不渲染动作/心理/数值等格式化片段。
+  /// 首屏预览只渲染对话，不渲染动作/声音/心理/数值等格式化片段。
   String _getDisplayText(Message message) {
     switch (message.type) {
       case MessageType.sticker:
