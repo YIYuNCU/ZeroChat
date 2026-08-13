@@ -64,7 +64,14 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _aiModelController = TextEditingController(text: widget.role.aiModel);
     _aiApiUrlController = TextEditingController(text: widget.role.aiApiUrl);
     _aiApiKeyController = TextEditingController(text: widget.role.aiApiKey);
-    _selectedModelProfileId = null;
+    final savedProfileId = SettingsService.instance
+        .selectedModelProfileIdForRole(widget.role.id);
+    _selectedModelProfileId =
+        SettingsService.instance.modelProfiles.any(
+          (profile) => profile.id == savedProfileId,
+        )
+        ? savedProfileId
+        : null;
     _aiModelController.addListener(_clearModelProfileSelection);
     _aiApiUrlController.addListener(_clearModelProfileSelection);
     _aiApiKeyController.addListener(_clearModelProfileSelection);
@@ -1002,17 +1009,11 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                 isDense: true,
               ),
               items: [
-                const DropdownMenuItem(
-                  value: '',
-                  child: Text('不选择'),
-                ),
+                const DropdownMenuItem(value: '', child: Text('不选择')),
                 ...profiles.map(
                   (profile) => DropdownMenuItem(
                     value: profile.id,
-                    child: Text(
-                      profile.name,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    child: Text(profile.name, overflow: TextOverflow.ellipsis),
                   ),
                 ),
               ],
@@ -1160,7 +1161,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         .toList();
   }
 
-  void _saveRole() {
+  Future<void> _saveRole() async {
     var parsedAiTemperature =
         double.tryParse(_aiTemperatureController.text.trim()) ??
         widget.role.aiTemperature;
@@ -1224,6 +1225,11 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       showNoReply: _showNoReply,
       archived: _archived,
     );
+    await SettingsService.instance.setSelectedModelProfileForRole(
+      updatedRole.id,
+      _selectedModelProfileId,
+    );
+    if (!mounted) return;
     Navigator.pop(context, updatedRole);
   }
 }

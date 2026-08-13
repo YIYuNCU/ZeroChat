@@ -46,6 +46,7 @@ class SettingsService extends ChangeNotifier {
   String _chatApiKey = '';
   String _chatModel = 'gpt-3.5-turbo';
   List<AiModelProfile> _modelProfiles = [];
+  Map<String, String> _roleModelProfileSelections = {};
 
   // 意图识别 API
   bool _intentEnabled = false;
@@ -94,6 +95,11 @@ class SettingsService extends ChangeNotifier {
   String get chatApiKey => _chatApiKey;
   String get chatModel => _chatModel;
   List<AiModelProfile> get modelProfiles => List.unmodifiable(_modelProfiles);
+
+  /// Returns the local model profile selected for a role, if one was saved.
+  /// Profile associations are device-local because profile API keys are local too.
+  String? selectedModelProfileIdForRole(String roleId) =>
+      _roleModelProfileSelections[roleId];
 
   bool get intentEnabled => _intentEnabled;
   String get intentApiUrl => _intentApiUrl;
@@ -162,6 +168,7 @@ class SettingsService extends ChangeNotifier {
     _chatApiKey = SecureStorageService.getString('chat_api_key');
     _chatModel = StorageService.getString('chat_model') ?? 'gpt-3.5-turbo';
     await _loadModelProfiles();
+    _loadRoleModelProfileSelections();
 
     // 意图识别 API
     _intentEnabled = StorageService.getBool('intent_enabled') ?? false;
@@ -350,6 +357,33 @@ class SettingsService extends ChangeNotifier {
         .toList();
   }
 
+  void _loadRoleModelProfileSelections() {
+    final stored =
+        StorageService.getJson('role_model_profile_selections') ??
+        const <String, dynamic>{};
+    _roleModelProfileSelections = {
+      for (final entry in stored.entries)
+        if (entry.key.isNotEmpty && entry.value.toString().isNotEmpty)
+          entry.key: entry.value.toString(),
+    };
+  }
+
+  Future<void> setSelectedModelProfileForRole(
+    String roleId,
+    String? profileId,
+  ) async {
+    if (profileId == null || profileId.isEmpty) {
+      _roleModelProfileSelections.remove(roleId);
+    } else {
+      _roleModelProfileSelections[roleId] = profileId;
+    }
+    await StorageService.setJson(
+      'role_model_profile_selections',
+      _roleModelProfileSelections,
+    );
+    notifyListeners();
+  }
+
   Future<void> saveModelProfile({
     required String id,
     required String name,
@@ -383,6 +417,11 @@ class SettingsService extends ChangeNotifier {
       _modelProfiles.map((item) => item.toJson()).toList(),
     );
     await SecureStorageService.remove('ai_model_profile_key_$id');
+    _roleModelProfileSelections.removeWhere((_, profileId) => profileId == id);
+    await StorageService.setJson(
+      'role_model_profile_selections',
+      _roleModelProfileSelections,
+    );
     notifyListeners();
   }
 
