@@ -18,15 +18,35 @@ from services.ai_service import (
 from services.memory_service import append_short_term
 from services.stats_service import parse_stats_block
 from services.vector_memory import VectorMemoryStore, close_all_vector_connections
-from routers.ai_behavior import _run_memory_ai_pipeline
+from routers.ai_behavior import _run_memory_ai_pipeline, _sanitize_reply_content
 from routers.roles import RoleCreate
 
 
 class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
+    def test_sanitizes_serialized_client_message_and_literal_newline(self):
+        reply = (
+            '{"message":"\\n<对话>对话内容</对话>/n<动作></动作>\\n",'
+            ' "time":"2026-08-12T21:18:09.000000",'
+            ' "origin":"zerochat", "sender":"墨韵"}'
+        )
+
+        self.assertEqual(
+            _sanitize_reply_content(reply),
+            "<对话>对话内容</对话>\n<动作></动作>",
+        )
+
+    def test_sanitizes_message_line_with_literal_newline(self):
+        reply = "message: <对话>对话内容</对话>/n<声音>轻轻的呼吸声</声音>\ntime: ignored"
+
+        self.assertEqual(
+            _sanitize_reply_content(reply),
+            "<对话>对话内容</对话>\n<声音>轻轻的呼吸声</声音>",
+        )
+
     def test_schema_requires_summary_and_exposes_occurred_at(self):
         parameters = _WRITE_MEMORY_TOOL[0]["function"]["parameters"]
 
-        self.assertEqual(parameters["required"], ["summary"])
+        self.assertEqual(parameters["required"], ["summary", "occurred_at"])
         self.assertIn("occurred_at", parameters["properties"])
         self.assertNotIn("content", parameters["properties"])
 
@@ -37,6 +57,9 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("完整、成对的中文标签", prompt)
         self.assertIn("<对话>...</对话>、<动作>...</动作>、<声音>...</声音>、<心理>...</心理>", prompt)
         self.assertIn("非对白声音", prompt)
+        self.assertIn("放屁声、排泄声等生理声响", prompt)
+        self.assertIn("应输出一个简短的 <声音> 块", prompt)
+        self.assertIn("没有合理声源时不要凭空添加", prompt)
         self.assertIn("不得未闭合、错配、嵌套或将标签前后混用", prompt)
         self.assertIn("严禁使用任何英文或其他别名标签", prompt)
         self.assertIn("$ 是唯一允许的标签外分隔符", prompt)

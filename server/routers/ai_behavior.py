@@ -144,6 +144,7 @@ def _normalize_core_memory_list(raw_core_memory: Any) -> List[str]:
 
 
 def _sanitize_reply_content(reply: Any) -> str:
+    """Extract displayable AI content from provider-specific response wrappers."""
     text = str(reply or "").strip()
     if not text:
         return ""
@@ -155,9 +156,9 @@ def _sanitize_reply_content(reply: Any) -> str:
     if parsed is not None:
         msg = parsed.get("message")
         if msg is not None:
-            return str(msg).strip()
+            return _normalize_reply_tags(_normalize_reply_newlines(str(msg)).strip())
 
-    normalized = text.replace("：", ":")
+    normalized = _normalize_reply_newlines(text).replace("：", ":")
     lines = [line.rstrip() for line in normalized.splitlines()]
     message_idx = -1
     for idx, line in enumerate(lines):
@@ -178,7 +179,12 @@ def _sanitize_reply_content(reply: Any) -> str:
         if parts:
             return _normalize_reply_tags("\n".join(parts).strip())
 
-    return _normalize_reply_tags(text)
+    return _normalize_reply_tags(normalized)
+
+
+def _normalize_reply_newlines(text: str) -> str:
+    """Convert the model's literal /n line-break typo to a real newline."""
+    return re.sub(r"(?:\\\\n|/n)(?=\s*<)", "\n", text)
 
 
 def _normalize_reply_tags(text: str) -> str:
@@ -692,7 +698,8 @@ async def _run_memory_ai_pipeline(
                 group_id=group_id,
             )
         )
-    if include_assistant_memory and not no_reply:
+    # 无回复是 AI 的有效决策，也要写入短期记忆；前端是否展示由 show_no_reply 控制。
+    if include_assistant_memory:
         await _run_db(
             role_id, functools.partial(
                 append_short_term,

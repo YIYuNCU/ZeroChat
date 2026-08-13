@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import unittest
 from datetime import date
 from pathlib import Path
@@ -7,6 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from routers.settings import SettingsUpdate, update_settings
+from routers import roles as roles_router
 from services.ai_tools import (
     _BLOCK_USER_TOOL,
     _RECOGNIZE_IMAGE_TOOL,
@@ -24,6 +26,7 @@ from services.ai_service import (
     generate_with_role,
 )
 from services.memory_service import _advance_period_cycles
+from services import memory_service
 from services import vision_service
 from transport import ws_dispatcher
 
@@ -36,6 +39,48 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(advanced, date(2026, 1, 27))
+
+    def test_role_period_start_edit_resets_runtime_cycle_anchor(self):
+        with TemporaryDirectory() as temp_dir:
+            role_id = "role-period-test"
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_dir = roles_router.get_role_dir(role_id)
+                profile = {
+                    "id": role_id,
+                    "gender": "women",
+                    "menstruation_cycle": {
+                        "cycle_length": 30,
+                        "period_length": 6,
+                        "last_period_start": "2026-01-01",
+                    },
+                }
+                (role_dir / "profile.json").write_text(
+                    json.dumps(profile), encoding="utf-8"
+                )
+                with memory_service._get_connection(role_id) as conn:
+                    memory_service._set_meta(conn, "last_period_start", "2026-01-01")
+
+                profile["menstruation_cycle"]["last_period_start"] = "2026-02-15"
+                roles_router.save_role(role_id, profile)
+
+                with memory_service._get_connection(role_id) as conn:
+                    self.assertEqual(
+                        memory_service._get_meta(conn, "last_period_start"),
+                        "2026-02-15",
+                    )
+                    self.assertIsNone(
+                        memory_service._get_meta(conn, "next_period_start")
+                    )
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
 
     def test_all_function_tools_use_strict_closed_schemas(self):
         tool_groups = (

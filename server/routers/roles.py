@@ -328,9 +328,32 @@ def _get_role_avatar_hash(role_id: str) -> str:
 
 def save_role(role_id: str, data: Dict):
     profile_file = get_role_dir(role_id) / "profile.json"
+    previous_period_start = None
+    try:
+        if profile_file.exists():
+            with open(profile_file, "r", encoding="utf-8") as f:
+                previous_cycle = (json.load(f) or {}).get("menstruation_cycle") or {}
+            if isinstance(previous_cycle, dict):
+                previous_period_start = previous_cycle.get("last_period_start")
+    except (OSError, TypeError, ValueError):
+        pass
+
+    current_cycle = data.get("menstruation_cycle") or {}
+    current_period_start = (
+        current_cycle.get("last_period_start")
+        if isinstance(current_cycle, dict)
+        else None
+    )
     data["updated_at"] = datetime.now().isoformat()
     with open(profile_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    if current_period_start is not None and str(current_period_start) != str(previous_period_start):
+        try:
+            from services.memory_service import reset_menstruation_cycle_state
+
+            reset_menstruation_cycle_state(role_id, current_period_start)
+        except Exception:
+            pass
     # 使 ai_behavior 中的角色缓存失效
     try:
         from routers.ai_behavior import invalidate_role_cache

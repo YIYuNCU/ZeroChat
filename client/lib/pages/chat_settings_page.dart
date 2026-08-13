@@ -1090,6 +1090,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   void _showTokenUsage() {
     Map<String, dynamic>? stats;
     bool loading = true;
+    String? selectedModel = _currentRole.aiModel.trim().isEmpty
+        ? null
+        : _currentRole.aiModel.trim();
 
     showModalBottomSheet(
       context: context,
@@ -1109,6 +1112,19 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               setModalState(() {
                 stats = data;
                 loading = false;
+                final models = (data?['by_model'] as List?)
+                    ?.whereType<Map>()
+                    .map((e) => '${e['model'] ?? ''}'.trim())
+                    .where((e) => e.isNotEmpty)
+                    .toSet()
+                    .toList() ??
+                    <String>[];
+                if (selectedModel == null || !models.contains(selectedModel)) {
+                  final latest = (data?['last'] as Map?)?['model']?.toString().trim();
+                  selectedModel = latest != null && latest.isNotEmpty
+                      ? latest
+                      : (models.isEmpty ? null : models.first);
+                }
               });
             }
 
@@ -1123,6 +1139,21 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                     .toList() ??
                 <Map<String, dynamic>>[];
             final last = (stats?['last'] as Map?)?.cast<String, dynamic>();
+            final modelOptions = byModel
+                .map((e) => '${e['model'] ?? ''}'.trim())
+                .where((e) => e.isNotEmpty)
+                .toSet()
+                .toList();
+            final visibleByModel = selectedModel == null
+                ? byModel
+                : byModel
+                    .where((e) => '${e['model'] ?? ''}'.trim() == selectedModel)
+                    .toList();
+            final visibleLast = last != null &&
+                    (selectedModel == null ||
+                        '${last['model'] ?? ''}'.trim() == selectedModel)
+                ? last
+                : null;
 
             return DraggableScrollableSheet(
               initialChildSize: 0.6,
@@ -1166,13 +1197,43 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                       ),
                     ),
                     const Divider(height: 1),
+                    if (modelOptions.length > 1)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                        child: Row(
+                          children: [
+                            const Text('查看模型', style: TextStyle(color: Color(0xFF888888))),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: DropdownButton<String>(
+                                value: modelOptions.contains(selectedModel)
+                                    ? selectedModel
+                                    : modelOptions.first,
+                                isExpanded: true,
+                                underline: const SizedBox.shrink(),
+                                items: modelOptions
+                                    .map((model) => DropdownMenuItem(
+                                          value: model,
+                                          child: Text(model, overflow: TextOverflow.ellipsis),
+                                        ))
+                                    .toList(),
+                                onChanged: (value) {
+                                  if (value != null) {
+                                    setModalState(() => selectedModel = value);
+                                  }
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     Expanded(
                       child: loading
                           ? const Center(child: CircularProgressIndicator())
                           : ListView(
                               controller: scrollController,
                               padding: const EdgeInsets.all(16),
-                              children: _buildUsageContent(byModel, last),
+                              children: _buildUsageContent(visibleByModel, visibleLast),
                             ),
                     ),
                   ],

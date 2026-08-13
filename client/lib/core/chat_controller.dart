@@ -1201,7 +1201,9 @@ class ChatController extends ChangeNotifier {
       await MemoryService.appendJsonMemoryPair(
         roleId: roleId,
         userContent: userMessage,
-        assistantContent: noReply ? null : content,
+        // 无回复仍是一次有效的 assistant 结果，需要进入记忆/数据库；
+        // 是否显示气泡由 showNoReply 单独控制。
+        assistantContent: content,
         requestId: (requestId != null && requestId.isNotEmpty) ? requestId : null,
         jsonMemory: (attachedJson != null && attachedJson.isNotEmpty)
             ? attachedJson
@@ -1611,7 +1613,7 @@ class ChatController extends ChangeNotifier {
           await MemoryService.appendJsonMemoryPair(
             roleId: role.id,
             userContent: userMessage,
-            assistantContent: noReply ? null : content,
+            assistantContent: content,
             requestId: (requestId != null && requestId.isNotEmpty)
                 ? requestId
                 : null,
@@ -1668,7 +1670,7 @@ class ChatController extends ChangeNotifier {
                   await MemoryService.appendJsonMemoryPair(
                     roleId: role.id,
                     userContent: userMessage,
-                    assistantContent: noReply ? null : content,
+                    assistantContent: content,
                     requestId: (requestId != null && requestId.isNotEmpty)
                         ? requestId
                         : null,

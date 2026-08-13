@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'dart:convert';
 import '../models/onebot_config.dart';
 import '../models/role.dart';
 import '../models/stats_config.dart';
+import '../services/secure_backend_client.dart';
 
 /// 角色参数设置页面
 /// 调整 AI 角色的参数配置
@@ -35,6 +37,8 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _onebotMainUserIdController;
   late TextEditingController _onebotAllowedUsersController;
   late TextEditingController _onebotAllowedGroupsController;
+  List<String> _availableAiModels = [];
+  bool _isLoadingAiModels = false;
 
   // 数值系统
   late bool _statsEnabled;
@@ -194,7 +198,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           _buildSection(
             title: '后端角色配置',
             children: [
-              _buildTextField(label: 'AI模型', controller: _aiModelController),
+              _buildAiModelField(),
               const Divider(height: 1, indent: 16),
               _buildTextField(label: 'API地址', controller: _aiApiUrlController),
               const Divider(height: 1, indent: 16),
@@ -456,8 +460,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                       Expanded(
                         child: GestureDetector(
                           onTap: () {
-                            final url =
-                                '/onebot/ws/${widget.role.id}';
+                            final url = '/onebot/ws/${widget.role.id}';
                             Clipboard.setData(ClipboardData(text: url));
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
@@ -571,9 +574,13 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                       children: [
                         Icon(Icons.add, size: 18, color: Color(0xFF07C160)),
                         SizedBox(width: 4),
-                        Text('添加数值',
-                            style: TextStyle(
-                                color: Color(0xFF07C160), fontSize: 15)),
+                        Text(
+                          '添加数值',
+                          style: TextStyle(
+                            color: Color(0xFF07C160),
+                            fontSize: 15,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -681,8 +688,11 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
             style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
           ),
           trailing: IconButton(
-            icon: const Icon(Icons.delete_outline,
-                size: 20, color: Color(0xFFFA5151)),
+            icon: const Icon(
+              Icons.delete_outline,
+              size: 20,
+              color: Color(0xFFFA5151),
+            ),
             onPressed: () => setState(() => _statItems.removeAt(i)),
           ),
           onTap: () => _editStatItem(i),
@@ -713,14 +723,16 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     final existing = index != null ? _statItems[index] : null;
     final keyCtrl = TextEditingController(text: existing?.key ?? '');
     final nameCtrl = TextEditingController(text: existing?.name ?? '');
-    final minCtrl =
-        TextEditingController(text: existing != null ? _fmtNum(existing.min) : '0');
+    final minCtrl = TextEditingController(
+      text: existing != null ? _fmtNum(existing.min) : '0',
+    );
     final maxCtrl = TextEditingController(
-        text: existing != null ? _fmtNum(existing.max) : '100');
+      text: existing != null ? _fmtNum(existing.max) : '100',
+    );
     final initCtrl = TextEditingController(
-        text: existing?.initial != null ? _fmtNum(existing!.initial!) : '');
-    final descCtrl =
-        TextEditingController(text: existing?.description ?? '');
+      text: existing?.initial != null ? _fmtNum(existing!.initial!) : '',
+    );
+    final descCtrl = TextEditingController(text: existing?.description ?? '');
 
     showDialog(
       context: context,
@@ -735,21 +747,36 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
               Row(
                 children: [
                   Expanded(
-                    child: _buildDialogField(minCtrl, '下限',
-                        keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true, signed: true)),
+                    child: _buildDialogField(
+                      minCtrl,
+                      '下限',
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                        signed: true,
+                      ),
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: _buildDialogField(maxCtrl, '上限',
-                        keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true, signed: true)),
+                    child: _buildDialogField(
+                      maxCtrl,
+                      '上限',
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                        signed: true,
+                      ),
+                    ),
                   ),
                 ],
               ),
-              _buildDialogField(initCtrl, '初始值（可空，默认取下限）',
-                  keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true, signed: true)),
+              _buildDialogField(
+                initCtrl,
+                '初始值（可空，默认取下限）',
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                  signed: true,
+                ),
+              ),
               _buildDialogField(descCtrl, '作用/含义', hint: '这个数值代表什么'),
             ],
           ),
@@ -763,9 +790,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
             onPressed: () {
               final key = keyCtrl.text.trim();
               if (key.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('键不能为空')),
-                );
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(const SnackBar(content: Text('键不能为空')));
                 return;
               }
               var min = double.tryParse(minCtrl.text.trim()) ?? 0;
@@ -880,6 +907,119 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         ],
       ),
     );
+  }
+
+  Widget _buildAiModelField() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('AI模型', style: TextStyle(fontSize: 16)),
+          ),
+          Expanded(
+            child: _availableAiModels.isEmpty
+                ? TextField(
+                    controller: _aiModelController,
+                    decoration: const InputDecoration(
+                      hintText: '填写模型名称',
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                    textAlign: TextAlign.right,
+                  )
+                : DropdownButtonFormField<String>(
+                    value: _availableAiModels.contains(_aiModelController.text)
+                        ? _aiModelController.text
+                        : null,
+                    decoration: const InputDecoration(
+                      hintText: '选择模型',
+                      border: InputBorder.none,
+                      isDense: true,
+                    ),
+                    items: _availableAiModels
+                        .map(
+                          (model) => DropdownMenuItem(
+                            value: model,
+                            child: Text(model, overflow: TextOverflow.ellipsis),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value != null) _aiModelController.text = value;
+                    },
+                  ),
+          ),
+          IconButton(
+            tooltip: '从 API 获取模型',
+            onPressed: _isLoadingAiModels ? null : _fetchAiModels,
+            icon: _isLoadingAiModels
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.cloud_download_outlined),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _fetchAiModels() async {
+    final url = _aiApiUrlController.text.trim();
+    final key = _aiApiKeyController.text.trim();
+    if (url.isEmpty || key.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先填写 API 地址和密钥')));
+      return;
+    }
+    setState(() => _isLoadingAiModels = true);
+    try {
+      var modelsUrl = url.replaceFirst(RegExp(r'/chat/completions/?$'), '');
+      modelsUrl = modelsUrl.replaceFirst(RegExp(r'/models/?$'), '');
+      modelsUrl = modelsUrl.endsWith('/') ? modelsUrl : '$modelsUrl/';
+      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
+      modelsUrl += 'models';
+      final response = await SecureBackendClient.getRaw(
+        modelsUrl,
+        headers: {
+          'Authorization': 'Bearer $key',
+          'Content-Type': 'application/json',
+        },
+        includeAuth: false,
+      ).timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200)
+        throw Exception('HTTP ${response.statusCode}');
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final models =
+          ((data['data'] as List?) ?? [])
+              .whereType<Map>()
+              .map((item) => '${item['id'] ?? ''}'.trim())
+              .where((item) => item.isNotEmpty)
+              .toSet()
+              .toList()
+            ..sort();
+      if (mounted) {
+        setState(() {
+          _availableAiModels = models;
+          if (models.isNotEmpty && !models.contains(_aiModelController.text))
+            _aiModelController.text = models.first;
+        });
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
+      }
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
+    } finally {
+      if (mounted) setState(() => _isLoadingAiModels = false);
+    }
   }
 
   void _resetToDefault() {

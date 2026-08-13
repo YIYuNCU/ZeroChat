@@ -501,6 +501,20 @@ def _get_or_init_last_period_start(conn, cycle_data: dict, cycle_length: int, to
         last_date = today - timedelta(days=random.randint(0, max(1, cycle_length - 1)))
     return min(last_date, today)
 
+
+def reset_menstruation_cycle_state(role_id: str, last_period_start: Any) -> None:
+    """Replace the runtime cycle anchor after its profile setting changes.
+
+    The cycle status is cached in ``memory_meta`` so it can advance naturally
+    between requests.  A profile edit must invalidate that cache; otherwise
+    the old anchor continues to override the newly configured date.
+    """
+    if last_period_start is None:
+        return
+    with _get_connection(role_id) as conn:
+        _set_meta(conn, "last_period_start", str(last_period_start).strip())
+        _set_meta(conn, "next_period_start", None)
+
 def _get_menstruation_cycle_info(role_id: str) -> Optional[Dict[str, Any]]:
     status = _get_menstruation_status(role_id)
     if status is None:

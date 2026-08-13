@@ -6,6 +6,7 @@ import '../services/role_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/secure_websocket_client.dart';
+import '../models/ai_model_profile.dart';
 
 /// API 设置页面
 /// 配置主聊天、意图识别、图像识别 API
@@ -62,6 +63,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   List<String> _embeddingModels = [];
   bool _isLoadingEmbeddingModels = false;
   String? _testingApi;
+  String? _selectedProfileId;
 
   @override
   void initState() {
@@ -82,6 +84,19 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     _chatUrlController = TextEditingController(text: settings.chatApiUrl);
     _chatKeyController = TextEditingController(text: settings.chatApiKey);
     _chatModelController = TextEditingController(text: settings.chatModel);
+    _selectedProfileId =
+        settings.modelProfiles.any(
+          (p) =>
+              p.apiUrl == settings.chatApiUrl && p.model == settings.chatModel,
+        )
+        ? settings.modelProfiles
+              .firstWhere(
+                (p) =>
+                    p.apiUrl == settings.chatApiUrl &&
+                    p.model == settings.chatModel,
+              )
+              .id
+        : null;
 
     _intentEnabled = settings.intentEnabled;
     _intentUrlController = TextEditingController(text: settings.intentApiUrl);
@@ -95,9 +110,15 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     _visionMode = settings.visionMode;
 
     _embeddingEnabled = settings.embeddingEnabled;
-    _embeddingUrlController = TextEditingController(text: settings.embeddingApiUrl);
-    _embeddingKeyController = TextEditingController(text: settings.embeddingApiKey);
-    _embeddingModelController = TextEditingController(text: settings.embeddingModel);
+    _embeddingUrlController = TextEditingController(
+      text: settings.embeddingApiUrl,
+    );
+    _embeddingKeyController = TextEditingController(
+      text: settings.embeddingApiKey,
+    );
+    _embeddingModelController = TextEditingController(
+      text: settings.embeddingModel,
+    );
   }
 
   @override
@@ -224,6 +245,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
             _buildCurrentConfigTestButton('chat', '测试聊天配置'),
             _buildDivider(),
             _buildModelSelector(),
+            _buildModelProfiles(),
           ]),
 
           const SizedBox(height: 20),
@@ -424,7 +446,12 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
           ),
           Expanded(
             child: DropdownButtonFormField<String>(
-              value: const {'standalone', 'pre_model', 'tool'}.contains(_visionMode)
+              value:
+                  const {
+                    'standalone',
+                    'pre_model',
+                    'tool',
+                  }.contains(_visionMode)
                   ? _visionMode
                   : 'standalone',
               decoration: const InputDecoration(
@@ -438,11 +465,17 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                 ),
                 DropdownMenuItem(
                   value: 'pre_model',
-                  child: Text('前置模型（识图后交给聊天模型）', style: TextStyle(fontSize: 14)),
+                  child: Text(
+                    '前置模型（识图后交给聊天模型）',
+                    style: TextStyle(fontSize: 14),
+                  ),
                 ),
                 DropdownMenuItem(
                   value: 'tool',
-                  child: Text('工具模式（AI 自主决定识图）', style: TextStyle(fontSize: 14)),
+                  child: Text(
+                    '工具模式（AI 自主决定识图）',
+                    style: TextStyle(fontSize: 14),
+                  ),
                 ),
               ],
               onChanged: (value) {
@@ -637,9 +670,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('拉取后端配置失败: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('拉取后端配置失败: $e')));
       }
     } finally {
       if (mounted) {
@@ -710,7 +743,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
         setState(() {
           _availableModels = models;
-          if (models.isNotEmpty && !_availableModels.contains(_chatModelController.text)) {
+          if (models.isNotEmpty &&
+              !_availableModels.contains(_chatModelController.text)) {
             _chatModelController.text = models.first;
           }
         });
@@ -817,9 +851,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     }
 
     if (url.isEmpty || key.isEmpty || model.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先填写 API URL、API Key 和模型')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL、API Key 和模型')));
       return;
     }
 
@@ -842,16 +876,22 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
             );
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('HTTP ${response.statusCode}: ${_responseSummary(response.body)}');
+        throw Exception(
+          'HTTP ${response.statusCode}: ${_responseSummary(response.body)}',
+        );
       }
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${_apiLabel(kind)} 配置可用')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('${_apiLabel(kind)} 配置可用')));
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${_apiLabel(kind)} 测试失败: ${_responseSummary(error.toString())}')),
+        SnackBar(
+          content: Text(
+            '${_apiLabel(kind)} 测试失败: ${_responseSummary(error.toString())}',
+          ),
+        ),
       );
     } finally {
       if (mounted) setState(() => _testingApi = null);
@@ -871,7 +911,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               {
                 'type': 'image_url',
                 'image_url': {
-                  'url': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
+                  'url':
+                      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
                 },
               },
             ],
@@ -892,7 +933,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     final uri = Uri.parse(value.trim());
     var path = uri.path.replaceFirst(RegExp(r'/+$'), '');
     if (!path.endsWith('/chat/completions')) {
-      path = path.endsWith('/v1') ? '$path/chat/completions' : '$path/v1/chat/completions';
+      path = path.endsWith('/v1')
+          ? '$path/chat/completions'
+          : '$path/v1/chat/completions';
     }
     return uri.replace(path: path, query: '', fragment: '').toString();
   }
@@ -901,7 +944,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     final uri = Uri.parse(value.trim());
     var path = uri.path.replaceFirst(RegExp(r'/+$'), '');
     if (path.endsWith('/chat/completions')) {
-      path = '${path.substring(0, path.length - '/chat/completions'.length)}/embeddings';
+      path =
+          '${path.substring(0, path.length - '/chat/completions'.length)}/embeddings';
     } else if (!path.endsWith('/embeddings')) {
       path = path.endsWith('/v1') ? '$path/embeddings' : '$path/v1/embeddings';
     }
@@ -920,7 +964,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
   String _responseSummary(String value) {
     final normalized = value.replaceAll(RegExp(r'\s+'), ' ').trim();
-    return normalized.length > 120 ? '${normalized.substring(0, 120)}...' : normalized;
+    return normalized.length > 120
+        ? '${normalized.substring(0, 120)}...'
+        : normalized;
   }
 
   Widget _buildModelSelector() {
@@ -972,6 +1018,118 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
         ],
       ),
     );
+  }
+
+  Widget _buildModelProfiles() {
+    final profiles = SettingsService.instance.modelProfiles;
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
+          child: Row(
+            children: [
+              const Expanded(
+                child: Text('本地配置档案', style: TextStyle(fontSize: 15)),
+              ),
+              TextButton.icon(
+                onPressed: _saveCurrentModelProfile,
+                icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                label: const Text('保存当前'),
+              ),
+            ],
+          ),
+        ),
+        if (profiles.isEmpty)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '可保存多组模型、API 地址和密钥，随时切换。',
+                style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+              ),
+            ),
+          )
+        else
+          ...profiles.map(
+            (profile) => ListTile(
+              dense: true,
+              leading: Radio<String>(
+                value: profile.id,
+                groupValue: _selectedProfileId,
+                onChanged: (_) => _applyModelProfile(profile),
+              ),
+              title: Text(profile.name),
+              subtitle: Text(
+                '${profile.model}  ·  ${profile.apiUrl}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: IconButton(
+                tooltip: '删除配置档案',
+                icon: const Icon(Icons.delete_outline, size: 20),
+                onPressed: () async {
+                  await SettingsService.instance.deleteModelProfile(profile.id);
+                  if (mounted) setState(() {});
+                },
+              ),
+              onTap: () => _applyModelProfile(profile),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _applyModelProfile(AiModelProfile profile) async {
+    setState(() {
+      _selectedProfileId = profile.id;
+      _chatUrlController.text = profile.apiUrl;
+      _chatModelController.text = profile.model;
+      _chatKeyController.text = profile.apiKey;
+    });
+    await SettingsService.instance.updateChatApi(
+      url: profile.apiUrl,
+      key: profile.apiKey,
+      model: profile.model,
+    );
+  }
+
+  Future<void> _saveCurrentModelProfile() async {
+    final nameController = TextEditingController(
+      text: _chatModelController.text.trim(),
+    );
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('保存模型配置档案'),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: '档案名称'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, nameController.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    nameController.dispose();
+    if (name == null || name.isEmpty) return;
+    final id = 'profile_${DateTime.now().microsecondsSinceEpoch}';
+    await SettingsService.instance.saveModelProfile(
+      id: id,
+      name: name,
+      url: _chatUrlController.text.trim(),
+      model: _chatModelController.text.trim(),
+      key: _chatKeyController.text.trim(),
+    );
+    if (mounted) setState(() => _selectedProfileId = id);
   }
 
   /// 意图识别模型获取按钮
@@ -1103,7 +1261,9 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
           ),
           Expanded(
             child: OutlinedButton.icon(
-              onPressed: _isLoadingEmbeddingModels ? null : _fetchEmbeddingModels,
+              onPressed: _isLoadingEmbeddingModels
+                  ? null
+                  : _fetchEmbeddingModels,
               icon: _isLoadingEmbeddingModels
                   ? const SizedBox(
                       width: 16,
@@ -1145,7 +1305,10 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                     style: const TextStyle(fontSize: 16),
                   )
                 : DropdownButtonFormField<String>(
-                    value: _embeddingModels.contains(_embeddingModelController.text)
+                    value:
+                        _embeddingModels.contains(
+                          _embeddingModelController.text,
+                        )
                         ? _embeddingModelController.text
                         : null,
                     decoration: const InputDecoration(
@@ -1243,6 +1406,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     try {
       // 构建模型列表请求 URL
       var modelsUrl = url;
+      modelsUrl = modelsUrl.replaceFirst(RegExp(r'/chat/completions/?$'), '');
+      modelsUrl = modelsUrl.replaceFirst(RegExp(r'/models/?$'), '');
       if (!modelsUrl.endsWith('/')) modelsUrl += '/';
       if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
       modelsUrl += 'models';
@@ -1323,7 +1488,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
         setState(() {
           _visionModels = models;
-          if (models.isNotEmpty && !_visionModels.contains(_visionModelController.text)) {
+          if (models.isNotEmpty &&
+              !_visionModels.contains(_visionModelController.text)) {
             _visionModelController.text = models.first;
           }
         });
@@ -1385,7 +1551,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
         setState(() {
           _embeddingModels = models;
-          if (models.isNotEmpty && !_embeddingModels.contains(_embeddingModelController.text)) {
+          if (models.isNotEmpty &&
+              !_embeddingModels.contains(_embeddingModelController.text)) {
             _embeddingModelController.text = models.first;
           }
         });

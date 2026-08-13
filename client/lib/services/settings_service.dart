@@ -4,6 +4,7 @@ import 'secure_storage_service.dart';
 import 'intent_service.dart';
 import 'secure_backend_client.dart';
 import 'secure_websocket_client.dart';
+import '../models/ai_model_profile.dart';
 
 /// 全局设置服务
 /// 管理 API 配置、全局提示词等
@@ -44,6 +45,7 @@ class SettingsService extends ChangeNotifier {
   String _chatApiUrl = '';
   String _chatApiKey = '';
   String _chatModel = 'gpt-3.5-turbo';
+  List<AiModelProfile> _modelProfiles = [];
 
   // 意图识别 API
   bool _intentEnabled = false;
@@ -91,6 +93,7 @@ class SettingsService extends ChangeNotifier {
   String get chatApiUrl => _chatApiUrl;
   String get chatApiKey => _chatApiKey;
   String get chatModel => _chatModel;
+  List<AiModelProfile> get modelProfiles => List.unmodifiable(_modelProfiles);
 
   bool get intentEnabled => _intentEnabled;
   String get intentApiUrl => _intentApiUrl;
@@ -127,13 +130,15 @@ class SettingsService extends ChangeNotifier {
         : _backendUrl;
     return '$base$_userAvatarUrl';
   }
+
   String get backendAuthToken => _backendAuthToken;
   String get backendEncryptionSecret => _backendEncryptionSecret;
 
   int get messageWaitSeconds => _messageWaitSeconds;
   bool get backgroundRuntimeEnabled => _backgroundRuntimeEnabled;
   int get backgroundPollIntervalSeconds => _backgroundPollIntervalSeconds;
-  int get backgroundWatchdogIntervalSeconds => _backgroundWatchdogIntervalSeconds;
+  int get backgroundWatchdogIntervalSeconds =>
+      _backgroundWatchdogIntervalSeconds;
   int get foregroundHeartbeatSeconds => _foregroundHeartbeatSeconds;
   int get backgroundHeartbeatSeconds => _backgroundHeartbeatSeconds;
 
@@ -156,6 +161,7 @@ class SettingsService extends ChangeNotifier {
     _chatApiUrl = StorageService.getString('chat_api_url') ?? '';
     _chatApiKey = SecureStorageService.getString('chat_api_key');
     _chatModel = StorageService.getString('chat_model') ?? 'gpt-3.5-turbo';
+    await _loadModelProfiles();
 
     // 意图识别 API
     _intentEnabled = StorageService.getBool('intent_enabled') ?? false;
@@ -193,8 +199,9 @@ class SettingsService extends ChangeNotifier {
     _backendUrl =
         StorageService.getString('backend_url') ?? 'http://localhost:8000';
     _backendAuthToken = SecureStorageService.getString('backend_auth_token');
-    _backendEncryptionSecret =
-        SecureStorageService.getString('backend_encryption_secret');
+    _backendEncryptionSecret = SecureStorageService.getString(
+      'backend_encryption_secret',
+    );
 
     SecureBackendClient.configureSecurity(
       authToken: _backendAuthToken,
@@ -208,15 +215,21 @@ class SettingsService extends ChangeNotifier {
     _backgroundRuntimeEnabled =
         StorageService.getBool('background_runtime_enabled') ?? true;
     _backgroundPollIntervalSeconds =
-      StorageService.getInt('background_poll_interval_seconds') ?? 120;
+        StorageService.getInt('background_poll_interval_seconds') ?? 120;
     _backgroundWatchdogIntervalSeconds =
-      StorageService.getInt('background_watchdog_interval_seconds') ?? 30;
+        StorageService.getInt('background_watchdog_interval_seconds') ?? 30;
 
     // WebSocket 心跳间隔
     _foregroundHeartbeatSeconds =
-      (StorageService.getInt('foreground_heartbeat_seconds') ?? 25).clamp(15, 60);
+        (StorageService.getInt('foreground_heartbeat_seconds') ?? 25).clamp(
+          15,
+          60,
+        );
     _backgroundHeartbeatSeconds =
-      (StorageService.getInt('background_heartbeat_seconds') ?? 60).clamp(30, 180);
+        (StorageService.getInt('background_heartbeat_seconds') ?? 60).clamp(
+          30,
+          180,
+        );
   }
 
   // ========== 更新方法 ==========
@@ -285,7 +298,10 @@ class SettingsService extends ChangeNotifier {
   Future<void> updateBackgroundWatchdogIntervalSeconds(int seconds) async {
     final normalized = seconds.clamp(10, 120);
     _backgroundWatchdogIntervalSeconds = normalized;
-    await StorageService.setInt('background_watchdog_interval_seconds', normalized);
+    await StorageService.setInt(
+      'background_watchdog_interval_seconds',
+      normalized,
+    );
     notifyListeners();
   }
 
@@ -317,6 +333,56 @@ class SettingsService extends ChangeNotifier {
     await StorageService.setString('chat_api_url', url);
     await SecureStorageService.setString('chat_api_key', key);
     await StorageService.setString('chat_model', model);
+    notifyListeners();
+  }
+
+  Future<void> _loadModelProfiles() async {
+    final raw = StorageService.getJsonList('ai_model_profiles') ?? [];
+    _modelProfiles = raw
+        .map((json) {
+          final id = '${json['id'] ?? ''}';
+          return AiModelProfile.fromJson(
+            json,
+            apiKey: SecureStorageService.getString('ai_model_profile_key_$id'),
+          );
+        })
+        .where((profile) => profile.id.isNotEmpty)
+        .toList();
+  }
+
+  Future<void> saveModelProfile({
+    required String id,
+    required String name,
+    required String url,
+    required String model,
+    required String key,
+  }) async {
+    final profile = AiModelProfile(
+      id: id,
+      name: name,
+      apiUrl: url,
+      model: model,
+      apiKey: key,
+    );
+    _modelProfiles = [
+      ..._modelProfiles.where((item) => item.id != id),
+      profile,
+    ];
+    await StorageService.setJsonList(
+      'ai_model_profiles',
+      _modelProfiles.map((item) => item.toJson()).toList(),
+    );
+    await SecureStorageService.setString('ai_model_profile_key_$id', key);
+    notifyListeners();
+  }
+
+  Future<void> deleteModelProfile(String id) async {
+    _modelProfiles = _modelProfiles.where((item) => item.id != id).toList();
+    await StorageService.setJsonList(
+      'ai_model_profiles',
+      _modelProfiles.map((item) => item.toJson()).toList(),
+    );
+    await SecureStorageService.remove('ai_model_profile_key_$id');
     notifyListeners();
   }
 
@@ -574,22 +640,22 @@ class SettingsService extends ChangeNotifier {
         'settings_update',
         {
           'updates': {
-          'ai_api_url': _chatApiUrl,
-          'ai_api_key': _chatApiKey,
-          'ai_model': _chatModel,
-          'intent_enabled': _intentEnabled,
-          'intent_api_url': _intentApiUrl,
-          'intent_api_key': _intentApiKey,
-          'intent_model': _intentModel,
-          'vision_enabled': _visionEnabled,
-          'vision_api_url': _visionApiUrl,
-          'vision_api_key': _visionApiKey,
-          'vision_model': _visionModel,
-          'vision_mode': _visionMode,
-          'embedding_enabled': _embeddingEnabled,
-          'embedding_api_url': _embeddingApiUrl,
-          'embedding_api_key': _embeddingApiKey,
-          'embedding_model': _embeddingModel,
+            'ai_api_url': _chatApiUrl,
+            'ai_api_key': _chatApiKey,
+            'ai_model': _chatModel,
+            'intent_enabled': _intentEnabled,
+            'intent_api_url': _intentApiUrl,
+            'intent_api_key': _intentApiKey,
+            'intent_model': _intentModel,
+            'vision_enabled': _visionEnabled,
+            'vision_api_url': _visionApiUrl,
+            'vision_api_key': _visionApiKey,
+            'vision_model': _visionModel,
+            'vision_mode': _visionMode,
+            'embedding_enabled': _embeddingEnabled,
+            'embedding_api_url': _embeddingApiUrl,
+            'embedding_api_key': _embeddingApiKey,
+            'embedding_model': _embeddingModel,
           },
         },
       );
@@ -634,26 +700,32 @@ class SettingsService extends ChangeNotifier {
           ? _intentModel
           : (server['intent_model']?.toString() ?? _intentModel).trim();
 
-        final visionEnabled = server['vision_enabled'] == true;
-        final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
-        final visionKey = (server['vision_api_key']?.toString() ?? '').trim();
-        final visionModel =
+      final visionEnabled = server['vision_enabled'] == true;
+      final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
+      final visionKey = (server['vision_api_key']?.toString() ?? '').trim();
+      final visionModel =
           (server['vision_model']?.toString() ?? _visionModel).trim().isEmpty
           ? _visionModel
           : (server['vision_model']?.toString() ?? _visionModel).trim();
-        final visionModeRaw =
-          (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
-        final visionMode = const {'standalone', 'pre_model', 'tool'}.contains(visionModeRaw)
+      final visionModeRaw = (server['vision_mode']?.toString() ?? _visionMode)
+          .trim()
+          .toLowerCase();
+      final visionMode =
+          const {'standalone', 'pre_model', 'tool'}.contains(visionModeRaw)
           ? visionModeRaw
           : 'standalone';
 
       final embeddingEnabled = server['embedding_enabled'] == true;
-      final embeddingUrl = (server['embedding_api_url']?.toString() ?? '').trim();
-      final embeddingKey = (server['embedding_api_key']?.toString() ?? '').trim();
+      final embeddingUrl = (server['embedding_api_url']?.toString() ?? '')
+          .trim();
+      final embeddingKey = (server['embedding_api_key']?.toString() ?? '')
+          .trim();
       final embeddingModel =
-        (server['embedding_model']?.toString() ?? _embeddingModel).trim().isEmpty
-        ? _embeddingModel
-        : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
+          (server['embedding_model']?.toString() ?? _embeddingModel)
+              .trim()
+              .isEmpty
+          ? _embeddingModel
+          : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
 
       await updateChatApi(url: chatUrl, key: chatKey, model: chatModel);
       await updateIntentApi(
@@ -711,24 +783,29 @@ class SettingsService extends ChangeNotifier {
           ? _intentModel
           : (server['intent_model']?.toString() ?? _intentModel).trim();
 
-        final visionEnabled = server['vision_enabled'] == true;
-        final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
-        final visionModel =
+      final visionEnabled = server['vision_enabled'] == true;
+      final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
+      final visionModel =
           (server['vision_model']?.toString() ?? _visionModel).trim().isEmpty
           ? _visionModel
           : (server['vision_model']?.toString() ?? _visionModel).trim();
-        final visionModeRaw =
-          (server['vision_mode']?.toString() ?? _visionMode).trim().toLowerCase();
-        final visionMode = const {'standalone', 'pre_model', 'tool'}.contains(visionModeRaw)
+      final visionModeRaw = (server['vision_mode']?.toString() ?? _visionMode)
+          .trim()
+          .toLowerCase();
+      final visionMode =
+          const {'standalone', 'pre_model', 'tool'}.contains(visionModeRaw)
           ? visionModeRaw
           : 'standalone';
 
       final embeddingEnabled = server['embedding_enabled'] == true;
-      final embeddingUrl = (server['embedding_api_url']?.toString() ?? '').trim();
+      final embeddingUrl = (server['embedding_api_url']?.toString() ?? '')
+          .trim();
       final embeddingModel =
-        (server['embedding_model']?.toString() ?? _embeddingModel).trim().isEmpty
-        ? _embeddingModel
-        : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
+          (server['embedding_model']?.toString() ?? _embeddingModel)
+              .trim()
+              .isEmpty
+          ? _embeddingModel
+          : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
 
       await updateChatApi(url: chatUrl, key: _chatApiKey, model: chatModel);
       await updateIntentApi(
@@ -754,7 +831,9 @@ class SettingsService extends ChangeNotifier {
       debugPrint('SettingsService: Public settings synced from backend');
       return true;
     } catch (e) {
-      debugPrint('SettingsService: Sync public settings from backend failed: $e');
+      debugPrint(
+        'SettingsService: Sync public settings from backend failed: $e',
+      );
       return false;
     }
   }
