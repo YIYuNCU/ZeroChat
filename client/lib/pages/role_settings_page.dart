@@ -64,7 +64,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _aiModelController = TextEditingController(text: widget.role.aiModel);
     _aiApiUrlController = TextEditingController(text: widget.role.aiApiUrl);
     _aiApiKeyController = TextEditingController(text: widget.role.aiApiKey);
-    _selectedModelProfileId = _matchingModelProfileId();
+    _selectedModelProfileId = null;
     _aiModelController.addListener(_clearModelProfileSelection);
     _aiApiUrlController.addListener(_clearModelProfileSelection);
     _aiApiKeyController.addListener(_clearModelProfileSelection);
@@ -207,16 +207,21 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
             title: '后端角色配置',
             children: [
               _buildModelProfileSelector(),
-              const Divider(height: 1, indent: 16),
-              _buildAiModelField(),
-              const Divider(height: 1, indent: 16),
-              _buildTextField(label: 'API地址', controller: _aiApiUrlController),
-              const Divider(height: 1, indent: 16),
-              _buildTextField(
-                label: '密钥',
-                controller: _aiApiKeyController,
-                obscureText: true,
-              ),
+              if (!_hasSelectedModelProfile) ...[
+                const Divider(height: 1, indent: 16),
+                _buildAiModelField(),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: 'API地址',
+                  controller: _aiApiUrlController,
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '密钥',
+                  controller: _aiApiKeyController,
+                  obscureText: true,
+                ),
+              ],
               const Divider(height: 1, indent: 16),
               _buildTextField(
                 label: '温度',
@@ -989,35 +994,38 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           ),
           Expanded(
             child: DropdownButtonFormField<String>(
-              value: profiles.any((profile) => profile.id == _selectedModelProfileId)
-                  ? _selectedModelProfileId
-                  : null,
+              value: _hasSelectedModelProfile ? _selectedModelProfileId : '',
               isExpanded: true,
               decoration: const InputDecoration(
                 hintText: '选择 AI 接口设置中的档案',
                 border: InputBorder.none,
                 isDense: true,
               ),
-              items: profiles
-                  .map(
-                    (profile) => DropdownMenuItem(
-                      value: profile.id,
-                      child: Text(
-                        profile.name,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+              items: [
+                const DropdownMenuItem(
+                  value: '',
+                  child: Text('不选择'),
+                ),
+                ...profiles.map(
+                  (profile) => DropdownMenuItem(
+                    value: profile.id,
+                    child: Text(
+                      profile.name,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  )
-                  .toList(),
-              onChanged: profiles.isEmpty
-                  ? null
-                  : (profileId) {
-                      if (profileId == null) return;
-                      final profile = profiles.firstWhere(
-                        (item) => item.id == profileId,
-                      );
-                      _applyModelProfile(profile);
-                    },
+                  ),
+                ),
+              ],
+              onChanged: (profileId) {
+                if (profileId == null || profileId.isEmpty) {
+                  setState(() => _selectedModelProfileId = null);
+                  return;
+                }
+                final profile = profiles.firstWhere(
+                  (item) => item.id == profileId,
+                );
+                _applyModelProfile(profile);
+              },
             ),
           ),
         ],
@@ -1025,15 +1033,12 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     );
   }
 
-  String? _matchingModelProfileId() {
-    for (final profile in SettingsService.instance.modelProfiles) {
-      if (profile.model == widget.role.aiModel &&
-          profile.apiUrl == widget.role.aiApiUrl &&
-          profile.apiKey == widget.role.aiApiKey) {
-        return profile.id;
-      }
-    }
-    return null;
+  bool get _hasSelectedModelProfile {
+    final selectedId = _selectedModelProfileId;
+    return selectedId != null &&
+        SettingsService.instance.modelProfiles.any(
+          (profile) => profile.id == selectedId,
+        );
   }
 
   void _applyModelProfile(AiModelProfile profile) {
