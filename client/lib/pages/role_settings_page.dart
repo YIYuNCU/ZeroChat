@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:convert';
+import '../models/ai_model_profile.dart';
 import '../models/onebot_config.dart';
 import '../models/role.dart';
 import '../models/stats_config.dart';
 import '../services/secure_backend_client.dart';
+import '../services/settings_service.dart';
 
 /// 角色参数设置页面
 /// 调整 AI 角色的参数配置
@@ -39,6 +41,8 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _onebotAllowedGroupsController;
   List<String> _availableAiModels = [];
   bool _isLoadingAiModels = false;
+  String? _selectedModelProfileId;
+  bool _isApplyingModelProfile = false;
 
   // 数值系统
   late bool _statsEnabled;
@@ -60,6 +64,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _aiModelController = TextEditingController(text: widget.role.aiModel);
     _aiApiUrlController = TextEditingController(text: widget.role.aiApiUrl);
     _aiApiKeyController = TextEditingController(text: widget.role.aiApiKey);
+    _selectedModelProfileId = _matchingModelProfileId();
+    _aiModelController.addListener(_clearModelProfileSelection);
+    _aiApiUrlController.addListener(_clearModelProfileSelection);
+    _aiApiKeyController.addListener(_clearModelProfileSelection);
     _aiTemperatureController = TextEditingController(
       text: widget.role.aiTemperature.toStringAsFixed(1),
     );
@@ -198,6 +206,8 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           _buildSection(
             title: '后端角色配置',
             children: [
+              _buildModelProfileSelector(),
+              const Divider(height: 1, indent: 16),
               _buildAiModelField(),
               const Divider(height: 1, indent: 16),
               _buildTextField(label: 'API地址', controller: _aiApiUrlController),
@@ -965,6 +975,79 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         ],
       ),
     );
+  }
+
+  Widget _buildModelProfileSelector() {
+    final profiles = SettingsService.instance.modelProfiles;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('本地档案', style: TextStyle(fontSize: 16)),
+          ),
+          Expanded(
+            child: DropdownButtonFormField<String>(
+              value: profiles.any((profile) => profile.id == _selectedModelProfileId)
+                  ? _selectedModelProfileId
+                  : null,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                hintText: '选择 AI 接口设置中的档案',
+                border: InputBorder.none,
+                isDense: true,
+              ),
+              items: profiles
+                  .map(
+                    (profile) => DropdownMenuItem(
+                      value: profile.id,
+                      child: Text(
+                        profile.name,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  )
+                  .toList(),
+              onChanged: profiles.isEmpty
+                  ? null
+                  : (profileId) {
+                      if (profileId == null) return;
+                      final profile = profiles.firstWhere(
+                        (item) => item.id == profileId,
+                      );
+                      _applyModelProfile(profile);
+                    },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String? _matchingModelProfileId() {
+    for (final profile in SettingsService.instance.modelProfiles) {
+      if (profile.model == widget.role.aiModel &&
+          profile.apiUrl == widget.role.aiApiUrl &&
+          profile.apiKey == widget.role.aiApiKey) {
+        return profile.id;
+      }
+    }
+    return null;
+  }
+
+  void _applyModelProfile(AiModelProfile profile) {
+    _isApplyingModelProfile = true;
+    _aiModelController.text = profile.model;
+    _aiApiUrlController.text = profile.apiUrl;
+    _aiApiKeyController.text = profile.apiKey;
+    _isApplyingModelProfile = false;
+    setState(() => _selectedModelProfileId = profile.id);
+  }
+
+  void _clearModelProfileSelection() {
+    if (_isApplyingModelProfile || _selectedModelProfileId == null) return;
+    setState(() => _selectedModelProfileId = null);
   }
 
   Future<void> _fetchAiModels() async {
