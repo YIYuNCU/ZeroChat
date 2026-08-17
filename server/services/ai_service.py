@@ -889,7 +889,6 @@ async def generate_with_role(
     messages = []
     is_onebot = origin.startswith("onebot")
     is_third_party = is_onebot and sender != "user"
-    model_override, _, _, _ = _get_role_ai_config(role_data)
     system_content = _build_system_prompt(
         role_data,
         None,
@@ -973,16 +972,14 @@ async def generate_with_role(
             user_message,
             0,
         )
-        image_context_message = {
-            "role": "user",
-            "content": (
-                "[Image recognition result - must use]\n"
-                f"{image_understanding}\n"
-                "Answer the user's current message using this image information."
-            ),
-        }
-        # Keep exactly one system message for every request in this pipeline.
-        messages.append(image_context_message)
+        image_context = (
+            "[Image recognition result - must use]\n"
+            f"{image_understanding}\n"
+            "Answer the user's current message using this image information."
+        )
+        # The vision response is external data. Keep it at user priority and
+        # preserve the original system prompt for every provider.
+        messages.append({"role": "user", "content": image_context})
         result = await _call_with_role_config(
             role_data,
             messages,
@@ -1231,56 +1228,77 @@ async def _handle_tool_calls(
 async def generate_moment_post(
     role_data: Dict,
     history: Optional[List[Dict]] = None,
+    core_memory_context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     生成朋友圈内容
     """
-    persona = role_data.get("persona", "")
-    name = role_data.get("name", "AI")
     prompt = (
-        f"你是{name}，你的人设：{persona}\n\n"
-        "现在你想发一条朋友圈动态。要求：\n"
+        "现在请发布一条朋友圈动态。要求：\n"
         "- 内容简短自然（20-100字）\n"
-        "- 符合你的性格和人设\n"
+        "- 严格符合你的角色人设、系统提示词和与用户的既有关系\n"
         "- 可以是生活感悟、心情分享、日常记录\n"
         "- 不要提及\"AI\"\"系统\"\"人设\"等词\n"
         "- 结合历史消息（如果有的话）来丰富内容，但不要完全依赖历史消息。\n"
-        "- 只输出纯文本正文，严禁使用 <对话>、<动作>、<声音>、<心理> 等任何标签，"
-        "也不要使用 $ 分隔符。朋友圈是纯文字动态，不是对话。\n"
-        "直接输出朋友圈内容，不要任何解释。"
+        "- 将最终朋友圈正文放在一个<对话>标签中；不要输出动作、声音、心理、数值或解释。"
     )
-    messages = []
-    if history:
-        for msg in history:
-            messages.append({
-                "role": msg.get("role", "user"),
-                "content": msg.get("content", "")
-            })
-    messages.append({"role": "user", "content": prompt})
-    return await _call_with_role_config(role_data, messages, default_temp=0.9)
+    return await generate_with_role(
+        role_data=role_data,
+        user_message=prompt,
+        history=history,
+        core_memory_context=core_memory_context,
+        origin="moments",
+        sender="system",
+    )
 
 async def generate_moment_comment(
     role_data: Dict,
     post_content: str,
     post_author: str,
-    reply_to: Optional[str] = None
+    reply_to: Optional[str] = None,
+    reply_to_name: Optional[str] = None,
+    comment_thread: Optional[List[Dict[str, Any]]] = None,
+    history: Optional[List[Dict]] = None,
+    core_memory_context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     生成朋友圈评论
     """
-    persona = role_data.get("persona", "")
-    name = role_data.get("name", "AI")
-    action = f"你要回复{reply_to}的评论" if reply_to else "你想评论这条朋友圈"
+    if reply_to:
+        target_name = str(reply_to_name or "对方").strip() or "对方"
+        action = f"请回复{target_name}的这条评论：{reply_to}"
+    else:
+        action = "请评论这条朋友圈"
+
+    thread_lines: List[str] = []
+    for comment in (comment_thread or [])[-20:]:
+        if not isinstance(comment, dict):
+            continue
+        author = str(comment.get("author_name") or "用户").strip() or "用户"
+        reply_name = str(comment.get("reply_to_name") or "").strip()
+        content = str(comment.get("content") or "").strip()
+        if not content:
+            continue
+        recipient = f" 回复 {reply_name}" if reply_name else ""
+        thread_lines.append(f"{author}{recipient}：{content}")
+    thread_context = "\n".join(thread_lines) or "暂无其他评论"
+
     prompt = (
-        f"你是{name}，你的人设：{persona}\n\n"
         f"{post_author}发了一条朋友圈：「{post_content}」\n\n"
+        f"当前评论串：\n{thread_context}\n\n"
         f"{action}。要求：\n"
         "- 简短自然（5-30字）\n"
-        "- 像朋友间的互动\n"
+        "- 严格符合你的角色人设、系统提示词和与用户的既有关系\n"
+        "- 像朋友间的互动，并结合评论串避免重复或答非所问\n"
         "- 可以用表情或语气词\n"
         "- 不要太正式\n"
-        "- 只输出纯文本，严禁使用 <对话>、<动作>、<声音>、<心理> 等任何标签或 $ 分隔符。\n\n"
-        "直接输出评论内容。"
+        "- 将最终评论正文放在一个<对话>标签中；不要输出动作、声音、心理、数值或解释。"
     )
-    messages = [{"role": "user", "content": prompt}]
-    return await _call_with_role_config(role_data, messages, default_temp=0.8)
+    return await generate_with_role(
+        role_data=role_data,
+        user_message=prompt,
+        history=history,
+        core_memory_context=core_memory_context,
+        origin="moments",
+        sender="system",
+    )

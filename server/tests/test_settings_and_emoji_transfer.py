@@ -592,7 +592,7 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
         fallback_messages = call_model.await_args_list[1].args[1]
         self.assertTrue(
             any(
-                message.get("role") == "system"
+                message.get("role") == "user"
                 and "Image recognition result" in message.get("content", "")
                 for message in fallback_messages
             )

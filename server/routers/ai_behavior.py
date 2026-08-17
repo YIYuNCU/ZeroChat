@@ -697,8 +697,8 @@ async def _run_memory_ai_pipeline(
                 group_id=group_id,
             )
         )
-    # 无回复是 AI 的有效决策，也要写入短期记忆；前端是否展示由 show_no_reply 控制。
-    if include_assistant_memory:
+    # 无回复指令是内部控制信号：保留用户输入，但不能污染助手短期记忆。
+    if include_assistant_memory and not no_reply:
         await _run_db(
             role_id, functools.partial(
                 append_short_term,
@@ -1126,7 +1126,12 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
         return AIResponse(success=True, action="ignore", content=None)
 
     from services.ai_service import generate_moment_post
-    from services.memory_service import get_memory_context_string,get_context_messages,_get_memory_length
+    from services.memory_service import (
+        _get_memory_length,
+        _run_db,
+        get_context_messages,
+        get_memory_context_string,
+    )
     role_max_ctx = role.get("max_context_rounds") if isinstance(role, dict) else None
     history = await get_context_messages(
         event.role_id,
@@ -1145,7 +1150,14 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
                 if stripped:
                     msg["content"] = stripped
 
-    result = await generate_moment_post(role_data=role, history=history)
+    core_memory_context = (
+        await _run_db(event.role_id, get_memory_context_string, event.role_id) or ""
+    ).strip()
+    result = await generate_moment_post(
+        role_data=role,
+        history=history,
+        core_memory_context=core_memory_context or None,
+    )
 
     if not result["success"]:
         return AIResponse(success=False, action="ignore", error=result["error"])
@@ -1167,12 +1179,45 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
 
 async def handle_moment_comment(role: Dict, event: AIEvent) -> AIResponse:
     """AI 评论朋友圈"""
+    from routers.moments import load_moments
     from services.ai_service import generate_moment_comment
-    
+    from services.memory_service import (
+        _get_memory_length,
+        _run_db,
+        get_context_messages,
+        get_memory_context_string,
+    )
+
     context = event.context or {}
     post_content = context.get("post_content", "")
     post_author = context.get("post_author", "用户")
     reply_to = context.get("reply_to")
+    reply_to_name = context.get("reply_to_name")
+    post_id = str(context.get("post_id") or "").strip()
+    comment_thread: List[Dict[str, Any]] = []
+
+    if post_id:
+        for post in load_moments():
+            if str(post.get("id") or "").strip() != post_id:
+                continue
+            post_content = str(post.get("content") or post_content)
+            post_author = str(post.get("author_name") or post_author)
+            raw_comments = post.get("comments")
+            if isinstance(raw_comments, list):
+                comment_thread = [item for item in raw_comments if isinstance(item, dict)]
+            break
+
+    role_max_ctx = role.get("max_context_rounds") if isinstance(role, dict) else None
+    history = await get_context_messages(
+        event.role_id,
+        limit=_get_memory_length(role_max_ctx),
+        skip_summary=True,
+        latest=True,
+        max_context_rounds=role_max_ctx,
+    )
+    core_memory_context = (
+        await _run_db(event.role_id, get_memory_context_string, event.role_id) or ""
+    ).strip()
 
     # 是否互动的概率已由调度器（scheduler_service）统一决定，
     # 此处不再二次随机跳过，避免双重概率相乘导致评论过于稀少、不可控。
@@ -1180,7 +1225,11 @@ async def handle_moment_comment(role: Dict, event: AIEvent) -> AIResponse:
         role_data=role,
         post_content=post_content,
         post_author=post_author,
-        reply_to=reply_to
+        reply_to=reply_to,
+        reply_to_name=reply_to_name,
+        comment_thread=comment_thread,
+        history=history,
+        core_memory_context=core_memory_context or None,
     )
     
     if not result["success"]:
