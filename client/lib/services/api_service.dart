@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
@@ -161,7 +160,9 @@ class ApiService {
       // 仅在 debug 构建打印会话内容；debugPrint 在 release 不会被自动移除，
       // 直接打印 system prompt / 用户消息 / 历史 / AI 回复会在生产日志泄漏隐私。
       if (kDebugMode) {
-        debugPrint('═══════════════════════════════════════════════════════════');
+        debugPrint(
+          '═══════════════════════════════════════════════════════════',
+        );
         debugPrint(
           '🔷 API Request: role=${role.name}, messages=${messages.length}',
         );
@@ -180,7 +181,9 @@ class ApiService {
         debugPrint(
           '⚙️ Params: temp=${role.temperature}, freq=${role.frequencyPenalty}, pres=${role.presencePenalty}',
         );
-        debugPrint('───────────────────────────────────────────────────────────');
+        debugPrint(
+          '───────────────────────────────────────────────────────────',
+        );
       }
 
       final response = await SecureBackendClient.postRawJson(
@@ -283,20 +286,18 @@ class ApiService {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     try {
-      final wsData = await SecureWebSocketClient.instance.request(
-        'ai_event',
-        {
-          'event': {
-            'role_id': roleId,
-            'event_type': eventType,
-            'content': content,
-            'context': context ?? <String, dynamic>{},
-          },
+      final wsData = await SecureWebSocketClient.instance.request('ai_event', {
+        'event': {
+          'role_id': roleId,
+          'event_type': eventType,
+          'content': content,
+          'context': context ?? <String, dynamic>{},
         },
-        timeout: timeout,
-      );
+      }, timeout: timeout);
 
-      debugPrint('ApiService: Backend AI call via websocket - $eventType for $roleId');
+      debugPrint(
+        'ApiService: Backend AI call via websocket - $eventType for $roleId',
+      );
       if (wsData['success'] == true && wsData['content'] != null) {
         final rawMetadata = wsData['metadata'];
         final metadata = rawMetadata is Map
@@ -439,18 +440,15 @@ class ApiService {
         mimeType: mimeType,
       );
 
-      final response = await SecureWebSocketClient.instance.request(
-        'chat_vision',
-        {
-          'upload_id': uploadId,
-          'mime_type': mimeType,
-          'user_prompt': userPrompt,
-          'system_prompt': rolePersona,
-          'role_id': roleId,
-          'run_mode': SettingsService.instance.visionMode,
-        },
-        timeout: const Duration(seconds: 120),
-      );
+      final response = await SecureWebSocketClient.instance
+          .request('chat_vision', {
+            'upload_id': uploadId,
+            'mime_type': mimeType,
+            'user_prompt': userPrompt,
+            'system_prompt': rolePersona,
+            'role_id': roleId,
+            'run_mode': SettingsService.instance.visionMode,
+          }, timeout: const Duration(seconds: 120));
       return response['reply']?.toString() ?? '图片识别失败';
     } catch (e) {
       debugPrint('chatWithImage error: $e');
@@ -468,16 +466,13 @@ class ApiService {
 
     final uploadId = _buildVisionUploadId(imageBytes);
     final totalChunks = (imageBytes.length / _visionChunkSize).ceil();
-    final initResp = await SecureWebSocketClient.instance.request(
-      'vision_upload_init',
-      {
-        'upload_id': uploadId,
-        'total_chunks': totalChunks,
-        'mime_type': mimeType,
-        'file_size': imageBytes.length,
-      },
-      timeout: const Duration(seconds: 20),
-    );
+    final initResp = await SecureWebSocketClient.instance
+        .request('vision_upload_init', {
+          'upload_id': uploadId,
+          'total_chunks': totalChunks,
+          'mime_type': mimeType,
+          'file_size': imageBytes.length,
+        }, timeout: const Duration(seconds: 20));
 
     final resolvedUploadId = initResp['upload_id']?.toString() ?? '';
     if (resolvedUploadId.isEmpty) {
@@ -512,30 +507,27 @@ class ApiService {
         while (true) {
           attempt += 1;
           try {
-            await SecureWebSocketClient.instance.request(
-              'vision_upload_chunk',
-              {
-                'upload_id': resolvedUploadId,
-                'chunk_index': chunkIndex,
-                'chunk_base64': chunkBase64,
-              },
-              timeout: const Duration(seconds: 20),
-            );
+            await SecureWebSocketClient.instance
+                .request('vision_upload_chunk', {
+                  'upload_id': resolvedUploadId,
+                  'chunk_index': chunkIndex,
+                  'chunk_base64': chunkBase64,
+                }, timeout: const Duration(seconds: 20));
             break;
           } catch (e) {
             if (attempt >= _visionChunkMaxRetry) {
-              throw Exception('chunk upload failed at index=$chunkIndex, attempts=$attempt, error=$e');
+              throw Exception(
+                'chunk upload failed at index=$chunkIndex, attempts=$attempt, error=$e',
+              );
             }
             await Future<void>.delayed(Duration(milliseconds: 250 * attempt));
           }
         }
       }
 
-      await SecureWebSocketClient.instance.request(
-        'vision_upload_commit',
-        {'upload_id': resolvedUploadId},
-        timeout: const Duration(seconds: 30),
-      );
+      await SecureWebSocketClient.instance.request('vision_upload_commit', {
+        'upload_id': resolvedUploadId,
+      }, timeout: const Duration(seconds: 30));
     }
 
     return resolvedUploadId;
@@ -552,7 +544,10 @@ class ApiService {
     return await file.readAsBytes();
   }
 
-  static (List<int>, String) _compressImageBytes(List<int> rawBytes, String imagePath) {
+  static (List<int>, String) _compressImageBytes(
+    List<int> rawBytes,
+    String imagePath,
+  ) {
     // 小图直接透传，避免不必要的处理
     const smallImageThreshold = 350 * 1024;
     final ext = imagePath.split('.').last.toLowerCase();
@@ -570,14 +565,20 @@ class ApiService {
       // 约束最大边，降低上传体积与后端处理时延
       const maxSide = 1280;
       final resized = (decoded.width > maxSide || decoded.height > maxSide)
-          ? img.copyResize(decoded, width: decoded.width >= decoded.height ? maxSide : null, height: decoded.height > decoded.width ? maxSide : null)
+          ? img.copyResize(
+              decoded,
+              width: decoded.width >= decoded.height ? maxSide : null,
+              height: decoded.height > decoded.width ? maxSide : null,
+            )
           : decoded;
 
       // 统一转 jpeg，质量折中到 78，显著减少体积
       final jpgBytes = img.encodeJpg(resized, quality: 78);
       return (jpgBytes, 'image/jpeg');
     } catch (e) {
-      debugPrint('ApiService: image compress failed, fallback to raw bytes: $e');
+      debugPrint(
+        'ApiService: image compress failed, fallback to raw bytes: $e',
+      );
       return (rawBytes, fallbackMimeType);
     }
   }
@@ -599,7 +600,10 @@ class ApiResponse {
     this.error,
   });
 
-  factory ApiResponse.success(String content, {Map<String, dynamic>? metadata}) {
+  factory ApiResponse.success(
+    String content, {
+    Map<String, dynamic>? metadata,
+  }) {
     return ApiResponse._(success: true, content: content, metadata: metadata);
   }
 
@@ -653,11 +657,7 @@ class ChatSubmitResponse {
   }
 
   factory ChatSubmitResponse.error(String error) {
-    return ChatSubmitResponse._(
-      success: false,
-      status: 'error',
-      error: error,
-    );
+    return ChatSubmitResponse._(success: false, status: 'error', error: error);
   }
 
   factory ChatSubmitResponse.transportError(String error) {

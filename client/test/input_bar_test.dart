@@ -8,15 +8,13 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: InputBar(
-            sendEnabled: false,
-            onSend: (text) => sentText = text,
-          ),
+          body: InputBar(sendEnabled: false, onSend: (text) => sentText = text),
         ),
       ),
     );
 
     await tester.enterText(find.byType(TextField), 'wait for reply');
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('send_button')));
     await tester.pump();
 

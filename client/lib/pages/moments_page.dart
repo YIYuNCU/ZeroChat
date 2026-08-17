@@ -65,9 +65,11 @@ class _MomentsPageState extends State<MomentsPage> {
   Widget build(BuildContext context) {
     // 归档角色的动态不在朋友圈显示（用户本人 authorId == 'me' 始终保留）。
     final posts = MomentsService.instance.posts
-        .where((p) =>
-            p.authorId == 'me' ||
-            !(RoleService.getRoleById(p.authorId)?.archived ?? false))
+        .where(
+          (p) =>
+              p.authorId == 'me' ||
+              !(RoleService.getRoleById(p.authorId)?.archived ?? false),
+        )
         .toList();
     final statusBarHeight = MediaQuery.of(context).padding.top;
 
@@ -208,7 +210,7 @@ class _MomentsPageState extends State<MomentsPage> {
         fit: BoxFit.cover,
         width: double.infinity,
         height: 320,
-        errorBuilder: (_, __, ___) => fallback,
+        errorBuilder: (_, _, _) => fallback,
       );
     } else {
       return Image.network(
@@ -217,7 +219,7 @@ class _MomentsPageState extends State<MomentsPage> {
         fit: BoxFit.cover,
         width: double.infinity,
         height: 320,
-        errorBuilder: (_, __, ___) => fallback,
+        errorBuilder: (_, _, _) => fallback,
       );
     }
   }
@@ -385,7 +387,7 @@ class _MomentsPageState extends State<MomentsPage> {
                       width: 120,
                       height: 120,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => const SizedBox(),
+                      errorBuilder: (_, _, _) => const SizedBox(),
                     ),
                   ),
                 ],

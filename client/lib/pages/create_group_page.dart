@@ -144,7 +144,7 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
           width: 40,
           height: 40,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
+          errorBuilder: (_, _, _) =>
               _buildDefaultAvatar(role, colors[colorIndex]),
         ),
       );

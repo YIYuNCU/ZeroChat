@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import '../services/role_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
@@ -423,7 +422,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
           Text(label, style: const TextStyle(fontSize: 15)),
           Switch(
             value: value,
-            activeColor: const Color(0xFF07C160),
+            activeThumbColor: const Color(0xFF07C160),
             onChanged: onChanged,
           ),
         ],
@@ -446,7 +445,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
           ),
           Expanded(
             child: DropdownButtonFormField<String>(
-              value:
+              initialValue:
                   const {
                     'standalone',
                     'pre_model',
@@ -990,7 +989,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                     style: const TextStyle(fontSize: 16),
                   )
                 : DropdownButtonFormField<String>(
-                    value: _availableModels.contains(_chatModelController.text)
+                    initialValue:
+                        _availableModels.contains(_chatModelController.text)
                         ? _chatModelController.text
                         : null,
                     decoration: const InputDecoration(
@@ -1022,61 +1022,71 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
   Widget _buildModelProfiles() {
     final profiles = SettingsService.instance.modelProfiles;
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
-          child: Row(
-            children: [
-              const Expanded(
-                child: Text('本地配置档案', style: TextStyle(fontSize: 15)),
-              ),
-              TextButton.icon(
-                onPressed: _saveCurrentModelProfile,
-                icon: const Icon(Icons.bookmark_add_outlined, size: 18),
-                label: const Text('保存当前'),
-              ),
-            ],
-          ),
-        ),
-        if (profiles.isEmpty)
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                '可保存多组模型、API 地址和密钥，随时切换。',
-                style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
-              ),
-            ),
-          )
-        else
-          ...profiles.map(
-            (profile) => ListTile(
-              dense: true,
-              leading: Radio<String>(
-                value: profile.id,
-                groupValue: _selectedProfileId,
-                onChanged: (_) => _applyModelProfile(profile),
-              ),
-              title: Text(profile.name),
-              subtitle: Text(
-                '${profile.model}  ·  ${profile.apiUrl}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              trailing: IconButton(
-                tooltip: '删除配置档案',
-                icon: const Icon(Icons.delete_outline, size: 20),
-                onPressed: () async {
-                  await SettingsService.instance.deleteModelProfile(profile.id);
-                  if (mounted) setState(() {});
-                },
-              ),
-              onTap: () => _applyModelProfile(profile),
+    return RadioGroup<String>(
+      groupValue: _selectedProfileId,
+      onChanged: (profileId) {
+        if (profileId == null) {
+          return;
+        }
+        final profile = profiles.firstWhere(
+          (candidate) => candidate.id == profileId,
+        );
+        _applyModelProfile(profile);
+      },
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text('本地配置档案', style: TextStyle(fontSize: 15)),
+                ),
+                TextButton.icon(
+                  onPressed: _saveCurrentModelProfile,
+                  icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                  label: const Text('保存当前'),
+                ),
+              ],
             ),
           ),
-      ],
+          if (profiles.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '可保存多组模型、API 地址和密钥，随时切换。',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                ),
+              ),
+            )
+          else
+            ...profiles.map(
+              (profile) => ListTile(
+                dense: true,
+                leading: Radio<String>(value: profile.id),
+                title: Text(profile.name),
+                subtitle: Text(
+                  '${profile.model}  ·  ${profile.apiUrl}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: IconButton(
+                  tooltip: '删除配置档案',
+                  icon: const Icon(Icons.delete_outline, size: 20),
+                  onPressed: () async {
+                    await SettingsService.instance.deleteModelProfile(
+                      profile.id,
+                    );
+                    if (mounted) setState(() {});
+                  },
+                ),
+                onTap: () => _applyModelProfile(profile),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
@@ -1218,7 +1228,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                     style: const TextStyle(fontSize: 16),
                   )
                 : DropdownButtonFormField<String>(
-                    value: _visionModels.contains(_visionModelController.text)
+                    initialValue:
+                        _visionModels.contains(_visionModelController.text)
                         ? _visionModelController.text
                         : null,
                     decoration: const InputDecoration(
@@ -1305,7 +1316,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                     style: const TextStyle(fontSize: 16),
                   )
                 : DropdownButtonFormField<String>(
-                    value:
+                    initialValue:
                         _embeddingModels.contains(
                           _embeddingModelController.text,
                         )
@@ -1359,7 +1370,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                     style: const TextStyle(fontSize: 16),
                   )
                 : DropdownButtonFormField<String>(
-                    value: _intentModels.contains(_intentModelController.text)
+                    initialValue:
+                        _intentModels.contains(_intentModelController.text)
                         ? _intentModelController.text
                         : null,
                     decoration: const InputDecoration(

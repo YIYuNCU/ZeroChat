@@ -46,7 +46,8 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
               : await EmojiService.instance.getAiCategories(widget.roleId!))
         : await EmojiService.instance.getUserCategories();
 
-    final selected = _selectedCategory != null && categories.contains(_selectedCategory)
+    final selected =
+        _selectedCategory != null && categories.contains(_selectedCategory)
         ? _selectedCategory
         : (categories.isNotEmpty ? categories.first : null);
 
@@ -118,7 +119,10 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(context, controller.text.trim()),
             child: const Text('确定'),
@@ -154,7 +158,10 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
         title: const Text('删除分类'),
         content: Text('确定删除分类 "$targetCategory" 及其所有表情吗？'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             child: const Text('删除', style: TextStyle(color: Colors.red)),
@@ -170,23 +177,26 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
     final success = _aiMode
         ? (widget.roleId == null
               ? false
-              : await EmojiService.instance.deleteAiCategory(widget.roleId!, targetCategory))
+              : await EmojiService.instance.deleteAiCategory(
+                  widget.roleId!,
+                  targetCategory,
+                ))
         : await EmojiService.instance.deleteUserCategory(targetCategory);
 
     if (success) {
       await _loadData();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已删除分类: $targetCategory')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('已删除分类: $targetCategory')));
     }
   }
 
   Future<void> _uploadEmoji() async {
     if (_selectedCategory == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先创建并选择分类')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先创建并选择分类')));
       return;
     }
 
@@ -196,6 +206,9 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
       maxWidth: 1200,
     );
     if (picked == null) {
+      return;
+    }
+    if (!mounted) {
       return;
     }
 
@@ -228,11 +241,14 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
       if (confirmed != true) {
         return;
       }
+      if (!mounted) {
+        return;
+      }
       tag = tagController.text.trim();
       if (tag.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('用户表情必须填写标签')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('用户表情必须填写标签')));
         return;
       }
     }
@@ -266,7 +282,10 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
         title: const Text('删除表情'),
         content: const Text('确定删除该表情吗？'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             child: const Text('删除', style: TextStyle(color: Colors.red)),
@@ -289,9 +308,9 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
     if (success && _selectedCategory != null) {
       await _selectCategory(_selectedCategory!);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('表情已删除')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('表情已删除')));
     }
   }
 
@@ -423,19 +442,25 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
                     url,
                     headers: SecureBackendClient.authHeaders,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const Icon(Icons.broken_image),
+                    errorBuilder: (_, _, _) => const Icon(Icons.broken_image),
                   ),
                   if (!_aiMode && (emoji.tag ?? '').isNotEmpty)
                     Align(
                       alignment: Alignment.bottomCenter,
                       child: Container(
                         color: const Color(0xAA000000),
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 2,
+                        ),
                         child: Text(
                           emoji.tag!,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Colors.white, fontSize: 10),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                          ),
                         ),
                       ),
                     ),
@@ -494,7 +519,9 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
     for (final sticker in stickers) {
       try {
         final path = sticker.imagePath.trim();
-        if (path.isEmpty || path.startsWith('http://') || path.startsWith('https://')) {
+        if (path.isEmpty ||
+            path.startsWith('http://') ||
+            path.startsWith('https://')) {
           skipped++;
           continue;
         }
@@ -526,9 +553,7 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
     await _loadData();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('导入完成：成功 $success，跳过 $skipped，失败 $failed'),
-      ),
+      SnackBar(content: Text('导入完成：成功 $success，跳过 $skipped，失败 $failed')),
     );
   }
 }

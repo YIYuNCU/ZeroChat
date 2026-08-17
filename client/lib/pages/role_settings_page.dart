@@ -395,7 +395,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                     ),
                     Switch(
                       value: _allowWebSearch,
-                      activeColor: const Color(0xFF07C160),
+                      activeThumbColor: const Color(0xFF07C160),
                       onChanged: (v) => setState(() => _allowWebSearch = v),
                     ),
                   ],
@@ -434,7 +434,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                     ),
                     Switch(
                       value: _onebotEnabled,
-                      activeColor: const Color(0xFF07C160),
+                      activeThumbColor: const Color(0xFF07C160),
                       onChanged: (v) => setState(() => _onebotEnabled = v),
                     ),
                   ],
@@ -683,7 +683,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           ),
           Switch(
             value: value,
-            activeColor: const Color(0xFF07C160),
+            activeThumbColor: const Color(0xFF07C160),
             onChanged: onChanged,
           ),
         ],
@@ -952,7 +952,8 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                     textAlign: TextAlign.right,
                   )
                 : DropdownButtonFormField<String>(
-                    value: _availableAiModels.contains(_aiModelController.text)
+                    initialValue:
+                        _availableAiModels.contains(_aiModelController.text)
                         ? _aiModelController.text
                         : null,
                     decoration: const InputDecoration(
@@ -1001,7 +1002,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           ),
           Expanded(
             child: DropdownButtonFormField<String>(
-              value: _hasSelectedModelProfile ? _selectedModelProfileId : '',
+              initialValue: _hasSelectedModelProfile
+                  ? _selectedModelProfileId
+                  : '',
               isExpanded: true,
               decoration: const InputDecoration(
                 hintText: '选择 AI 接口设置中的档案',
@@ -1080,8 +1083,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         },
         includeAuth: false,
       ).timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200)
+      if (response.statusCode != 200) {
         throw Exception('HTTP ${response.statusCode}');
+      }
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final models =
           ((data['data'] as List?) ?? [])
@@ -1094,18 +1098,20 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       if (mounted) {
         setState(() {
           _availableAiModels = models;
-          if (models.isNotEmpty && !models.contains(_aiModelController.text))
+          if (models.isNotEmpty && !models.contains(_aiModelController.text)) {
             _aiModelController.text = models.first;
+          }
         });
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
+      }
     } finally {
       if (mounted) setState(() => _isLoadingAiModels = false);
     }

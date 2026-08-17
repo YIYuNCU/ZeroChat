@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/settings_service.dart';
 import '../services/secure_websocket_client.dart';
@@ -281,10 +280,7 @@ class _ProfilePageState extends State<ProfilePage> {
           final ext = selectedImagePath!.split('.').last.toLowerCase();
           final data = await SecureWebSocketClient.instance.request(
             'settings_avatar_upload',
-            {
-              'filename': 'avatar.$ext',
-              'content_base64': base64Encode(bytes),
-            },
+            {'filename': 'avatar.$ext', 'content_base64': base64Encode(bytes)},
           );
           newAvatarUrl = data['path'] as String?;
           newAvatarHash = data['hash'] as String?;

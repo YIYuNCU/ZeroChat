@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
+
 import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/stats_config.dart';
@@ -109,8 +110,7 @@ class ChatBubble extends StatelessWidget {
                       height: 14,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        valueColor:
-                            AlwaysStoppedAnimation<Color>(Colors.grey),
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.grey),
                       ),
                     ),
                   ),
@@ -184,9 +184,8 @@ class ChatBubble extends StatelessWidget {
             File(message.content),
             fit: BoxFit.cover,
             // 缩略图按显示上限解码，避免把全分辨率原图（最高 1920px）塞进图片缓存。
-            cacheWidth:
-                (200 * MediaQuery.of(context).devicePixelRatio).round(),
-            errorBuilder: (_, __, ___) => Container(
+            cacheWidth: (200 * MediaQuery.of(context).devicePixelRatio).round(),
+            errorBuilder: (_, _, _) => Container(
               width: 150,
               height: 100,
               color: Colors.grey[300],
@@ -555,7 +554,7 @@ class ChatBubble extends StatelessWidget {
                 fit: BoxFit.contain,
                 // 120px 显示上限 × 3（覆盖最高 DPR）解码，免全分辨率贴图。
                 cacheWidth: 360,
-                errorBuilder: (_, __, ___) => _buildStickerPlaceholder(emotion),
+                errorBuilder: (_, _, _) => _buildStickerPlaceholder(emotion),
               )
             : _buildStickerPlaceholder(emotion),
       ),
@@ -571,7 +570,7 @@ class ChatBubble extends StatelessWidget {
           File(localPath),
           fit: BoxFit.contain,
           cacheWidth: 360,
-          errorBuilder: (_, __, ___) => _buildStickerPlaceholder(emotion),
+          errorBuilder: (_, _, _) => _buildStickerPlaceholder(emotion),
         ),
       ),
     );
@@ -606,8 +605,8 @@ class ChatBubble extends StatelessWidget {
       fit: BoxFit.contain,
       // 120px 显示上限 × 3 解码，限制内存位图大小。
       memCacheWidth: 360,
-      placeholder: (_, __) => _buildStickerPlaceholder(emotion),
-      errorWidget: (_, __, ___) {
+      placeholder: (_, _) => _buildStickerPlaceholder(emotion),
+      errorWidget: (_, _, _) {
         final retryUrl = _buildBaseRetryUrl(imageUrl);
         if (retryUrl == null || retryUrl == imageUrl) {
           return _buildStickerPlaceholder(emotion);
@@ -618,8 +617,8 @@ class ChatBubble extends StatelessWidget {
           httpHeaders: SecureBackendClient.authHeaders,
           fit: BoxFit.contain,
           memCacheWidth: 360,
-          placeholder: (_, __) => _buildStickerPlaceholder(emotion),
-          errorWidget: (_, __, ___) => _buildStickerPlaceholder(emotion),
+          placeholder: (_, _) => _buildStickerPlaceholder(emotion),
+          errorWidget: (_, _, _) => _buildStickerPlaceholder(emotion),
           fadeInDuration: const Duration(milliseconds: 100),
         );
       },
@@ -679,6 +678,7 @@ class ChatBubble extends StatelessWidget {
   }
 
   /// 获取情绪对应的 emoji
+  // ignore: unused_element
   static String _getEmotionEmoji(String? emotion) {
     switch (emotion) {
       case 'happy':
@@ -895,8 +895,8 @@ class _TransferStickerContentState extends State<_TransferStickerContent> {
   void initState() {
     super.initState();
     _startResolution();
-    _reconnectSubscription =
-        SecureWebSocketClient.instance.onReconnectedStream.listen((_) {
+    _reconnectSubscription = SecureWebSocketClient.instance.onReconnectedStream
+        .listen((_) {
           _retryImmediately();
         });
   }
@@ -970,23 +970,7 @@ class _TransferStickerContentState extends State<_TransferStickerContent> {
     );
   }
 
-  Widget _buildPlaceholder(String? emotion) {
-    return Container(
-      width: 80,
-      height: 80,
-      decoration: BoxDecoration(
-        color: const Color(0xFFF5F5F5),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Center(
-        child: Text(
-          _getEmotionEmoji(emotion),
-          style: const TextStyle(fontSize: 40),
-        ),
-      ),
-    );
-  }
-
+  // ignore: unused_element
   static String _getEmotionEmoji(String? emotion) {
     switch (emotion) {
       case 'happy':

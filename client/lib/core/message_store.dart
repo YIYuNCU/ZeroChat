@@ -52,7 +52,6 @@ class MessageStore extends ChangeNotifier {
   /// 持久化写入防抖：内存与 UI 立即更新，落盘按 chat 合并到一个短窗口，
   /// 避免频繁收发消息时每条都全量重写 SharedPreferences 造成卡顿。
   final Map<String, Timer> _saveDebounceTimers = <String, Timer>{};
-  static const Duration _saveDebounceWindow = Duration(milliseconds: 500);
 
   /// 发件箱：用户消息后端同步的最大重试次数（首发之外）。
   static const int _syncMaxRetry = 4;
@@ -400,14 +399,19 @@ class MessageStore extends ChangeNotifier {
     return getMessageCount(chatId) > (_messages[chatId]?.length ?? 0);
   }
 
-  Future<int> loadOlderMessages(String chatId, {int count = historyPageSize}) async {
+  Future<int> loadOlderMessages(
+    String chatId, {
+    int count = historyPageSize,
+  }) async {
     await ensureLoaded(chatId);
     final resident = _messages[chatId]!;
     if (resident.isEmpty) return 0;
 
     final archive = await _readArchivedMessages(chatId);
     final firstResidentId = resident.first.id;
-    final firstResidentIndex = archive.indexWhere((m) => m.id == firstResidentId);
+    final firstResidentIndex = archive.indexWhere(
+      (m) => m.id == firstResidentId,
+    );
     if (firstResidentIndex <= 0) return 0;
 
     final start = (firstResidentIndex - count)
@@ -565,40 +569,44 @@ class MessageStore extends ChangeNotifier {
       try {
         return v2.map(Message.fromStorageString).toList();
       } catch (e) {
-        debugPrint('MessageStore: Error reading legacy v2 messages for $chatId: $e');
+        debugPrint(
+          'MessageStore: Error reading legacy v2 messages for $chatId: $e',
+        );
       }
     }
 
     final legacy = StorageService.getStringList('messages_$chatId');
     if (legacy == null || legacy.isEmpty) return <Message>[];
     return legacy.map((json) {
-        final parts = json.split('|||');
-        if (parts.length >= 4) {
-          return Message(
-            id: parts[0],
-            senderId: parts[1],
-            receiverId: parts[2],
-            content: parts[3],
-            timestamp:
-                DateTime.tryParse(parts.length > 4 ? parts[4] : '') ??
-                DateTime.now(),
-          );
-        }
+      final parts = json.split('|||');
+      if (parts.length >= 4) {
         return Message(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          senderId: 'unknown',
-          receiverId: 'unknown',
-          content: json,
-          timestamp: DateTime.now(),
+          id: parts[0],
+          senderId: parts[1],
+          receiverId: parts[2],
+          content: parts[3],
+          timestamp:
+              DateTime.tryParse(parts.length > 4 ? parts[4] : '') ??
+              DateTime.now(),
         );
-      }).toList();
+      }
+      return Message(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        senderId: 'unknown',
+        receiverId: 'unknown',
+        content: json,
+        timestamp: DateTime.now(),
+      );
+    }).toList();
   }
 
   Future<Directory> _archiveDirectory() async {
     final cached = _archiveDirectoryPath;
     if (cached != null) return Directory(cached);
     final documents = await getApplicationDocumentsDirectory();
-    final directory = Directory('${documents.path}${Platform.pathSeparator}message_archives');
+    final directory = Directory(
+      '${documents.path}${Platform.pathSeparator}message_archives',
+    );
     if (!await directory.exists()) {
       await directory.create(recursive: true);
     }
@@ -617,15 +625,18 @@ class MessageStore extends ChangeNotifier {
     if (!await file.exists()) return <Message>[];
     final messages = <Message>[];
     try {
-      await for (final line in file
-          .openRead()
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())) {
+      await for (final line
+          in file
+              .openRead()
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())) {
         if (line.trim().isEmpty) continue;
         try {
           messages.add(Message.fromStorageString(line));
         } catch (e) {
-          debugPrint('MessageStore: skipped invalid archive record for $chatId: $e');
+          debugPrint(
+            'MessageStore: skipped invalid archive record for $chatId: $e',
+          );
         }
       }
     } catch (e) {
@@ -634,11 +645,19 @@ class MessageStore extends ChangeNotifier {
     return messages;
   }
 
-  Future<void> _writeArchivedMessages(String chatId, List<Message> messages) async {
+  Future<void> _writeArchivedMessages(
+    String chatId,
+    List<Message> messages,
+  ) async {
     final file = await _archiveFile(chatId);
     final temp = File('${file.path}.tmp');
-    final contents = messages.map((message) => message.toStorageString()).join('\n');
-    await temp.writeAsString(contents.isEmpty ? '' : '$contents\n', flush: true);
+    final contents = messages
+        .map((message) => message.toStorageString())
+        .join('\n');
+    await temp.writeAsString(
+      contents.isEmpty ? '' : '$contents\n',
+      flush: true,
+    );
     try {
       await temp.rename(file.path);
     } on FileSystemException {
@@ -654,10 +673,13 @@ class MessageStore extends ChangeNotifier {
     await _persistArchiveIndex();
   }
 
-  Future<void> _appendMessagesToArchive(String chatId, List<Message> messages) async {
+  Future<void> _appendMessagesToArchive(
+    String chatId,
+    List<Message> messages,
+  ) async {
     final file = await _archiveFile(chatId);
     await file.writeAsString(
-      messages.map((message) => message.toStorageString()).join('\n') + '\n',
+      '${messages.map((message) => message.toStorageString()).join('\n')}\n',
       mode: FileMode.append,
       flush: true,
     );
@@ -666,7 +688,10 @@ class MessageStore extends ChangeNotifier {
     await _persistArchiveIndex();
   }
 
-  Future<void> _replaceArchivedMessage(String chatId, Message replacement) async {
+  Future<void> _replaceArchivedMessage(
+    String chatId,
+    Message replacement,
+  ) async {
     final archive = await _readArchivedMessages(chatId);
     final index = archive.indexWhere((message) => message.id == replacement.id);
     if (index < 0) return;
@@ -697,7 +722,10 @@ class MessageStore extends ChangeNotifier {
   }
 
   Future<void> _persistArchiveIndex() async {
-    await StorageService.setStringList(_archiveChatIdsKey, _knownChatIds.toList());
+    await StorageService.setStringList(
+      _archiveChatIdsKey,
+      _knownChatIds.toList(),
+    );
     await StorageService.setJson(_archiveCountsKey, _messageCounts);
   }
 
@@ -708,7 +736,9 @@ class MessageStore extends ChangeNotifier {
       _saveDebounceTimers.remove(chatId)?.cancel();
     }
     if (pendingChatIds.isNotEmpty) {
-      debugPrint('MessageStore: cancelled ${pendingChatIds.length} obsolete save timers');
+      debugPrint(
+        'MessageStore: cancelled ${pendingChatIds.length} obsolete save timers',
+      );
     }
   }
 
@@ -749,9 +779,9 @@ class MessageStore extends ChangeNotifier {
           continue;
         }
 
-        final previousIds = (await _readArchivedMessages(chatId))
-            .map((message) => message.id)
-            .toSet();
+        final previousIds = (await _readArchivedMessages(
+          chatId,
+        )).map((message) => message.id).toSet();
         final messages = <Message>[];
         for (final item in rawMessages) {
           if (item is! Map) {

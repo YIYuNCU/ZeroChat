@@ -286,7 +286,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               trailing: Switch(
                 value: _currentRole.proactiveConfig.enabled,
                 onChanged: (value) => _toggleProactiveMessage(value),
-                activeColor: const Color(0xFF07C160),
+                activeThumbColor: const Color(0xFF07C160),
               ),
             ),
             if (_currentRole.proactiveConfig.enabled) ...[
@@ -313,9 +313,17 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
             const Divider(height: 1, indent: 16),
             _buildItem(
               title: '安静时间',
-              trailing: Text(
-                _formatQuietPeriods(_currentRole.proactiveConfig.quietPeriods),
-                style: const TextStyle(color: Color(0xFF888888)),
+              trailing: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 160),
+                child: Text(
+                  _formatQuietPeriods(
+                    _currentRole.proactiveConfig.quietPeriods,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.end,
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
               ),
               onTap: _editQuietPeriods,
             ),
@@ -331,7 +339,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               trailing: Switch(
                 value: _currentRole.followupConfig.enabled,
                 onChanged: (value) => _toggleFollowup(value),
-                activeColor: const Color(0xFF07C160),
+                activeThumbColor: const Color(0xFF07C160),
               ),
             ),
             if (_currentRole.followupConfig.enabled) ...[
@@ -1784,6 +1792,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   /// 编辑核心记忆总结轮数（角色独立）
+  // ignore: unused_element
   void _editMemoryRounds() async {
     int value = _currentRole.summaryEveryNRounds;
 
@@ -1863,6 +1872,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               await MessageStore.instance.clearMessages(widget.chatId);
               MemoryService.clearShortTermMemory(widget.chatId);
               widget.onClearHistory?.call();
+              if (!context.mounted) {
+                return;
+              }
               Navigator.pop(context);
               Navigator.pop(context);
             },
@@ -1882,6 +1894,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     );
     if (result != null) {
       await RoleService.updateRole(result);
+      if (!mounted) {
+        return;
+      }
       setState(() {
         _currentRole = result;
       });

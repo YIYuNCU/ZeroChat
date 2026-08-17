@@ -375,8 +375,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     )
                   : TextButton(
                       onPressed: () async {
-                        await BackgroundRuntimeService
-                            .requestBatteryOptimizationExemption();
+                        await BackgroundRuntimeService.requestBatteryOptimizationExemption();
                         await _refreshBatteryExemption();
                       },
                       child: const Text(
@@ -444,7 +443,7 @@ class _SettingsPageState extends State<SettingsPage> {
           width: 40,
           height: 40,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _buildBrokenImage(),
+          errorBuilder: (_, _, _) => _buildBrokenImage(),
         ),
       );
     } else {
@@ -456,7 +455,7 @@ class _SettingsPageState extends State<SettingsPage> {
           width: 40,
           height: 40,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _buildBrokenImage(),
+          errorBuilder: (_, _, _) => _buildBrokenImage(),
         ),
       );
     }

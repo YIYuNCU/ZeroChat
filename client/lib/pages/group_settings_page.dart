@@ -189,7 +189,7 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
                   );
                   _loadGroup();
                 },
-                activeColor: const Color(0xFF07C160),
+                activeThumbColor: const Color(0xFF07C160),
               ),
             ),
             const Divider(height: 1, indent: 16),
@@ -991,7 +991,7 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
               Navigator.pop(context);
               await GroupChatService.deleteGroup(_group!.id);
               ChatListService.instance.removeFromList(_group!.id);
-              if (mounted) {
+              if (context.mounted) {
                 Navigator.pop(context, true);
               }
             },

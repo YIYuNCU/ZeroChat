@@ -391,14 +391,12 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
       final bytes = await pickedFile.readAsBytes();
       final ext = pickedFile.path.split('.').last.toLowerCase();
 
-      final data = await SecureWebSocketClient.instance.request(
-        'roles_avatar_upload',
-        {
-          'role_id': _role.id,
-          'filename': 'avatar.$ext',
-          'content_base64': base64Encode(bytes),
-        },
-      );
+      final data = await SecureWebSocketClient.instance
+          .request('roles_avatar_upload', {
+            'role_id': _role.id,
+            'filename': 'avatar.$ext',
+            'content_base64': base64Encode(bytes),
+          });
       final avatarUrl = data['avatar_url'] as String?;
       final avatarHash = data['avatar_hash'] as String?;
 
@@ -451,8 +449,14 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
       context,
       MaterialPageRoute(builder: (context) => RoleSettingsPage(role: _role)),
     );
+    if (!mounted) {
+      return;
+    }
     if (result != null) {
       await RoleService.updateRole(result);
+      if (!mounted) {
+        return;
+      }
       setState(() {
         _role = result;
       });
@@ -474,7 +478,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
             onPressed: () async {
               // deleteRole 已统一清理短期记忆、聊天记录与聊天列表
               await RoleService.deleteRole(_role.id);
-              if (mounted) {
+              if (context.mounted) {
                 Navigator.pop(context); // 关闭对话框
                 Navigator.pop(context, true); // 返回通讯录
               }

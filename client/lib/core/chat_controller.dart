@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 import '../models/message.dart';
 import '../models/role.dart';
 import '../models/chat_context.dart';
-import '../models/group_chat.dart';
 import '../services/api_service.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';

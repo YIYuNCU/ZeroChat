@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'pages/chat_list_page.dart';
 import 'pages/contacts_page.dart';
@@ -103,12 +102,15 @@ Future<void> _initServicesInBackground() async {
   RealtimeSyncService.init();
   await MomentsScheduler.instance.init();
   unawaited(
-    SecureWebSocketClient.instance.ensureConnected().then((_) {
-      // 连接就绪后补齐上次会话遗留（弱网漏收/进程被杀）的异步聊天回复。
-      return ChatController.instance.startPushRecovery();
-    }).catchError((Object e) {
-      debugPrint('⚠️ startPushRecovery failed: $e');
-    }),
+    SecureWebSocketClient.instance
+        .ensureConnected()
+        .then((_) {
+          // 连接就绪后补齐上次会话遗留（弱网漏收/进程被杀）的异步聊天回复。
+          return ChatController.instance.startPushRecovery();
+        })
+        .catchError((Object e) {
+          debugPrint('⚠️ startPushRecovery failed: $e');
+        }),
   );
 
   // ===== 网络同步（静默后台，不阻塞任何 UI） =====
@@ -477,6 +479,9 @@ class _MainPageState extends State<MainPage> {
         _buildMenuItem(Icons.person_add, '添加朋友'),
       ],
     ).then((value) {
+      if (!context.mounted) {
+        return;
+      }
       if (value == '发起群聊') {
         _navigateToCreateGroup();
       } else if (value == '添加朋友') {
