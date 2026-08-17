@@ -1,277 +1,33 @@
 import 'dart:io';
-import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import '../models/role.dart';
 import 'settings_service.dart';
-import 'secure_backend_client.dart';
 import 'secure_websocket_client.dart';
 
-/// API 服务
-/// 用于调用第三方 AI API（支持 OpenAI 兼容接口）
+/// 后端 AI 与图片上传服务。
 class ApiService {
-  // 聊天 API 配置（优先使用 SettingsService 的配置）
-  static String _baseUrl = 'https://api.openai.com/v1';
-  static String? _apiKey;
-  static String _model = 'gpt-3.5-turbo';
-
-  /// 最大上下文轮数（每轮包含用户消息和AI回复）
-  static int maxContextRounds = 60;
   static const int _visionChunkSize = 64 * 1024;
   static const int _visionChunkMaxRetry = 3;
-  static bool _directBypassAuthorized = false;
-
-  /// 授权下一次前端直连请求（仅生效一次）
-  static void authorizeNextDirectBypass() {
-    _directBypassAuthorized = true;
-  }
-
-  /// 获取当前使用的 API URL
-  static String get _effectiveUrl {
-    final settingsUrl = SettingsService.instance.chatApiUrl;
-    return settingsUrl.isNotEmpty ? settingsUrl : _baseUrl;
-  }
-
-  /// 获取当前使用的 API Key
-  static String? get _effectiveKey {
-    final settingsKey = SettingsService.instance.chatApiKey;
-    return settingsKey.isNotEmpty ? settingsKey : _apiKey;
-  }
-
-  /// 获取当前使用的模型
-  static String get _effectiveModel {
-    final settingsModel = SettingsService.instance.chatModel;
-    return settingsModel.isNotEmpty ? settingsModel : _model;
-  }
-
-  /// 配置聊天 API（备用配置，优先使用 SettingsService）
-  static void configure({
-    required String baseUrl,
-    required String apiKey,
-    String model = 'gpt-3.5-turbo',
-    int maxRounds = 60,
-  }) {
-    _baseUrl = baseUrl;
-    _apiKey = apiKey;
-    _model = model;
-    maxContextRounds = maxRounds;
-    debugPrint('ApiService configured: $_baseUrl, model: $_model');
-  }
-
-  /// 设置 API Key
-  static void setApiKey(String key) {
-    _apiKey = key;
-  }
-
-  /// 设置 API 地址
-  static void setBaseUrl(String url) {
-    _baseUrl = url;
-  }
-
-  /// 设置模型
-  static void setModel(String model) {
-    _model = model;
-  }
 
   /// 发送聊天消息到 AI 接口（使用角色参数）
   /// [message] 用户当前发送的消息
-  /// [role] 当前使用的角色（包含 systemPrompt 和参数）
-  /// [history] 对话历史
-  /// [coreMemory] 核心记忆内容
-  /// [isGroup] 是否为群聊
+  /// [role] 当前使用的已保存角色。
   static Future<ApiResponse> sendChatMessageWithRole({
     required String message,
     required Role role,
-    List<Map<String, String>>? history,
-    List<String>? coreMemory,
-    bool isGroup = false,
-    bool preferBackend = true,
   }) async {
-    if (preferBackend && role.id != 'temp' && _backendUrl.isNotEmpty) {
-      final backendResponse = await sendChatViaBackend(
-        roleId: role.id,
-        message: message,
-      );
-      if (backendResponse.success && backendResponse.content != null) {
-        debugPrint('ApiService: sendChatMessageWithRole via backend');
-        return backendResponse;
-      }
-      debugPrint(
-        'ApiService: backend-first failed, fallback to direct API: ${backendResponse.error}',
-      );
+    if (role.id == 'temp') {
+      return ApiResponse.error('后端聊天请求必须使用已保存的角色');
     }
-
-    return sendChatMessageWithRoleDirect(
+    return sendChatViaBackend(
+      roleId: role.id,
       message: message,
-      role: role,
-      history: history,
-      coreMemory: coreMemory,
-      isGroup: isGroup,
     );
   }
-
-  /// 直连 AI 接口（用于后端不可用时显式回退）
-  static Future<ApiResponse> sendChatMessageWithRoleDirect({
-    required String message,
-    required Role role,
-    List<Map<String, String>>? history,
-    List<String>? coreMemory,
-    bool isGroup = false,
-    bool requireManualConfirmation = true,
-  }) async {
-    if (requireManualConfirmation && !_directBypassAuthorized) {
-      return ApiResponse.error('已拦截前端直连请求，请先手动确认后重试');
-    }
-
-    _directBypassAuthorized = false;
-
-    // 检查 API Key
-    final apiKey = _effectiveKey;
-    if (apiKey == null || apiKey.isEmpty) {
-      return ApiResponse.error('请先在"我"->"AI接口设置"中配置 API Key');
-    }
-
-    try {
-      // 构建消息列表
-      final List<Map<String, String>> messages = [];
-
-      // 使用 SettingsService 构建完整的系统提示词（包含全局 base prompt）
-      String fullSystemPrompt = SettingsService.instance.buildSystemPrompt(
-        rolePrompt: role.systemPrompt,
-        isGroup: isGroup,
-      );
-
-      // 添加核心记忆
-      if (coreMemory != null && coreMemory.isNotEmpty) {
-        fullSystemPrompt += '\n\n[核心记忆 - 用户的重要信息]\n${coreMemory.join('\n')}';
-      }
-      messages.add({'role': 'system', 'content': fullSystemPrompt});
-
-      // 添加对话历史
-      if (history != null) {
-        messages.addAll(history);
-      }
-
-      // 添加当前用户消息
-      messages.add({'role': 'user', 'content': message});
-
-      // ========== 详细调试日志 ==========
-      // 仅在 debug 构建打印会话内容；debugPrint 在 release 不会被自动移除，
-      // 直接打印 system prompt / 用户消息 / 历史 / AI 回复会在生产日志泄漏隐私。
-      if (kDebugMode) {
-        debugPrint(
-          '═══════════════════════════════════════════════════════════',
-        );
-        debugPrint(
-          '🔷 API Request: role=${role.name}, messages=${messages.length}',
-        );
-        debugPrint(
-          '📝 System Prompt: ${fullSystemPrompt.length > 200 ? '${fullSystemPrompt.substring(0, 200)}...' : fullSystemPrompt}',
-        );
-        debugPrint('💬 User Message: $message');
-        if (history != null && history.isNotEmpty) {
-          debugPrint('📜 History: ${history.length} messages');
-          for (var i = 0; i < history.length && i < 3; i++) {
-            debugPrint(
-              '   └─ ${history[i]['role']}: ${history[i]['content']?.toString().substring(0, history[i]['content']!.length > 50 ? 50 : history[i]['content']!.length)}...',
-            );
-          }
-        }
-        debugPrint(
-          '⚙️ Params: temp=${role.temperature}, freq=${role.frequencyPenalty}, pres=${role.presencePenalty}',
-        );
-        debugPrint(
-          '───────────────────────────────────────────────────────────',
-        );
-      }
-
-      final response = await SecureBackendClient.postRawJson(
-        '$_effectiveUrl/chat/completions',
-        headers: {'Authorization': 'Bearer $apiKey'},
-        includeAuth: false,
-        // LLM 延迟较高，放宽超时到 60s；非幂等，绝不自动重试（避免重复生成/计费）。
-        timeout: const Duration(seconds: 60),
-        body: {
-          'model': _effectiveModel,
-          'messages': messages,
-          'temperature': role.temperature,
-          'top_p': role.topP,
-          'frequency_penalty': role.frequencyPenalty,
-          'presence_penalty': role.presencePenalty,
-          'max_tokens': 2000,
-        },
-      );
-
-      debugPrint('📡 API Response: ${response.statusCode}');
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final content = data['choices']?[0]?['message']?['content'] as String?;
-        if (content != null) {
-          if (kDebugMode) {
-            debugPrint(
-              '🤖 AI Response: ${content.length > 300 ? '${content.substring(0, 300)}...' : content}',
-            );
-            debugPrint(
-              '═══════════════════════════════════════════════════════════',
-            );
-          }
-          return ApiResponse.success(content.trim());
-        }
-        return ApiResponse.error('AI 返回内容为空');
-      } else {
-        if (kDebugMode) {
-          debugPrint('❌ API Error: ${response.body}');
-          debugPrint(
-            '═══════════════════════════════════════════════════════════',
-          );
-        }
-        return ApiResponse.error('API 请求失败 (${response.statusCode})');
-      }
-    } catch (e) {
-      debugPrint('❌ API Exception: $e');
-      debugPrint('═══════════════════════════════════════════════════════════');
-      return ApiResponse.error('网络错误: $e');
-    }
-  }
-
-  /// 发送聊天消息（不使用角色，使用默认参数）
-  static Future<ApiResponse> sendChatMessage({
-    required String message,
-    String? systemPrompt,
-    List<Map<String, String>>? history,
-    List<String>? coreMemory,
-  }) async {
-    // 创建临时角色使用默认参数
-    final tempRole = Role(
-      id: 'temp',
-      name: 'Temp',
-      systemPrompt: systemPrompt ?? '你是一个友好的AI助手。',
-    );
-    return sendChatMessageWithRole(
-      message: message,
-      role: tempRole,
-      history: history,
-      coreMemory: coreMemory,
-    );
-  }
-
-  /// 快速发送消息（不带历史）
-  static Future<ApiResponse> quickChat(String message) async {
-    return sendChatMessage(message: message);
-  }
-
-  /// 获取当前配置的模型
-  static String get currentModel => _model;
-
-  /// 检查 API 是否已配置
-  static bool get isConfigured => _apiKey != null && _apiKey!.isNotEmpty;
 
   // ========== 后端集成 ==========
-
-  /// 获取后端 URL
-  static String get _backendUrl => SettingsService.instance.backendUrl;
 
   /// 通过后端调用 AI（统一入口）
   /// [roleId] 角色 ID

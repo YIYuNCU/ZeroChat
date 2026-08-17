@@ -68,7 +68,6 @@ client/
 │   │   ├── emoji_manager_page.dart   # Emoji/sticker management
 │   │   ├── favorites_page.dart       # Favorites list
 │   │   ├── favorite_detail_page.dart # Favorite detail view
-│   │   ├── global_prompts_page.dart  # Global system prompts
 │   │   ├── task_manager_page.dart    # Scheduled task management
 │   │   └── ...
 │   ├── services/                 # I/O services
@@ -109,6 +108,8 @@ client/
 ```
 
 ### FastAPI Server (`server/`)
+
+The legacy standalone chat API module is no longer registered. Legacy data-file readers and the `migrate_messages_to_short_term.py` utility remain supported for data compatibility.
 ```
 server/
 ├── main.py                   # Server entry — FastAPI app, config, CORS, lifecycle, routes
@@ -117,7 +118,6 @@ server/
 ├── runtime/                  # Runtime files (server logs, auto-generated)
 ├── routers/                  # API route handlers
 │   ├── ai_behavior.py        # Unified AI behavior endpoint (chat, moments, tasks, proactive)
-│   ├── chat.py               # Chat message API
 │   ├── roles.py              # Role CRUD API
 │   ├── moments.py            # Moments (朋友圈) API
 │   ├── tasks.py              # Scheduled tasks API

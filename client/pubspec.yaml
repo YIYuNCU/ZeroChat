@@ -51,9 +51,6 @@ dependencies:
   # Image picker
   image_picker: ^1.0.7
   
-  # HTTP multipart support
-  http_parser: ^4.0.2
-  
   # Permission handling
   permission_handler: ^11.3.0
   

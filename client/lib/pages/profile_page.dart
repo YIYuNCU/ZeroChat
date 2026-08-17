@@ -6,7 +6,6 @@ import '../services/settings_service.dart';
 import '../services/secure_websocket_client.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'api_settings_page.dart';
-import 'global_prompts_page.dart';
 import 'favorites_page.dart';
 import 'settings_page.dart';
 
@@ -55,19 +54,6 @@ class _ProfilePageState extends State<ProfilePage> {
               title: 'AI 接口设置',
               subtitle: _getApiStatusText(),
               onTap: () => _navigateTo(const ApiSettingsPage()),
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 全局提示词
-          _buildSection([
-            _buildItem(
-              icon: Icons.edit_note,
-              iconColor: const Color(0xFFFFB347),
-              title: '全局提示词',
-              subtitle: 'Base / Group / Memory',
-              onTap: () => _navigateTo(const GlobalPromptsPage()),
             ),
           ]),
 

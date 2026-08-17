@@ -76,7 +76,7 @@ validate_security_config(CONFIG)
 
 from core.lifecycle import create_lifespan
 from core.middleware import PathWhitelistMiddleware, RequestLoggingMiddleware, SecurityMiddleware
-from routers import ai_behavior, chat, moments, onebot, roles, settings, tasks
+from routers import ai_behavior, moments, onebot, roles, settings, tasks
 from services import scheduler_service
 from transport.file_routes import create_files_router
 from transport.push_hub import configure_push_hub
@@ -129,7 +129,6 @@ app.add_middleware(
 app.add_middleware(PathWhitelistMiddleware, logger=logger)
 
 # 注册业务路由
-app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(roles.router, prefix="/api", tags=["Roles"])
 app.include_router(moments.router, prefix="/api", tags=["Moments"])
 app.include_router(tasks.router, prefix="/api", tags=["Tasks"])

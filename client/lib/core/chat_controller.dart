@@ -544,9 +544,8 @@ class ChatController extends ChangeNotifier {
       // 显示 typing
       await _showTypingWithDelay(chatId, isGroup: isGroup);
 
-      // 调用 vision API（包含 Base Prompt 以遵循全局规则）
-      final systemPrompt =
-          '${SettingsService.instance.basePrompt}\n\n${role.systemPrompt}';
+      // 图片识别遵循当前角色自身的提示词。
+      final systemPrompt = role.systemPrompt;
       final aiReply = await ApiService.chatWithImage(
         imagePath: imagePath,
         userPrompt:

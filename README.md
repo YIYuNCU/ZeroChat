@@ -118,9 +118,8 @@ zerochat/
     │   ├── lifecycle.py             # 启动/关闭生命周期钩子
     │   ├── middleware.py            # 中间件（请求日志、安全鉴权）
     │   └── utils.py                 # 共享工具函数
-    ├── routers/                     # API 路由（7个）
+    ├── routers/                     # API 路由（6个）
     │   ├── ai_behavior.py           # AI 行为统一入口（聊天/主动消息/任务/朋友圈）
-    │   ├── chat.py                  # 聊天消息 API
     │   ├── roles.py                 # 角色 CRUD API
     │   ├── moments.py               # 朋友圈 API
     │   ├── tasks.py                 # 定时任务 API

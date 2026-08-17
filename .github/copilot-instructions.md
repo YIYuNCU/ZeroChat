@@ -59,7 +59,7 @@ python main.py
 - **Models**: [models/](../client/lib/models) — Data structures
 
 **FastAPI Server** (`server/`):
-- **Routes**: [routers/](../server/routers) — HTTP/WebSocket endpoints (ai_behavior, chat, roles, moments, tasks, settings, onebot)
+- **Routes**: [routers/](../server/routers) — HTTP/WebSocket endpoints (ai_behavior, roles, moments, tasks, settings, onebot)
 - **Business Logic**: [services/](../server/services) — AI calls, memory, scheduling, security
 - **Transport**: [transport/](../server/transport) — WebSocket dispatch, push notifications, OneBot V11
 - **Core**: [core/](../server/core) — Middleware, lifecycle hooks, utilities
