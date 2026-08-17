@@ -1553,19 +1553,19 @@ async def chat_with_vision(request: VisionRequest):
                 elif request_system_prompt:
                     role_for_pipeline["system_prompt"] = request_system_prompt
 
-            vision_extra_parts = [
-                f"[图片识别结果]\n{image_understanding}",
-                "请仅基于图片识别结果与用户要求生成最终回复。",
-            ]
+            vision_user_message = (
+                f"[图片识别结果]\n{image_understanding}\n\n"
+                f"[用户要求]\n{str(request.user_prompt or '').strip() or '请描述这张图片的内容'}\n\n"
+                "请仅基于图片识别结果与用户要求生成最终回复。"
+            )
             pipeline_result = await _run_memory_ai_pipeline(
                 role=role_for_pipeline,
                 role_id=role_id_text,
-                user_message=str(request.user_prompt or "").strip() or "请描述这张图片的内容",
+                user_message=vision_user_message,
                 event_context={
                     "origin": "vision_pre_model",
                     "sender": "user_vision",
                 },
-                extra_parts=vision_extra_parts,
                 origin="vision_pre_model",
                 user_sender="user_vision",
                 include_user_memory=False,

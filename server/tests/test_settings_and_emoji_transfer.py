@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
+from routers.ai_behavior import VisionRequest, chat_with_vision
 from routers.settings import SettingsUpdate, update_settings
 from routers import roles as roles_router
 from services.ai_tools import (
@@ -34,6 +35,37 @@ from transport import ws_dispatcher
 
 
 class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pre_model_passes_vision_result_as_user_context(self):
+        pipeline = AsyncMock(return_value={"success": True, "reply": "最终回复"})
+        request = VisionRequest(
+            image_base64="AA==",
+            user_prompt="图片里有什么？",
+            role_id="role-1",
+            run_mode="pre_model",
+        )
+
+        with patch(
+            "services.vision_service.resolve_vision_config",
+            return_value={"api_url": "https://vision.example/v1", "api_key": "key", "model": "vision-model"},
+        ), patch(
+            "routers.ai_behavior._post_chat_completion",
+            new=AsyncMock(
+                return_value={"choices": [{"message": {"content": "图片中有一只猫"}}]}
+            ),
+        ), patch(
+            "routers.ai_behavior.load_role",
+            return_value={"id": "role-1", "name": "测试角色"},
+        ), patch(
+            "routers.ai_behavior._run_memory_ai_pipeline", pipeline
+        ), patch("services.vision_service.append_vision_memory"):
+            result = await chat_with_vision(request)
+
+        self.assertTrue(result["success"])
+        self.assertNotIn("extra_parts", pipeline.call_args.kwargs)
+        user_message = pipeline.call_args.kwargs["user_message"]
+        self.assertIn("[图片识别结果]\n图片中有一只猫", user_message)
+        self.assertIn("[用户要求]\n图片里有什么？", user_message)
+
     async def test_grok_request_uses_generic_request_without_thinking(self):
         response = type(
             "Response",
