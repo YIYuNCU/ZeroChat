@@ -25,6 +25,12 @@ _INLINE_EMOJI_EMOTION_RE = re.compile(
 _VALID_EMOJI_EMOTION_RE = re.compile(r'^[a-z0-9_-]{1,64}$')
 
 
+def _prefer_precise_emoji_deliveries(deliveries: List[Any]) -> List[Any]:
+    """Avoid rendering a local fallback beside a precise cloud emoji."""
+    precise = [item for item in deliveries if isinstance(item, dict)]
+    return precise or deliveries
+
+
 def is_no_reply_directive(content: Any) -> bool:
     """仅接受独立的无回复指令，避免吞掉与正文混合的回复。"""
     return str(content or "").strip() == NO_REPLY_DIRECTIVE
@@ -53,7 +59,7 @@ async def _consume_inline_emoji_tool_markup(
         else:
             logger.warning("Inline emoji tool call failed: %s", tool_result)
 
-    result["_emojis_called"] = emojis_called
+    result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
     return result
 
 # 共享 httpx 客户端连接池
@@ -131,7 +137,7 @@ def _resolve_ai_config(
     temperature: Optional[float] = None
 ) -> Tuple[Optional[str], Optional[str], Optional[str],Optional[float]]:
     config = settings_service.load_settings()
-    resolved_model = model or config.get("ai_model", "gpt-3.5-turbo")
+    resolved_model = model or config.get("ai_model", "deepseek-chat")
     resolved_url = _normalize_api_url(api_url or config.get("ai_api_url", ""))
     resolved_key = api_key or config.get("ai_api_key", "")
     resolved_temperature = temperature if temperature is not None else config.get("ai_temperature", 0.7)
@@ -153,6 +159,19 @@ def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optio
         temperature = temperature if temperature is not None else metadata.get("ai_temperature")
 
     return _resolve_ai_config(model, api_url, api_key, temperature)
+
+
+def _is_grok_model(model: Optional[str]) -> bool:
+    return "grok" in str(model or "").lower()
+
+
+def _is_deepseek_model(model: Optional[str]) -> bool:
+    return "deepseek" in str(model or "").lower()
+
+
+def _is_gemini_model(model: Optional[str]) -> bool:
+    """Identify Gemini models served through the OpenAI-compatible endpoint."""
+    return "gemini" in str(model or "").lower()
 
 
 def _is_meta_key_line(line_text: str) -> bool:
@@ -209,6 +228,66 @@ def _extract_plain_message_content(content: Any) -> str:
 
     return normalized.strip()
 
+def _build_base_chat_payload(
+    messages: List[Dict[str, Any]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    tools: Optional[List[Dict]],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if tools:
+        payload["tools"] = tools
+    return payload
+
+
+def _build_deepseek_chat_request(
+    messages: List[Dict[str, Any]], api_key: str, model: str,
+    temperature: float, max_tokens: int, tools: Optional[List[Dict]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Build a DeepSeek-compatible request, including its thinking extension."""
+    payload = _build_base_chat_payload(messages, model, temperature, max_tokens, tools)
+    if not settings_service.load_settings().get("thinking_enabled", False):
+        payload["thinking"] = {"type": "disabled"}
+    return payload, {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+
+def _build_gemini_chat_request(
+    messages: List[Dict[str, Any]], api_key: str, model: str,
+    temperature: float, max_tokens: int, tools: Optional[List[Dict]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Build a Gemini OpenAI-compatibility request with standard fields only."""
+    return _build_base_chat_payload(messages, model, temperature, max_tokens, tools), {
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+    }
+
+
+def _build_generic_chat_request(
+    messages: List[Dict[str, Any]], api_key: str, model: str,
+    temperature: float, max_tokens: int, tools: Optional[List[Dict]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Build a portable OpenAI-compatible request without provider extensions."""
+    return _build_base_chat_payload(messages, model, temperature, max_tokens, tools), {
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+    }
+
+
+def _build_chat_request(
+    messages: List[Dict[str, Any]], api_key: str, model: str,
+    temperature: float, max_tokens: int, tools: Optional[List[Dict]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    if _is_deepseek_model(model):
+        return _build_deepseek_chat_request(messages, api_key, model, temperature, max_tokens, tools)
+    if _is_gemini_model(model):
+        return _build_gemini_chat_request(messages, api_key, model, temperature, max_tokens, tools)
+    return _build_generic_chat_request(messages, api_key, model, temperature, max_tokens, tools)
+
+
 async def _post_chat(
     messages: List[Dict[str, str]],
     api_url: str,
@@ -220,25 +299,18 @@ async def _post_chat(
     stats_role_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
-        payload: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if tools:
-            payload["tools"] = tools
-        # DeepSeek thinking 模式控制，默认关闭
-        cfg = settings_service.load_settings()
-        if not cfg.get("thinking_enabled", False):
-            payload["thinking"] = {"type": "disabled"}
+        payload, headers = _build_chat_request(
+            messages,
+            api_key,
+            model,
+            temperature,
+            max_tokens,
+            tools,
+        )
         client = _get_http_client()
         response = await client.post(
             api_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            },
+            headers=headers,
             json=payload,
         )
         response.raise_for_status()
@@ -419,8 +491,12 @@ def _normalize_embedding_url(api_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
-def _build_stats_instruction(role_data: Dict, stats_current: Optional[Dict[str, Any]] = None) -> str:
-    """根据角色的 stats_config 构建数值系统指令（含当前值）。未启用则返回空串。"""
+def _build_stats_instruction(
+    role_data: Dict,
+    stats_current: Optional[Dict[str, Any]] = None,
+    include_current_values: bool = True,
+) -> str:
+    """根据角色的 stats_config 构建数值系统指令。未启用则返回空串。"""
     stats_config = role_data.get("stats_config") or {}
     if not stats_config.get("enabled"):
         return ""
@@ -428,14 +504,28 @@ def _build_stats_instruction(role_data: Dict, stats_current: Optional[Dict[str, 
     if not stats:
         return ""
     stats_current = stats_current or {}
+    resolved_model, _, _, _ = _get_role_ai_config(role_data)
+    is_grok = _is_grok_model(resolved_model)
+    layout_rule = (
+        "  - Grok 专项格式：<数值> 块必须位于整组对话的最后，紧贴最后一个 <对话> 块；"
+        "两者之间不得使用 $ 或换行。若有多条消息，只能用 $ 分隔对话消息，"
+        "并将唯一的 <数值> 块附在最后一条消息末尾。\n"
+        if is_grok
+        else "  - 数值块作为独立的一段输出，使用单个 $ 与相邻完整标签块分隔\n"
+    )
     lines = [
         "【数值系统】\n"
         "你需要维护以下数值，并在每次回复中输出一个数值块，格式为："
         "<数值>键1:值1;键2:值2;...</数值>（每个数值用 键:值 表示，多个用 ; 分隔）。\n"
         "规则：\n"
+        "  - 当前用户消息是顶层 JSON 对象，stats_current 是独立字段（不在 message 文本内）；"
+        "每次生成前都必须读取它，并检查上下文中最近一条 <数值> 块；"
+        "stats_current 是最新状态的优先来源，字段缺失时才使用最近数值块，不能重新按 initial 值开始或只维护发生变化的数值\n"
+        "  - 即使本轮没有变化，也必须完整回写全部数值；不得省略、删除、改名或只输出变化项；"
+        "本轮输出的完整数值块将作为下一轮上下文的最新状态\n"
         "  - 必须覆盖下方列出的全部数值，取值为数字且必须落在各自的上下限区间内\n"
-        "  - 依据数值的作用与当前对话情境合理演化（可增可减，变化幅度要自然）\n"
-        "  - 数值块作为独立的一段输出，使用单个 $ 与相邻完整标签块分隔\n"
+        "  - 依据数值的作用与当前对话情境合理演化（可增可减，变化幅度要自然）\n",
+        layout_rule,
         "当前各数值及其定义：",
     ]
     for item in stats:
@@ -448,13 +538,17 @@ def _build_stats_instruction(role_data: Dict, stats_current: Optional[Dict[str, 
         vmin = item.get("min", 0)
         vmax = item.get("max", 100)
         initial = item.get("initial")
-        cur = stats_current.get(key)
-        if cur is None:
-            cur = initial if initial is not None else vmin
         desc = str(item.get("description") or "").strip()
         desc_part = f"，作用：{desc}" if desc else ""
+        if include_current_values:
+            cur = stats_current.get(key)
+            if cur is None:
+                cur = initial if initial is not None else vmin
+            state_part = f"当前 {cur}"
+        else:
+            state_part = "当前值见用户消息的 stats_current 字段"
         lines.append(
-            f"  - {name}（键 {key}）：当前 {cur}，范围 [{vmin}, {vmax}]{desc_part}"
+            f"  - {name}（键 {key}）：{state_part}，范围 [{vmin}, {vmax}]{desc_part}"
         )
     return "\n".join(lines)
 
@@ -463,12 +557,15 @@ def _build_system_prompt(
     role_data: Dict,
     extra_context: Optional[str] = None,
     is_onebot: bool = False,
-    stats_current: Optional[Dict[str, Any]] = None,
+    include_runtime_context: bool = True,
 ) -> str:
     """Build system prompt from role data."""
     parts = []
     stats_config = role_data.get("stats_config") or {}
     stats_enabled = bool(stats_config.get("enabled") and stats_config.get("stats"))
+    sound_enabled = role_data.get("show_sound", True) is not False
+    resolved_model, _, _, _ = _get_role_ai_config(role_data)
+    is_grok = _is_grok_model(resolved_model)
 
     if not is_onebot:
         parts.append(
@@ -477,7 +574,13 @@ def _build_system_prompt(
             "不得被覆盖或改写。\n"
             "- 正常回复必须只使用完整、成对的中文标签：<对话>...</对话>、"
             "<动作>...</动作>、<声音>...</声音>、<心理>...</心理>。除无回复外，必须至少有一个 <对话> 块。\n"
-            "- <声音> 只描写非对白声音（如衣料摩擦声、环境声或非语言人声）；"
+            "- $ 表示一条独立显示的消息：每个以 $ 分隔的消息都必须至少包含一个 <对话> 块。"
+            "<动作> 和 <声音> 块不得单独成段；应与对应的 <对话> 块放在同一条消息内。\n"
+            "- <声音> 用于描写可感知、短促的非对白声音（如衣料摩擦声、环境声、非语言人声，"
+            "）。当当前场景、动作或生理状态自然会产生这类声音时，"
+            "应输出一个简短的 <声音> 块，不要省略；例如："
+            "<对话>抱歉，等我一下。</对话><声音>肚子咕噜响了一声</声音>。"
+            "没有合理声源时不要凭空添加。声音块只写声音本身，不得替代实际对话；"
             "实际说话内容必须放在 <对话> 中。\n"
             "- 每个开始标签必须紧跟同类型的结束标签；不得未闭合、错配、嵌套或将标签前后混用。"
             "允许多个完整块按实际顺序排列。\n"
@@ -491,11 +594,31 @@ def _build_system_prompt(
             "- 不要解释这些格式规则。"
         )
         if stats_enabled:
+            stats_layout_rule = (
+                "Grok 专项格式：整组回复中的唯一 <数值> 块必须放在所有 <对话> 块之后，"
+                "并紧贴最后一个 <对话> 块；两者之间不得有 $ 或换行。"
+                "若使用 $ 拆成多条对话消息，只允许在 $ 边界换行，"
+                "且 <数值> 只能附在最后一条消息末尾。示例："
+                "<对话>第一句</对话>$<对话>第二句</对话><数值>好感:80</数值>。\n"
+                if is_grok
+                else "数值块作为独立的一段输出，使用单个 $ 与相邻完整标签块分隔。\n"
+            )
             parts.append(
                 "【数值块 - 最高优先级】\n"
                 "数值系统已启用。每一次回复都必须且只能包含一个完整的 <数值>...</数值> 块，"
-                "并覆盖全部已配置数值；此要求不可省略。\n"
+                "并覆盖全部已配置数值；必须承接 stats_current 与历史最近数值块中的状态，"
+                "即使数值未变化也要完整回写；此要求不可省略。\n"
+                f"{stats_layout_rule}"
                 f"数值系统启用时不得输出 {NO_REPLY_DIRECTIVE}，因为它不能与必需的数值块共存。"
+            )
+        if sound_enabled:
+            parts.append(
+                "【声音系统 - 去重规则】\n"
+                "声音系统已启用。生成 <声音> 前必须检查当前上下文和历史消息中已经出现的所有 <声音> 内容。\n"
+                "同一声音以及语义相同、近似或仅换了说法的声音都视为重复，不能再次生成；"
+                "例如“轻哼一声”“轻轻哼了一声”“低低地哼了一声”均属于同一个声音。\n"
+                "同一条回复内也不得重复相同声音。只有出现新的声源或明确不同的声音时才可输出；"
+                "没有新声音就省略 <声音> 块。"
             )
 
     # 安全规则放在最前面，确保最高优先级
@@ -578,19 +701,44 @@ def _build_system_prompt(
 
 
 
+    # The cloud tool already falls back to local emotion assets on search
+    # failure, so exposing both tools lets one model reply render two stickers.
+    use_cloud_emoji_tool = _emoji_plugin is not None and bool(
+        getattr(_emoji_plugin, "TOOLS", [])
+    )
+    if use_cloud_emoji_tool:
+        emoji_tool_rule = (
+            "2. send_emoji（表情包）—— 仅在确实需要发送一张表情图时调用：\n"
+            "  - 使用贴切的中文关键词；一次通常只发送 1 张。云端无结果时会按 emotion 自动回退本地表情。\n"
+            "  - 不得在同一回复中调用任何其他表情工具或输出文本形式的表情工具标记。"
+        )
+    else:
+        emoji_tool_rule = (
+            "2. send_emotion_emoji（情绪表情）—— 可用于增强明显有情绪的互动：\n"
+            "  - 情绪标签：happy/excited（开心有趣）、love（关心撒娇）、sad（难过）、surprised（惊讶）、confused（困惑）、tired（疲惫）、angry（生气）。\n"
+            "  - 仅对确实适合用一张表情表达的回复调用；每次回复至多调用一次。\n"
+            "  - 严禁在正文直接插入 Unicode emoji（😀❤️😭 等）或任何 XML/文本工具调用标记；必须使用 API 的 tool_calls 字段。"
+        )
+
+    grok_tool_policy = ""
+    if is_grok:
+        grok_tool_policy = (
+            "【Grok 工具调用约束 - 高优先级】\n"
+            "仅当用户明确要求工具操作、需要查询过去记忆、需要核验时效性外部事实，"
+            "或必须识别用户附带图片时才调用工具。普通闲聊、角色扮演、情绪回应和可由当前上下文直接回答的内容一律直接回复。\n"
+            "不要为了增加信息量、表达情绪或预防性保存记忆而调用工具；每次回复最多进行一项非必要工具操作。"
+            "表情工具完全可选，且一条回复最多发送一张表情。完成必要调用后立即生成最终回复，不再追加可选工具调用。\n\n"
+        )
+
     # 通用工具能力（所有场景可用）
     parts.append(
         "【工具调用规则】\n"
-        "回复前先判断需要哪些工具，主动调用、不必等用户明确要求；需要时可在同一轮组合调用多个工具。"
-        "凡能用工具确认的事实，一律查证而非凭记忆或知识猜测。\n\n"
+        f"{grok_tool_policy}"
+        "回复前先判断是否确实需要工具；仅在工具结果会实质改善准确性或完成用户请求时调用。\n\n"
         "1. search_memory（历史记忆搜索）—— 回忆过去的唯一手段：\n"
-        "  - 出现人名/地名/事件/偏好/约定，或\"上次/之前/你说过/还记得吗\"等指涉过去的话，立即搜索；对话涉及记忆中没有的内容也必须搜。\n"
-        "  - 原则：宁可多搜一次，不可假装记得；记忆窗口里没有 ≠ 不存在，仍需搜索。\n\n"
-        "2. send_emotion_emoji（情绪表情）—— 优先使用以增强有情绪的互动：\n"
-        "  - 情绪标签：happy/excited（开心有趣）、love（关心撒娇）、sad（难过）、surprised（惊讶）、confused（困惑）、tired（疲惫）、angry（生气）。\n"
-        "  - 回复中表达关心、安慰、喜欢、开心、感谢、期待、惊讶、难过、困惑、疲惫或不满时，应调用；"
-        "仅对纯事务性、无情绪的简短答复可以不调用。\n"
-        "  - 硬性约束：严禁在正文直接插入 Unicode emoji（😀❤️😭 等）或任何 XML/文本工具调用标记；必须使用 API 的 tool_calls 字段。\n\n"
+        "  - 只有用户明确询问过去的人名、事件、偏好、约定，或回答必须依赖历史记忆时才搜索。\n"
+        "  - 记忆窗口里没有不代表不存在；若无法确认，应搜索或如实说明不确定。\n\n"
+        f"{emoji_tool_rule}\n\n"
         "3. schedule_task（定时任务）—— 用户要求提醒、或你承诺将来做某事时创建：\n"
         "  - 需指定提醒内容、触发时间（ISO 8601，24 小时制）及可选重复模式。\n"
         "  - 这是应用内提醒消息；若用户想要手机响铃的闹钟或写入日历，用 set_alarm。\n\n"
@@ -617,7 +765,7 @@ def _build_system_prompt(
         parts.append(f"你的人设：{persona}")
     if system_prompt:
         parts.append(system_prompt)
-    if extra_context:
+    if include_runtime_context and extra_context:
         parts.append(f"额外上下文：{extra_context}")
     if parts:
         parts.append(
@@ -636,7 +784,10 @@ def _build_system_prompt(
                 "用户提问、表达情绪或期待互动时应正常回复。"
             )
         if not is_onebot:
-            stats_instruction = _build_stats_instruction(role_data, stats_current)
+            stats_instruction = _build_stats_instruction(
+                role_data,
+                include_current_values=False,
+            )
             if stats_instruction:
                 parts.append(stats_instruction)
     return "\n\n".join(parts)
@@ -647,6 +798,8 @@ def _format_user_message(
     origin: str = "zerochat",
     sender: str = "user",
     vector_memories: Optional[List[Dict[str, Any]]] = None,
+    core_memory_context: Optional[str] = None,
+    stats_current: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Format user message with standard JSON payload."""
     now = datetime.now()
@@ -658,11 +811,20 @@ def _format_user_message(
         "origin": str(origin or "zerochat"),
         "sender": str(sender or "user"),
     }
+    if core_memory_context:
+        payload["core_memory"] = str(core_memory_context)
+    if stats_current:
+        payload["stats_current"] = stats_current
     # 向量记忆已封装为 search_memory 工具，不再被动注入
     return json.dumps(payload, ensure_ascii=False)
 
 
-async def _call_with_role_config(role_data: Dict, messages: List[Dict], default_temp: float = 0.7, tools: Optional[List[Dict]] = None) -> Dict[str, Any]:
+async def _call_with_role_config(
+    role_data: Dict,
+    messages: List[Dict],
+    default_temp: float = 0.7,
+    tools: Optional[List[Dict]] = None,
+) -> Dict[str, Any]:
     """Call AI using role-specific model configuration."""
     model_override, url_override, key_override, temp_override = _get_role_ai_config(role_data)
     stats_role_id = str(role_data.get("id") or "").strip() if isinstance(role_data, dict) else ""
@@ -712,6 +874,7 @@ async def generate_with_role(
     user_message: str,
     history: Optional[List[Dict]] = None,
     extra_context: Optional[str] = None,
+    core_memory_context: Optional[str] = None,
     vector_memories: Optional[List[Dict[str, Any]]] = None,
     origin: str = "zerochat",
     sender: str = "user",
@@ -726,15 +889,25 @@ async def generate_with_role(
     messages = []
     is_onebot = origin.startswith("onebot")
     is_third_party = is_onebot and sender != "user"
+    model_override, _, _, _ = _get_role_ai_config(role_data)
     system_content = _build_system_prompt(
-        role_data, extra_context, is_onebot=is_onebot, stats_current=stats_current
+        role_data,
+        None,
+        is_onebot=is_onebot,
+        include_runtime_context=False,
     )
-    if system_content:
-        messages.append({"role": "system", "content": system_content})
+    system_parts = [system_content] if system_content else []
+    if extra_context:
+        system_parts.append(f"额外上下文：{extra_context}")
+    if system_parts:
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
     if history:
         for msg in history:
+            history_role = msg.get("role", "user")
+            if history_role == "system":
+                history_role = "user"
             messages.append({
-                "role": msg.get("role", "user"),
+                "role": history_role,
                 "content": msg.get("content", "")
             })
     messages.append({
@@ -744,6 +917,8 @@ async def generate_with_role(
             origin,
             sender,
             vector_memories=vector_memories,
+            core_memory_context=core_memory_context,
+            stats_current=stats_current,
         ),
     })
 
@@ -751,9 +926,10 @@ async def generate_with_role(
     # web_search、write_memory 对所有场景开放；block_user 仅对第三方用户开放
     active_tools = list(_SCHEDULE_TASK_TOOL)
     active_tools.extend(_SEARCH_MEMORY_TOOL)
-    active_tools.extend(_SEND_EMOTION_EMOJI_TOOL)
     if _emoji_plugin is not None:
         active_tools.extend(getattr(_emoji_plugin, "TOOLS", []))
+    else:
+        active_tools.extend(_SEND_EMOTION_EMOJI_TOOL)
     active_tools.extend(_WEB_SEARCH_TOOL)
     active_tools.extend(_WRITE_MEMORY_TOOL)
     # set_alarm 作用于用户设备的系统闹钟/日历，仅对有设备的 ZeroChat 场景开放
@@ -771,12 +947,21 @@ async def generate_with_role(
     if previous_image_data_urls:
         active_tools.extend(_REVIEW_PREVIOUS_IMAGES_TOOL)
     tools = active_tools if active_tools else None
-    result = await _call_with_role_config(role_data, messages, default_temp=1.2, tools=tools)
+    result = await _call_with_role_config(
+        role_data,
+        messages,
+        default_temp=1.2,
+        tools=tools,
+    )
 
     # 处理 tool_calls
     if result.get("tool_calls"):
         result = await _handle_tool_calls(
-            result, messages, role_data, tools, vision_context=vision_context
+            result,
+            messages,
+            role_data,
+            tools,
+            vision_context=vision_context,
         )
 
     # Some models prioritize another tool (for example memory or web search)
@@ -788,18 +973,16 @@ async def generate_with_role(
             user_message,
             0,
         )
-        insertion_index = 1 if messages and messages[0].get("role") == "system" else 0
-        messages.insert(
-            insertion_index,
-            {
-                "role": "system",
-                "content": (
-                    "[Image recognition result - must use]\n"
-                    f"{image_understanding}\n"
-                    "Answer the user's current message using this image information."
-                ),
-            },
-        )
+        image_context_message = {
+            "role": "user",
+            "content": (
+                "[Image recognition result - must use]\n"
+                f"{image_understanding}\n"
+                "Answer the user's current message using this image information."
+            ),
+        }
+        # Keep exactly one system message for every request in this pipeline.
+        messages.append(image_context_message)
         result = await _call_with_role_config(
             role_data,
             messages,
@@ -1026,18 +1209,23 @@ async def _handle_tool_calls(
 
         tool_count = len(result["tool_calls"])
         logger.info(f"Re-calling AI with {tool_count} tool result(s) (round {round_idx+1}/{max_rounds})")
-        result = await _call_with_role_config(role_data, messages, default_temp=1.2, tools=tools)
+        result = await _call_with_role_config(
+            role_data,
+            messages,
+            default_temp=1.2,
+            tools=tools,
+        )
 
         if not result.get("tool_calls"):
             if recognized_current_image:
                 result["_recognized_current_image"] = True
-            result["_emojis_called"] = emojis_called
+            result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
             return result
 
     logger.warning(f"Tool call loop reached max {max_rounds} rounds, returning last result")
     if recognized_current_image:
         result["_recognized_current_image"] = True
-    result["_emojis_called"] = emojis_called
+    result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
     return result
 
 async def generate_moment_post(

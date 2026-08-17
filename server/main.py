@@ -52,7 +52,7 @@ def load_config():
         "port": 8000,
         "ai_api_url": "",
         "ai_api_key": "",
-        "ai_model": "gpt-3.5-turbo",
+        "ai_model": "deepseek-chat",
         "vision_enabled": False,
         "vision_api_url": "",
         "vision_api_key": "",

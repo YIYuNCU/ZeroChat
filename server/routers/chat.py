@@ -85,7 +85,7 @@ async def chat(request: ChatRequest):
     
     api_url = config.get("ai_api_url", "")
     api_key = config.get("ai_api_key", "")
-    model = config.get("ai_model", "gpt-3.5-turbo")
+    model = config.get("ai_model", "deepseek-chat")
     
     if not api_url or not api_key:
         raise HTTPException(status_code=500, detail="AI API 未配置")

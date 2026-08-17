@@ -457,6 +457,9 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                 if key in {"onebot_config", "proactive_config"} and isinstance(value, dict):
                     merged = dict(existing.get(key) or {})
                     merged.update({k: v for k, v in value.items() if v is not None})
+                    if key == "proactive_config" and "quiet_periods" in value:
+                        merged.pop("quiet_hours_start", None)
+                        merged.pop("quiet_hours_end", None)
                     existing[key] = merged
                 else:
                     existing[key] = value
@@ -492,15 +495,14 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                 }
             ),
             "proactive_config": (
-                role_model.proactive_config.model_dump()
+                role_model.proactive_config.model_dump(exclude_none=True)
                 if role_model.proactive_config
                 else {
                     "enabled": False,
                     "min_interval_minutes": 30,
                     "max_interval_minutes": 120,
                     "trigger_prompt": "",
-                    "quiet_hours_start": 23,
-                    "quiet_hours_end": 7,
+                    "quiet_periods": [{"start_minute": 1380, "end_minute": 420}],
                     "next_trigger_time": None,
                 }
             ),

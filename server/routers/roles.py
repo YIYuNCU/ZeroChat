@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -96,15 +96,48 @@ class EmojiCategoryPayload(BaseModel):
 class ResolveUserEmojiTagPayload(BaseModel):
     emoji_id: str
 
+class QuietPeriod(BaseModel):
+    """A daily quiet period expressed as minutes after midnight."""
+
+    start_minute: int = Field(ge=0, lt=24 * 60)
+    end_minute: int = Field(ge=0, lt=24 * 60)
+
+    @model_validator(mode="after")
+    def validate_non_empty(self):
+        if self.start_minute == self.end_minute:
+            raise ValueError("quiet period start and end must differ")
+        return self
+
+
 class ProactiveConfig(BaseModel):
     """主动消息配置"""
     enabled: bool = False
     min_interval_minutes: int = 30
     max_interval_minutes: int = 120
     trigger_prompt: str = ""
-    quiet_hours_start: int = 23  # 23:00
-    quiet_hours_end: int = 7    # 07:00
+    # Kept only for existing role profiles. New clients write quiet_periods.
+    quiet_hours_start: Optional[int] = None
+    quiet_hours_end: Optional[int] = None
+    quiet_periods: Optional[List[QuietPeriod]] = None
     next_trigger_time: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_quiet_periods(self):
+        if self.quiet_periods is None:
+            return self
+
+        spans = []
+        for period in self.quiet_periods:
+            if period.start_minute < period.end_minute:
+                spans.append((period.start_minute, period.end_minute))
+            else:
+                spans.extend(((0, period.end_minute), (period.start_minute, 24 * 60)))
+
+        spans.sort()
+        for (_, previous_end), (start, _) in zip(spans, spans[1:]):
+            if start <= previous_end:
+                raise ValueError("quiet periods must not overlap or touch")
+        return self
 
 class FollowupConfig(BaseModel):
     """无回复续写配置：AI 说完话后，若用户在设定时长内未回复则继续跟进"""
@@ -523,9 +556,9 @@ async def create_role(role: RoleCreate, request: Request):
             "openness": 50, "conscientiousness": 50, "extraversion": 50,
             "agreeableness": 50, "neuroticism": 50
         },
-        "proactive_config": role.proactive_config.model_dump() if role.proactive_config else {
+        "proactive_config": role.proactive_config.model_dump(exclude_none=True) if role.proactive_config else {
             "enabled": False, "min_interval_minutes": 30, "max_interval_minutes": 120,
-            "trigger_prompt": "", "quiet_hours_start": 23, "quiet_hours_end": 7,
+            "trigger_prompt": "", "quiet_periods": [{"start_minute": 1380, "end_minute": 420}],
             "next_trigger_time": None
         },
         "followup_config": role.followup_config.model_dump() if role.followup_config else {

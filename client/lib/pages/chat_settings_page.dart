@@ -279,11 +279,6 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           const SizedBox(height: 10),
 
-          // 安静时间（全局设置）
-          _buildSection([_buildQuietTimeItem()]),
-
-          const SizedBox(height: 10),
-
           // 主动消息配置
           _buildSection([
             _buildItem(
@@ -313,6 +308,17 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                   style: const TextStyle(color: Color(0xFF888888)),
                 ),
                 onTap: _editProactiveCountdown,
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildItem(
+                title: '安静时间',
+                trailing: Text(
+                  _formatQuietPeriods(
+                    _currentRole.proactiveConfig.quietPeriods,
+                  ),
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _editQuietPeriods,
               ),
             ],
           ]),
@@ -592,200 +598,6 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     );
   }
 
-  Widget _buildQuietTimeItem() {
-    final settings = TaskService.getQuietTimeSettings();
-    final enabled = settings['enabled'] as bool;
-    final start = settings['start_hour'] as int;
-    final end = settings['end_hour'] as int;
-
-    return InkWell(
-      onTap: _showQuietTimePicker,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('安静时间', style: TextStyle(fontSize: 16)),
-                if (enabled)
-                  Text(
-                    '$start:00 - $end:00',
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: Color(0xFF888888),
-                    ),
-                  ),
-              ],
-            ),
-            Switch(
-              value: enabled,
-              activeColor: const Color(0xFF07C160),
-              onChanged: (value) {
-                TaskService.setQuietTime(
-                  enabled: value,
-                  startHour: start,
-                  endHour: end,
-                );
-                setState(() {});
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showQuietTimePicker() async {
-    final settings = TaskService.getQuietTimeSettings();
-    int startHour = settings['start_hour'] as int;
-    int endHour = settings['end_hour'] as int;
-
-    await showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
-      ),
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Center(
-                      child: Text(
-                        '设置安静时间',
-                        style: TextStyle(
-                          fontSize: 17,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-
-                    // 开始时间
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text('开始时间', style: TextStyle(fontSize: 16)),
-                        GestureDetector(
-                          onTap: () async {
-                            final time = await showTimePicker(
-                              context: context,
-                              initialTime: TimeOfDay(
-                                hour: startHour,
-                                minute: 0,
-                              ),
-                            );
-                            if (time != null) {
-                              setModalState(() {
-                                startHour = time.hour;
-                              });
-                            }
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF5F5F5),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              '$startHour:00',
-                              style: const TextStyle(
-                                fontSize: 16,
-                                color: Color(0xFF07C160),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(height: 16),
-
-                    // 结束时间
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text('结束时间', style: TextStyle(fontSize: 16)),
-                        GestureDetector(
-                          onTap: () async {
-                            final time = await showTimePicker(
-                              context: context,
-                              initialTime: TimeOfDay(hour: endHour, minute: 0),
-                            );
-                            if (time != null) {
-                              setModalState(() {
-                                endHour = time.hour;
-                              });
-                            }
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF5F5F5),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              '$endHour:00',
-                              style: const TextStyle(
-                                fontSize: 16,
-                                color: Color(0xFF07C160),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(height: 24),
-
-                    // 确定按钮
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () {
-                          TaskService.setQuietTime(
-                            enabled: true,
-                            startHour: startHour,
-                            endHour: endHour,
-                          );
-                          Navigator.pop(context);
-                          setState(() {});
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF07C160),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                        child: const Text('确定', style: TextStyle(fontSize: 16)),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
   Future<void> _showChatBackgroundOptions() async {
     await showModalBottomSheet(
       context: context,
@@ -1020,10 +832,16 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             IconButton(
-              icon: const Icon(Icons.edit_outlined, size: 18, color: Color(0xFF888888)),
+              icon: const Icon(
+                Icons.edit_outlined,
+                size: 18,
+                color: Color(0xFF888888),
+              ),
               onPressed: () async {
                 final edited = await _editTextDialog('编辑消息', msg.content);
-                if (edited != null && edited.isNotEmpty && edited != msg.content) {
+                if (edited != null &&
+                    edited.isNotEmpty &&
+                    edited != msg.content) {
                   await MessageStore.instance.updateMessage(
                     widget.chatId,
                     msg.id,
@@ -1112,15 +930,18 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               setModalState(() {
                 stats = data;
                 loading = false;
-                final models = (data?['by_model'] as List?)
-                    ?.whereType<Map>()
-                    .map((e) => '${e['model'] ?? ''}'.trim())
-                    .where((e) => e.isNotEmpty)
-                    .toSet()
-                    .toList() ??
+                final models =
+                    (data?['by_model'] as List?)
+                        ?.whereType<Map>()
+                        .map((e) => '${e['model'] ?? ''}'.trim())
+                        .where((e) => e.isNotEmpty)
+                        .toSet()
+                        .toList() ??
                     <String>[];
                 if (selectedModel == null || !models.contains(selectedModel)) {
-                  final latest = (data?['last'] as Map?)?['model']?.toString().trim();
+                  final latest = (data?['last'] as Map?)?['model']
+                      ?.toString()
+                      .trim();
                   selectedModel = latest != null && latest.isNotEmpty
                       ? latest
                       : (models.isEmpty ? null : models.first);
@@ -1147,9 +968,12 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
             final visibleByModel = selectedModel == null
                 ? byModel
                 : byModel
-                    .where((e) => '${e['model'] ?? ''}'.trim() == selectedModel)
-                    .toList();
-            final visibleLast = last != null &&
+                      .where(
+                        (e) => '${e['model'] ?? ''}'.trim() == selectedModel,
+                      )
+                      .toList();
+            final visibleLast =
+                last != null &&
                     (selectedModel == null ||
                         '${last['model'] ?? ''}'.trim() == selectedModel)
                 ? last
@@ -1202,7 +1026,10 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                         child: Row(
                           children: [
-                            const Text('查看模型', style: TextStyle(color: Color(0xFF888888))),
+                            const Text(
+                              '查看模型',
+                              style: TextStyle(color: Color(0xFF888888)),
+                            ),
                             const SizedBox(width: 12),
                             Expanded(
                               child: DropdownButton<String>(
@@ -1212,10 +1039,15 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                                 isExpanded: true,
                                 underline: const SizedBox.shrink(),
                                 items: modelOptions
-                                    .map((model) => DropdownMenuItem(
-                                          value: model,
-                                          child: Text(model, overflow: TextOverflow.ellipsis),
-                                        ))
+                                    .map(
+                                      (model) => DropdownMenuItem(
+                                        value: model,
+                                        child: Text(
+                                          model,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    )
                                     .toList(),
                                 onChanged: (value) {
                                   if (value != null) {
@@ -1233,7 +1065,10 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                           : ListView(
                               controller: scrollController,
                               padding: const EdgeInsets.all(16),
-                              children: _buildUsageContent(visibleByModel, visibleLast),
+                              children: _buildUsageContent(
+                                visibleByModel,
+                                visibleLast,
+                              ),
                             ),
                     ),
                   ],
@@ -1407,7 +1242,11 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               IconButton(
-                                icon: const Icon(Icons.refresh, size: 20, color: Color(0xFF888888)),
+                                icon: const Icon(
+                                  Icons.refresh,
+                                  size: 20,
+                                  color: Color(0xFF888888),
+                                ),
                                 tooltip: '增量刷新',
                                 onPressed: () => reload(),
                               ),
@@ -2078,7 +1917,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     // 后端同步在后台进行，避免网络往返阻塞 UI。
     setState(() {
       _currentRole = _currentRole.copyWith(
-        proactiveConfig: _currentRole.proactiveConfig.copyWith(enabled: enabled),
+        proactiveConfig: _currentRole.proactiveConfig.copyWith(
+          enabled: enabled,
+        ),
       );
     });
     await RoleService.updateRole(_currentRole);
@@ -2144,6 +1985,172 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       await RoleService.updateRole(_currentRole);
       setState(() {});
     }
+  }
+
+  String _formatQuietPeriods(List<QuietPeriod> periods) {
+    if (periods.isEmpty) return '未设置';
+    return periods.map((period) => period.label).join('、');
+  }
+
+  Future<void> _editQuietPeriods() async {
+    final draft = List<QuietPeriod>.from(
+      _currentRole.proactiveConfig.quietPeriods,
+    );
+    String? validationMessage;
+
+    final result = await showDialog<List<QuietPeriod>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: Row(
+            children: [
+              const Expanded(child: Text('安静时间')),
+              IconButton(
+                tooltip: '添加时段',
+                icon: const Icon(Icons.add),
+                onPressed: () {
+                  setDialogState(() {
+                    draft.add(
+                      const QuietPeriod(
+                        startMinute: 13 * 60,
+                        endMinute: 14 * 60,
+                      ),
+                    );
+                    validationMessage = null;
+                  });
+                },
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var index = 0; index < draft.length; index++)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextButton(
+                              onPressed: () async {
+                                final period = draft[index];
+                                final picked = await showTimePicker(
+                                  context: dialogContext,
+                                  initialTime: TimeOfDay(
+                                    hour: period.startMinute ~/ 60,
+                                    minute: period.startMinute % 60,
+                                  ),
+                                );
+                                if (!dialogContext.mounted) return;
+                                if (picked != null) {
+                                  setDialogState(() {
+                                    draft[index] = period.copyWith(
+                                      startMinute:
+                                          picked.hour * 60 + picked.minute,
+                                    );
+                                    validationMessage = null;
+                                  });
+                                }
+                              },
+                              child: Text(
+                                QuietPeriod.formatMinute(
+                                  draft[index].startMinute,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const Text('至'),
+                          Expanded(
+                            child: TextButton(
+                              onPressed: () async {
+                                final period = draft[index];
+                                final picked = await showTimePicker(
+                                  context: dialogContext,
+                                  initialTime: TimeOfDay(
+                                    hour: period.endMinute ~/ 60,
+                                    minute: period.endMinute % 60,
+                                  ),
+                                );
+                                if (!dialogContext.mounted) return;
+                                if (picked != null) {
+                                  setDialogState(() {
+                                    draft[index] = period.copyWith(
+                                      endMinute:
+                                          picked.hour * 60 + picked.minute,
+                                    );
+                                    validationMessage = null;
+                                  });
+                                }
+                              },
+                              child: Text(
+                                QuietPeriod.formatMinute(
+                                  draft[index].endMinute,
+                                ),
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: '删除时段',
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () {
+                              setDialogState(() {
+                                draft.removeAt(index);
+                                validationMessage = null;
+                              });
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  if (draft.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text('未设置安静时间'),
+                    ),
+                  if (validationMessage != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        validationMessage!,
+                        style: const TextStyle(color: Colors.red),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () {
+                final message = validateQuietPeriods(draft);
+                if (message != null) {
+                  setDialogState(() => validationMessage = message);
+                  return;
+                }
+                Navigator.pop(dialogContext, List<QuietPeriod>.from(draft));
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result == null) return;
+    _currentRole = _currentRole.copyWith(
+      proactiveConfig: _currentRole.proactiveConfig.copyWith(
+        quietPeriods: result,
+      ),
+    );
+    await RoleService.updateRole(_currentRole);
+    if (mounted) setState(() {});
   }
 
   // ========== 无回复续写配置方法 ==========

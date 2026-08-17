@@ -65,6 +65,14 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("$ 是唯一允许的标签外分隔符", prompt)
         self.assertLess(prompt.index("消息格式协议 - 最高优先级"), prompt.index("你的人设：测试人设"))
 
+    def test_grok_prompt_uses_conservative_tool_policy(self):
+        grok_prompt = _build_system_prompt({"id": "role-1", "ai_model": "xAI-gRoK-4"})
+        standard_prompt = _build_system_prompt({"id": "role-1", "ai_model": "gpt-4o"})
+
+        self.assertIn("Grok 工具调用约束", grok_prompt)
+        self.assertNotIn("Grok 工具调用约束", standard_prompt)
+        self.assertIn("表情工具完全可选", grok_prompt)
+
     def test_stats_enabled_requires_a_stats_block_on_every_reply(self):
         prompt = _build_system_prompt(
             {
@@ -78,8 +86,42 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("数值块 - 最高优先级", prompt)
         self.assertIn("每一次回复都必须且只能包含一个完整的 <数值>...</数值> 块", prompt)
+        self.assertIn("stats_current 是独立字段（不在 message 文本内）", prompt)
+        self.assertIn("必须承接 stats_current 与历史最近数值块中的状态", prompt)
+        self.assertIn("即使数值未变化也要完整回写", prompt)
         self.assertIn("数值系统启用时不得输出 <无回复/>", prompt)
         self.assertIn("使用单个 $ 与相邻完整标签块分隔", prompt)
+
+    def test_grok_stats_block_is_appended_to_the_final_dialogue(self):
+        role = {
+            "id": "role-1",
+            "ai_model": "grok-4.3",
+            "stats_config": {
+                "enabled": True,
+                "stats": [{"key": "trust", "name": "信任", "min": 0, "max": 100}],
+            },
+        }
+        prompt = _build_system_prompt(role)
+
+        self.assertIn("唯一 <数值> 块必须放在所有 <对话> 块之后", prompt)
+        self.assertIn("两者之间不得有 $ 或换行", prompt)
+        self.assertIn(
+            "<对话>第一句</对话>$<对话>第二句</对话><数值>好感:80</数值>",
+            prompt,
+        )
+
+    def test_sound_prompt_deduplicates_semantically_identical_sounds(self):
+        prompt = _build_system_prompt({"id": "role-1", "show_sound": True})
+
+        self.assertIn("声音系统 - 去重规则", prompt)
+        self.assertIn("必须检查当前上下文和历史消息中已经出现的所有 <声音> 内容", prompt)
+        self.assertIn("轻哼一声”“轻轻哼了一声”“低低地哼了一声", prompt)
+        self.assertIn("没有新声音就省略 <声音> 块", prompt)
+
+    def test_sound_deduplication_rule_is_omitted_when_sound_is_hidden(self):
+        prompt = _build_system_prompt({"id": "role-1", "show_sound": False})
+
+        self.assertNotIn("声音系统 - 去重规则", prompt)
 
     def test_stats_parser_rejects_multiple_stats_blocks(self):
         self.assertEqual(

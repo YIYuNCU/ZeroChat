@@ -483,7 +483,7 @@ async def detect_intent(request: IntentDetectRequest):
       ai_config = settings_service.get_ai_config()
       api_url = request.api_url or ai_config.get("api_url")
       api_key = request.api_key or ai_config.get("api_key")
-      model = request.model or ai_config.get("model") or "gpt-3.5-turbo"
+      model = request.model or ai_config.get("model") or "deepseek-chat"
 
       if not api_url or not api_key:
           return IntentDetectResponse(success=False, error="AI API 未配置")
@@ -623,15 +623,13 @@ async def _run_memory_ai_pipeline(
     memory_context = backend_memory_context if backend_memory_context else client_memory_context
 
     combined_parts: List[str] = []
-    if memory_context:
-        combined_parts.append(memory_context)
     if extra_parts:
         combined_parts.extend([str(part).strip() for part in extra_parts if str(part or "").strip()])
     extra_context = "\n\n".join(combined_parts) if combined_parts else None
 
     normalized_request_id = str(request_id or local_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
 
-    # 数值系统：读取当前值注入 prompt（仅主 App 路径，onebot 不启用四部分/数值）
+    # 数值系统：当前值随本次用户消息发送（仅主 App 路径，onebot 不启用四部分/数值）
     stats_current = None
     if not origin.startswith("onebot"):
         try:
@@ -645,6 +643,7 @@ async def _run_memory_ai_pipeline(
         user_message=user_message,
         history=history,
         extra_context=extra_context,
+        core_memory_context=memory_context or None,
         vector_memories=vector_memories,
         origin=origin,
         sender=user_sender,
@@ -1251,7 +1250,7 @@ def _resolve_role_or_global_chat_config(role_id: Optional[str]) -> Dict[str, str
     resolved = {
         "api_url": global_ai.get("api_url", ""),
         "api_key": global_ai.get("api_key", ""),
-        "model": global_ai.get("model", "gpt-3.5-turbo"),
+        "model": global_ai.get("model", "deepseek-chat"),
     }
 
     role_key = str(role_id or "").strip()
@@ -1384,7 +1383,7 @@ async def chat_with_vision(request: VisionRequest):
         if mode == "tool":
             chat_cfg = _resolve_role_or_global_chat_config(request.role_id)
             role_id_text = str(request.role_id or "").strip()
-            chat_model = str(chat_cfg.get("model") or "gpt-3.5-turbo")
+            chat_model = str(chat_cfg.get("model") or "deepseek-chat")
             guide_parts = [
                 "[图片附件 - 必须执行] 用户本次发送了一张图片。"
                 "回复前必须调用 recognize_image 工具；可在 focus 中说明想重点关注的细节。"
@@ -1394,7 +1393,7 @@ async def chat_with_vision(request: VisionRequest):
             try:
                 if role_id_text and not is_tool_role_id(role_id_text):
                     role_for_pipeline = load_role(role_id_text) or {"id": role_id_text, "name": "vision_chat"}
-                    role_for_pipeline["ai_model"] = role_for_pipeline.get("ai_model") or str(chat_cfg.get("model") or "gpt-3.5-turbo")
+                    role_for_pipeline["ai_model"] = role_for_pipeline.get("ai_model") or str(chat_cfg.get("model") or "deepseek-chat")
                     role_for_pipeline["ai_api_url"] = role_for_pipeline.get("ai_api_url") or str(chat_cfg.get("api_url") or "")
                     role_for_pipeline["ai_api_key"] = role_for_pipeline.get("ai_api_key") or str(chat_cfg.get("api_key") or "")
                     chat_model = str(role_for_pipeline.get("ai_model") or chat_model)
@@ -1431,7 +1430,7 @@ async def chat_with_vision(request: VisionRequest):
                     fallback_role = {
                         "id": role_id_text or "vision_tool",
                         "name": "vision_chat",
-                        "ai_model": str(chat_cfg.get("model") or "gpt-3.5-turbo"),
+                        "ai_model": str(chat_cfg.get("model") or "deepseek-chat"),
                         "ai_api_url": str(chat_cfg.get("api_url") or ""),
                         "ai_api_key": str(chat_cfg.get("api_key") or ""),
                     }
@@ -1488,11 +1487,11 @@ async def chat_with_vision(request: VisionRequest):
         chat_cfg = _resolve_role_or_global_chat_config(request.role_id)
         role_id_text = str(request.role_id or "").strip()
         reply = ""
-        chat_model = str(chat_cfg.get("model") or "gpt-3.5-turbo")
+        chat_model = str(chat_cfg.get("model") or "deepseek-chat")
 
         if role_id_text and not is_tool_role_id(role_id_text):
             role_for_pipeline = load_role(role_id_text) or {"id": role_id_text, "name": "vision_chat"}
-            role_for_pipeline["ai_model"] = role_for_pipeline.get("ai_model") or str(chat_cfg.get("model") or "gpt-3.5-turbo")
+            role_for_pipeline["ai_model"] = role_for_pipeline.get("ai_model") or str(chat_cfg.get("model") or "deepseek-chat")
             role_for_pipeline["ai_api_url"] = role_for_pipeline.get("ai_api_url") or str(chat_cfg.get("api_url") or "")
             role_for_pipeline["ai_api_key"] = role_for_pipeline.get("ai_api_key") or str(chat_cfg.get("api_key") or "")
             chat_model = str(role_for_pipeline.get("ai_model") or chat_model)
@@ -1548,7 +1547,7 @@ async def chat_with_vision(request: VisionRequest):
                 api_url=str(chat_cfg.get("api_url") or ""),
                 api_key=str(chat_cfg.get("api_key") or ""),
                 body={
-                    "model": str(chat_cfg.get("model") or "gpt-3.5-turbo"),
+                    "model": str(chat_cfg.get("model") or "deepseek-chat"),
                     "messages": final_messages,
                     "max_tokens": 1024,
                 },

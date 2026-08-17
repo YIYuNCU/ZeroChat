@@ -2,10 +2,11 @@ import base64
 import hashlib
 import json
 import unittest
+from copy import deepcopy
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from routers.settings import SettingsUpdate, update_settings
 from routers import roles as roles_router
@@ -20,6 +21,7 @@ from services.ai_tools import (
     _WRITE_MEMORY_TOOL,
 )
 from services.ai_service import (
+    _post_chat,
     _consume_inline_emoji_tool_markup,
     _handle_tool_calls,
     _normalize_embedding_url,
@@ -32,6 +34,251 @@ from transport import ws_dispatcher
 
 
 class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_grok_request_uses_generic_request_without_thinking(self):
+        response = type(
+            "Response",
+            (),
+            {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {
+                    "choices": [{"message": {"content": "ok"}}],
+                },
+            },
+        )()
+        client = type("Client", (), {"post": AsyncMock(return_value=response)})()
+        with patch("services.ai_service._get_http_client", return_value=client), patch(
+            "services.ai_service.settings_service.load_settings",
+            return_value={"thinking_enabled": False},
+        ):
+            result = await _post_chat(
+                messages=[{"role": "user", "content": "hello"}],
+                api_url="https://api.x.ai/v1/chat/completions",
+                api_key="test-key",
+                model="grok-4.3",
+                temperature=0.7,
+                max_tokens=100,
+            )
+
+        self.assertTrue(result["success"])
+        kwargs = client.post.await_args.kwargs
+        self.assertNotIn("x-grok-conv-id", kwargs["headers"])
+        self.assertNotIn("thinking", kwargs["json"])
+
+    async def test_deepseek_request_keeps_existing_thinking_control(self):
+        response = type(
+            "Response",
+            (),
+            {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {
+                    "choices": [{"message": {"content": "ok"}}],
+                },
+            },
+        )()
+        client = type("Client", (), {"post": AsyncMock(return_value=response)})()
+        with patch("services.ai_service._get_http_client", return_value=client), patch(
+            "services.ai_service.settings_service.load_settings",
+            return_value={"thinking_enabled": False},
+        ):
+            await _post_chat(
+                messages=[{"role": "user", "content": "hello"}],
+                api_url="https://api.example.com/v1/chat/completions",
+                api_key="test-key",
+                model="deepseek-chat",
+                temperature=0.7,
+                max_tokens=100,
+            )
+
+        kwargs = client.post.await_args.kwargs
+        self.assertNotIn("x-grok-conv-id", kwargs["headers"])
+        self.assertEqual(kwargs["json"]["thinking"], {"type": "disabled"})
+
+    async def test_gemini_request_omits_deepseek_thinking_extension(self):
+        response = type(
+            "Response",
+            (),
+            {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {
+                    "choices": [{"message": {"content": "ok"}}],
+                },
+            },
+        )()
+        client = type("Client", (), {"post": AsyncMock(return_value=response)})()
+        with patch("services.ai_service._get_http_client", return_value=client), patch(
+            "services.ai_service.settings_service.load_settings",
+            return_value={"thinking_enabled": False},
+        ):
+            await _post_chat(
+                messages=[{"role": "user", "content": "hello"}],
+                api_url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                api_key="test-key",
+                model="gemini-3-flash-preview",
+                temperature=0.7,
+                max_tokens=100,
+            )
+
+        self.assertNotIn("thinking", client.post.await_args.kwargs["json"])
+
+    async def test_gemini_appends_image_fallback_to_preserve_cache_prefix(self):
+        captured_messages = []
+
+        async def call_model(_role_data, messages, **_kwargs):
+            captured_messages.append(deepcopy(messages))
+            if len(captured_messages) == 1:
+                return {"success": True, "content": "I cannot inspect the image."}
+            return {"success": True, "content": "done"}
+
+        with patch(
+            "services.ai_service._call_with_role_config", side_effect=call_model
+        ), patch(
+            "services.ai_service.execute_recognize_image",
+            new=AsyncMock(return_value="a sunset"),
+        ):
+            result = await generate_with_role(
+                {"id": "role-1", "ai_model": "gemini-3-flash-preview"},
+                "what is in this image?",
+                vision_context={"image_data_urls": ["data:image/png;base64,AA=="]},
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            [item["role"] for item in captured_messages[1]],
+            ["system", "user", "user"],
+        )
+        self.assertIn("Image recognition result", captured_messages[1][-1]["content"])
+
+    async def test_gemini_tool_round_replays_opaque_signature_metadata(self):
+        signature_result = {
+            "success": True,
+            "content": "",
+            "assistant_content": None,
+            "tool_calls": [
+                {
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {
+                        "name": "search_memory",
+                        "arguments": {"query": "birthday"},
+                    },
+                    "extra_content": {
+                        "google": {"thought_signature": "signed-state"},
+                    },
+                }
+            ],
+        }
+        messages = [{"role": "user", "content": "when is my birthday?"}]
+        with patch(
+            "services.ai_service._call_with_role_config",
+            new=AsyncMock(return_value={"success": True, "content": "tomorrow"}),
+        ), patch(
+            "services.ai_service.execute_search_memory",
+            new=AsyncMock(return_value="birthday: tomorrow"),
+        ):
+            await _handle_tool_calls(
+                signature_result,
+                messages,
+                {"id": "role-1", "ai_model": "gemini-3-flash-preview"},
+                tools=None,
+            )
+
+        self.assertEqual(
+            messages[1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "signed-state",
+        )
+
+    async def test_grok_tool_round_uses_standard_call_path(self):
+        initial_result = {
+            "success": True,
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_schedule",
+                    "type": "function",
+                    "function": {
+                        "name": "schedule_task",
+                        "arguments": {
+                            "message": "reminder",
+                            "trigger_time": "2026-08-13T09:00:00",
+                            "repeat": "none",
+                        },
+                    },
+                },
+            ],
+        }
+        call_model = AsyncMock(
+            side_effect=[initial_result, {"success": True, "content": "done"}]
+        )
+        with patch(
+            "services.ai_service._call_with_role_config", call_model
+        ), patch(
+            "services.ai_service.execute_schedule_task",
+            new=AsyncMock(return_value="scheduled"),
+        ):
+            result = await generate_with_role(
+                {"id": "role-1", "ai_model": "grok-4.3"},
+                "remind me",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(call_model.await_count, 2)
+        self.assertNotIn("grok_conversation_id", call_model.await_args_list[0].kwargs)
+        self.assertNotIn("grok_conversation_id", call_model.await_args_list[1].kwargs)
+
+    async def test_grok_keeps_core_memory_and_stats_in_user_message(self):
+        captured_messages = []
+
+        async def call_model(_role_data, messages, **_kwargs):
+            captured_messages.append(deepcopy(messages))
+            return {"success": True, "content": "done"}
+
+        role = {
+            "id": "role-1",
+            "ai_model": "grok-4.3",
+            "stats_config": {
+                "enabled": True,
+                "stats": [{"key": "trust", "name": "Trust", "min": 0, "max": 100}],
+            },
+        }
+        with patch(
+            "services.ai_service._call_with_role_config", side_effect=call_model
+        ):
+            await generate_with_role(
+                role,
+                "hello",
+                core_memory_context="memory version one",
+                stats_current={"trust": 10},
+            )
+            await generate_with_role(
+                role,
+                "hello again",
+                core_memory_context="memory version two",
+                stats_current={"trust": 20},
+            )
+
+        self.assertEqual(
+            [item["role"] for item in captured_messages[0]],
+            ["system", "user"],
+        )
+        self.assertEqual(
+            [item["role"] for item in captured_messages[1]],
+            ["system", "user"],
+        )
+        self.assertEqual(captured_messages[0][0], captured_messages[1][0])
+        self.assertNotIn("核心记忆", captured_messages[0][0]["content"])
+        self.assertIn("当前值见用户消息的 stats_current 字段", captured_messages[0][0]["content"])
+        self.assertNotIn("当前 10", captured_messages[0][0]["content"])
+        first_payload = json.loads(captured_messages[0][-1]["content"])
+        second_payload = json.loads(captured_messages[1][-1]["content"])
+        self.assertEqual(first_payload["core_memory"], "memory version one")
+        self.assertEqual(second_payload["core_memory"], "memory version two")
+        self.assertEqual(first_payload["stats_current"], {"trust": 10})
+        self.assertEqual(second_payload["stats_current"], {"trust": 20})
+        self.assertLess(
+            captured_messages[0][-1]["content"].index('"core_memory"'),
+            captured_messages[0][-1]["content"].index('"stats_current"'),
+        )
+
     def test_period_cycle_advance_applies_a_bounded_variation(self):
         with patch("services.memory_service.random.randint", return_value=-2):
             advanced = _advance_period_cycles(
@@ -226,6 +473,51 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[0]["reasoning_content"], "需要表达关心")
         self.assertEqual(messages[1]["tool_call_id"], "call_love_1")
         self.assertEqual(normalized["_emojis_called"], ["love"])
+
+    async def test_cloud_emoji_is_preferred_when_both_emoji_tools_are_called(self):
+        result = {
+            "tool_calls": [
+                {
+                    "id": "call_local",
+                    "type": "function",
+                    "function": {
+                        "name": "send_emotion_emoji",
+                        "arguments": {"emotion": "love"},
+                    },
+                },
+                {
+                    "id": "call_cloud",
+                    "type": "function",
+                    "function": {
+                        "name": "send_emoji",
+                        "arguments": {"keyword": "cute", "count": 1, "emotion": "love"},
+                    },
+                },
+            ],
+        }
+        plugin = type(
+            "Plugin",
+            (),
+            {
+                "TOOL_NAMES": {"send_emoji"},
+                "execute": AsyncMock(
+                    return_value=[{"category": "__cloud__", "filename": "cute.png"}]
+                ),
+            },
+        )()
+        with patch(
+            "services.ai_service.execute_send_emotion_emoji",
+            return_value="[love]",
+        ), patch("services.ai_service._emoji_plugin", plugin), patch(
+            "services.ai_service._call_with_role_config",
+            return_value={"success": True, "content": "ok"},
+        ):
+            normalized = await _handle_tool_calls(result, [], {"id": "role-1"}, [])
+
+        self.assertEqual(
+            normalized["_emojis_called"],
+            [{"category": "__cloud__", "filename": "cute.png"}],
+        )
 
     def test_previous_image_cache_keeps_the_complete_batch(self):
         images = [f"data:image/png;base64,image-{index}" for index in range(7)]

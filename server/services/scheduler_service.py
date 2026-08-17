@@ -79,6 +79,64 @@ def _is_quiet_hour(hour: int, start: int, end: int) -> bool:
     return hour >= start or hour < end
 
 
+def _get_quiet_periods(proactive_config: Dict) -> List[tuple[int, int]]:
+    """Return configured minute-precision periods, with legacy-hour fallback."""
+    raw_periods = proactive_config.get("quiet_periods")
+    if isinstance(raw_periods, list):
+        periods = []
+        for item in raw_periods:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = int(item.get("start_minute"))
+                end = int(item.get("end_minute"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= start < 24 * 60 and 0 <= end < 24 * 60 and start != end:
+                periods.append((start, end))
+        return periods
+
+    try:
+        start = int(proactive_config.get("quiet_hours_start", 23)) * 60
+        end = int(proactive_config.get("quiet_hours_end", 7)) * 60
+    except (TypeError, ValueError):
+        return [(23 * 60, 7 * 60)]
+    return [] if start == end else [(start, end)]
+
+
+def _quiet_period_end(candidate: datetime, periods: List[tuple[int, int]]) -> Optional[datetime]:
+    """Return the end of the quiet period containing candidate, if any."""
+    minute = candidate.hour * 60 + candidate.minute
+    for start, end in periods:
+        in_period = start <= minute < end if start < end else minute >= start or minute < end
+        if not in_period:
+            continue
+
+        end_date = candidate.date()
+        if start > end and minute >= start:
+            end_date += timedelta(days=1)
+        return candidate.replace(
+            year=end_date.year,
+            month=end_date.month,
+            day=end_date.day,
+            hour=end // 60,
+            minute=end % 60,
+            second=0,
+            microsecond=0,
+        )
+    return None
+
+
+def _next_allowed_time(candidate: datetime, periods: List[tuple[int, int]]) -> datetime:
+    """Move a scheduled time out of any configured quiet period."""
+    for _ in range(len(periods) + 1):
+        quiet_end = _quiet_period_end(candidate, periods)
+        if quiet_end is None:
+            return candidate
+        candidate = quiet_end
+    return candidate
+
+
 def _persist_next_proactive_time(
     profile_file: Path,
     role: Dict,
@@ -141,15 +199,7 @@ def schedule_proactive_for_role(role_id: str, *, reset: bool = False):
         max_minutes = max(min_minutes, int(proactive_config.get("max_interval_minutes", 120)))
         next_run = now + timedelta(minutes=random.randint(min_minutes, max_minutes))
     
-    # 检查安静时间
-    quiet_start = proactive_config.get("quiet_hours_start", 23)
-    quiet_end = proactive_config.get("quiet_hours_end", 7)
-    
-    if _is_quiet_hour(next_run.hour, quiet_start, quiet_end):
-        # 候选时间落在安静时段时，推迟到该时段结束。
-        next_run = next_run.replace(hour=quiet_end, minute=0, second=0, microsecond=0)
-        if next_run <= now:
-            next_run += timedelta(days=1)
+    next_run = _next_allowed_time(next_run, _get_quiet_periods(proactive_config))
 
     _persist_next_proactive_time(profile_file, role, next_run)
     
@@ -336,21 +386,18 @@ def _save_followups(data: Dict[str, Dict]):
         logger.warning(f"Failed to save followups: {e}")
 
 
-def _get_role_quiet_hours(role_id: str) -> tuple:
-    """读取角色的安静时段（复用 proactive_config，保持与主动消息一致）"""
+def _get_role_quiet_periods(role_id: str) -> List[tuple[int, int]]:
+    """Read a role's quiet periods for follow-up scheduling."""
     profile_file = ROLES_DIR / role_id / "profile.json"
     if not profile_file.exists():
-        return (23, 7)
+        return [(23 * 60, 7 * 60)]
     try:
         with open(profile_file, "r", encoding="utf-8") as f:
             role = json.load(f)
         proactive_config = role.get("proactive_config") or {}
-        return (
-            int(proactive_config.get("quiet_hours_start", 23)),
-            int(proactive_config.get("quiet_hours_end", 7)),
-        )
+        return _get_quiet_periods(proactive_config)
     except Exception:
-        return (23, 7)
+        return [(23 * 60, 7 * 60)]
 
 
 def schedule_followup(
@@ -374,12 +421,7 @@ def schedule_followup(
     now = datetime.now()
     next_run = now + timedelta(minutes=max(1, int(delay_minutes)))
 
-    # 遵守安静时段：落在安静时段则推移到时段结束
-    quiet_start, quiet_end = _get_role_quiet_hours(role_id)
-    if _is_quiet_hour(next_run.hour, quiet_start, quiet_end):
-        next_run = next_run.replace(hour=quiet_end, minute=0, second=0, microsecond=0)
-        if next_run <= now:
-            next_run += timedelta(days=1)
+    next_run = _next_allowed_time(next_run, _get_role_quiet_periods(role_id))
 
     followups = _load_followups()
     followups[role_id] = {

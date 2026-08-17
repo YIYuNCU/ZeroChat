@@ -1,5 +1,7 @@
 import 'dart:math';
 
+import 'message_parts.dart';
+
 /// 分段发送控制器
 /// 将 AI 回复按 $ 符号拆分为多段，逐条发送（模拟真人聊天）
 class SegmentSender {
@@ -26,7 +28,45 @@ class SegmentSender {
       return [content.trim()];
     }
 
-    return segments;
+    return _mergeSegmentsWithoutDialogue(segments);
+  }
+
+  /// Every displayed segment must include dialogue, so merge descriptions and
+  /// other non-dialogue fragments into a neighbouring dialogue segment.
+  static List<String> _mergeSegmentsWithoutDialogue(List<String> segments) {
+    final merged = <String>[];
+    final leadingDescriptions = <String>[];
+
+    for (final segment in segments) {
+      final parts = MessageParts.parse(segment, allowFact: false);
+      final hasDialogue = parts.dialogue.trim().isNotEmpty;
+      if (!hasDialogue) {
+        if (merged.isNotEmpty &&
+            MessageParts.parse(merged.last, allowFact: false)
+                .dialogue
+                .trim()
+                .isNotEmpty) {
+          merged[merged.length - 1] += segment;
+        } else {
+          leadingDescriptions.add(segment);
+        }
+        continue;
+      }
+
+      if (hasDialogue && leadingDescriptions.isNotEmpty) {
+        merged.add('${leadingDescriptions.join()}$segment');
+        leadingDescriptions.clear();
+      } else {
+        merged.add(segment);
+      }
+    }
+
+    // A malformed reply without dialogue still renders as one message rather
+    // than multiple standalone description messages.
+    if (leadingDescriptions.isNotEmpty) {
+      merged.add(leadingDescriptions.join());
+    }
+    return merged;
   }
 
   /// 生成随机发送延迟（300ms ~ 1200ms）

@@ -33,7 +33,7 @@ def get_default_settings() -> Dict[str, Any]:
         "port": 8000,
         "ai_api_url": "",
         "ai_api_key": "",
-        "ai_model": "gpt-3.5-turbo",
+        "ai_model": "deepseek-chat",
         "intent_enabled": False,
         "intent_api_url": "",
         "intent_api_key": "",
@@ -106,7 +106,7 @@ def get_ai_config() -> Dict[str, str]:
     return {
         "api_url": settings.get("ai_api_url", ""),
         "api_key": settings.get("ai_api_key", ""),
-        "model": settings.get("ai_model", "gpt-3.5-turbo"),
+        "model": settings.get("ai_model", "deepseek-chat"),
     }
 
 

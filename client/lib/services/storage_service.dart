@@ -101,9 +101,6 @@ class StorageService {
   static const String keyRolesHash = 'roles_hash';
   static const String keyCurrentRoleId = 'current_role_id';
   static const String keyCoreMemory = 'core_memory';
-  static const String keyQuietTimeStart = 'quiet_time_start';
-  static const String keyQuietTimeEnd = 'quiet_time_end';
-  static const String keyQuietTimeEnabled = 'quiet_time_enabled';
   static const String keyScheduledTasks = 'scheduled_tasks';
   static const String keyChatApiConfig = 'chat_api_config';
   static const String keyIntentApiConfig = 'intent_api_config';

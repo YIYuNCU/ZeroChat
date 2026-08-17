@@ -75,11 +75,6 @@ class ScheduledTask {
 class TaskService {
   static final List<ScheduledTask> _tasks = [];
 
-  // 安静时间设置（复用 ProactiveConfig 的逻辑，但保留全局设置作为备用）
-  static bool _quietTimeEnabled = false;
-  static int _quietTimeStart = 23;
-  static int _quietTimeEnd = 7;
-
   /// in-flight 去重与 TTL 节流：启动路径两处拉取不会重复往返。
   static Future<bool>? _inFlightFetch;
   static DateTime? _lastFetchAt;
@@ -88,7 +83,6 @@ class TaskService {
   /// 初始化任务服务
   static Future<void> init() async {
     await _loadTasks();
-    await _loadQuietTime();
     await fetchFromBackend();
     debugPrint('TaskService initialized with ${_tasks.length} tasks');
   }
@@ -96,52 +90,7 @@ class TaskService {
   /// 仅加载本地缓存（无网络请求），用于启动加速
   static Future<void> loadLocalOnly() async {
     await _loadTasks();
-    await _loadQuietTime();
     debugPrint('TaskService local cache loaded: ${_tasks.length} tasks');
-  }
-
-  // ========== 安静时间管理 ==========
-
-  static Future<void> _loadQuietTime() async {
-    _quietTimeEnabled =
-        StorageService.getBool(StorageService.keyQuietTimeEnabled) ?? false;
-    _quietTimeStart =
-        StorageService.getInt(StorageService.keyQuietTimeStart) ?? 23;
-    _quietTimeEnd = StorageService.getInt(StorageService.keyQuietTimeEnd) ?? 7;
-  }
-
-  static Future<void> setQuietTime({
-    required bool enabled,
-    int startHour = 23,
-    int endHour = 7,
-  }) async {
-    _quietTimeEnabled = enabled;
-    _quietTimeStart = startHour;
-    _quietTimeEnd = endHour;
-    await StorageService.setBool(StorageService.keyQuietTimeEnabled, enabled);
-    await StorageService.setInt(StorageService.keyQuietTimeStart, startHour);
-    await StorageService.setInt(StorageService.keyQuietTimeEnd, endHour);
-    debugPrint('Quiet time set: $enabled ($startHour:00 - $endHour:00)');
-  }
-
-  static bool isQuietTime() {
-    if (!_quietTimeEnabled) return false;
-    final now = DateTime.now();
-    final hour = now.hour;
-
-    if (_quietTimeStart <= _quietTimeEnd) {
-      return hour >= _quietTimeStart && hour < _quietTimeEnd;
-    } else {
-      return hour >= _quietTimeStart || hour < _quietTimeEnd;
-    }
-  }
-
-  static Map<String, dynamic> getQuietTimeSettings() {
-    return {
-      'enabled': _quietTimeEnabled,
-      'start_hour': _quietTimeStart,
-      'end_hour': _quietTimeEnd,
-    };
   }
 
   // ========== 任务管理 ==========
@@ -186,14 +135,15 @@ class TaskService {
     // 尝试同步到后端，失败时仅本地保存
     String? backendId;
     try {
-      final data = await SecureWebSocketClient.instance.request('tasks_create', {
-        'chat_id': chatId,
-        'role_id': roleId,
-        'message': message,
-        'ai_prompt': aiPrompt ?? '',
-        'trigger_time': triggerTime.toIso8601String(),
-        'repeat': null,
-      });
+      final data = await SecureWebSocketClient.instance
+          .request('tasks_create', {
+            'chat_id': chatId,
+            'role_id': roleId,
+            'message': message,
+            'ai_prompt': aiPrompt ?? '',
+            'trigger_time': triggerTime.toIso8601String(),
+            'repeat': null,
+          });
       backendId = data['id']?.toString();
     } catch (e) {
       debugPrint('TaskService: Backend create failed, saving locally: $e');
@@ -317,21 +267,27 @@ class TaskService {
   static Future<bool> _doFetchFromBackend() async {
     _lastFetchAt = DateTime.now();
     try {
-      final data = await SecureWebSocketClient.instance.request('tasks_list', {});
+      final data = await SecureWebSocketClient.instance.request(
+        'tasks_list',
+        {},
+      );
       if (data['tasks'] is List) {
         final remoteTasks = <ScheduledTask>[];
         for (final raw in data['tasks'] as List) {
           if (raw is! Map) continue;
           final map = Map<String, dynamic>.from(raw);
-          final triggerTime =
-              DateTime.tryParse(map['trigger_time']?.toString() ?? '');
+          final triggerTime = DateTime.tryParse(
+            map['trigger_time']?.toString() ?? '',
+          );
           if (triggerTime == null) continue;
 
           remoteTasks.add(
             ScheduledTask(
               id: map['id']?.toString() ?? '',
               chatId:
-                  map['chat_id']?.toString() ?? map['role_id']?.toString() ?? '',
+                  map['chat_id']?.toString() ??
+                  map['role_id']?.toString() ??
+                  '',
               roleId: map['role_id']?.toString() ?? '',
               message: map['message']?.toString() ?? '',
               aiPrompt: map['ai_prompt']?.toString(),

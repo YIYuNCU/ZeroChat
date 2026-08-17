@@ -493,36 +493,6 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 设置免打扰时间段
-  Future<void> setQuietHours(int startHour, int endHour) async {
-    await StorageService.setInt('quiet_start_hour', startHour);
-    await StorageService.setInt('quiet_end_hour', endHour);
-    debugPrint(
-      'SettingsService: Quiet hours set to $startHour:00 - $endHour:00',
-    );
-    notifyListeners();
-  }
-
-  /// 获取免打扰开始时间
-  int get quietStartHour => StorageService.getInt('quiet_start_hour') ?? 23;
-
-  /// 获取免打扰结束时间
-  int get quietEndHour => StorageService.getInt('quiet_end_hour') ?? 7;
-
-  /// 检查当前是否在免打扰时间段内
-  bool get isInQuietHours {
-    final now = DateTime.now().hour;
-    final start = quietStartHour;
-    final end = quietEndHour;
-
-    if (start <= end) {
-      return now >= start && now < end;
-    } else {
-      // 跨午夜情况（如 23:00 - 07:00）
-      return now >= start || now < end;
-    }
-  }
-
   /// 更新全局提示词
   Future<void> updatePrompts({
     String? basePrompt,

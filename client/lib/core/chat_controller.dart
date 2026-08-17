@@ -33,11 +33,7 @@ class _PendingChatItem {
   final String? text;
   final String? imagePath;
 
-  const _PendingChatItem({
-    required this.messageId,
-    this.text,
-    this.imagePath,
-  });
+  const _PendingChatItem({required this.messageId, this.text, this.imagePath});
 
   bool get isImage => imagePath != null;
 }
@@ -872,67 +868,62 @@ class ChatController extends ChangeNotifier {
     // 根据意图类型执行副作用（不直接回复，交给 AI 自然回复）
     if (intent != null) {
       switch (intent.type) {
-      case IntentType.setMemory:
-        // 保存到核心记忆
-        await MemoryService.addToCoreMemory(
-          intent.extractedContent ?? userMessage,
-        );
-        debugPrint(
-          'ChatController: Memory saved, continuing to AI for natural reply',
-        );
-        break;
-
-      case IntentType.clearMemory:
-        // 清除记忆
-        await MemoryService.clearCoreMemory();
-        MemoryService.clearShortTermMemory(chatId);
-        debugPrint(
-          'ChatController: Memory cleared, continuing to AI for natural reply',
-        );
-        break;
-
-      case IntentType.setReminder:
-        if (intent.duration != null) {
-          debugPrint(
-            'ChatController: Reminder intent detected for ${intent.duration}',
+        case IntentType.setMemory:
+          // 保存到核心记忆
+          await MemoryService.addToCoreMemory(
+            intent.extractedContent ?? userMessage,
           );
-          final now = DateTime.now();
-          final triggerTime = now.add(intent.duration!);
-          final reminderContent = (intent.extractedContent ?? userMessage)
-              .trim();
+          debugPrint(
+            'ChatController: Memory saved, continuing to AI for natural reply',
+          );
+          break;
 
-          try {
-            await TaskService.addReminder(
-              chatId: chatId,
-              roleId: role.id,
-              message: reminderContent.isEmpty ? userMessage : reminderContent,
-              triggerTime: triggerTime,
-              aiPrompt:
-                  '你需要在约定时间自然地提醒用户：${reminderContent.isEmpty ? userMessage : reminderContent}。不要说“定时任务”或“系统提醒”。',
-            );
+        case IntentType.clearMemory:
+          // 清除记忆
+          await MemoryService.clearCoreMemory();
+          MemoryService.clearShortTermMemory(chatId);
+          debugPrint(
+            'ChatController: Memory cleared, continuing to AI for natural reply',
+          );
+          break;
+
+        case IntentType.setReminder:
+          if (intent.duration != null) {
             debugPrint(
-              'ChatController: Reminder created at ${triggerTime.toIso8601String()}',
+              'ChatController: Reminder intent detected for ${intent.duration}',
             );
-          } catch (e) {
-            debugPrint('ChatController: Failed to create reminder task: $e');
+            final now = DateTime.now();
+            final triggerTime = now.add(intent.duration!);
+            final reminderContent = (intent.extractedContent ?? userMessage)
+                .trim();
+
+            try {
+              await TaskService.addReminder(
+                chatId: chatId,
+                roleId: role.id,
+                message: reminderContent.isEmpty
+                    ? userMessage
+                    : reminderContent,
+                triggerTime: triggerTime,
+                aiPrompt:
+                    '你需要在约定时间自然地提醒用户：${reminderContent.isEmpty ? userMessage : reminderContent}。不要说“定时任务”或“系统提醒”。',
+              );
+              debugPrint(
+                'ChatController: Reminder created at ${triggerTime.toIso8601String()}',
+              );
+            } catch (e) {
+              debugPrint('ChatController: Failed to create reminder task: $e');
+            }
           }
-        }
-        break;
+          break;
 
-      case IntentType.setQuietTime:
-        if (intent.startHour != null && intent.endHour != null) {
-          await SettingsService.instance.setQuietHours(
-            intent.startHour!,
-            intent.endHour!,
-          );
-          debugPrint(
-            'ChatController: Quiet hours set ${intent.startHour}-${intent.endHour}',
-          );
-        }
-        break;
+        case IntentType.setQuietTime:
+          // Quiet periods are role-level server scheduling settings and are
+          // edited from the chat settings page.
+          break;
 
-      case IntentType.normalChat:
-        break;
+        case IntentType.normalChat:
+          break;
       }
     }
 
@@ -1194,7 +1185,8 @@ class ChatController extends ChangeNotifier {
       final metadata = payload['metadata'] is Map
           ? Map<String, dynamic>.from(payload['metadata'])
           : null;
-      final noReply = metadata?['no_reply'] == true ||
+      final noReply =
+          metadata?['no_reply'] == true ||
           MessageParts.isNoReplyDirective(content);
       final requestId = metadata?['request_id']?.toString().trim();
 
@@ -1204,7 +1196,9 @@ class ChatController extends ChangeNotifier {
         // 无回复仍是一次有效的 assistant 结果，需要进入记忆/数据库；
         // 是否显示气泡由 showNoReply 单独控制。
         assistantContent: content,
-        requestId: (requestId != null && requestId.isNotEmpty) ? requestId : null,
+        requestId: (requestId != null && requestId.isNotEmpty)
+            ? requestId
+            : null,
         jsonMemory: (attachedJson != null && attachedJson.isNotEmpty)
             ? attachedJson
             : null,
@@ -1230,7 +1224,9 @@ class ChatController extends ChangeNotifier {
     } catch (e) {
       // 渲染失败：撤销占位，保留 pending，留待下次恢复重试。
       _renderedTaskIds.remove(taskId);
-      debugPrint('ChatController: deliver recovered reply failed ($taskId): $e');
+      debugPrint(
+        'ChatController: deliver recovered reply failed ($taskId): $e',
+      );
     }
   }
 
@@ -1564,7 +1560,8 @@ class ChatController extends ChangeNotifier {
 
     // Older servers can finish the request synchronously. Preserve tool
     // metadata in this compatibility path as well.
-    if (submitResponse.status == 'completed' && submitResponse.content != null) {
+    if (submitResponse.status == 'completed' &&
+        submitResponse.content != null) {
       await _removePersistedPendingTask(expectedTaskId);
       return _AiReply(
         submitResponse.content!,
@@ -1606,7 +1603,8 @@ class ChatController extends ChangeNotifier {
         if (success && content != null) {
           // 由本次 await 负责渲染：立刻标记已渲染，避免并发恢复路径重复落地。
           _renderedTaskIds.add(taskId);
-          final noReply = metadata?['no_reply'] == true ||
+          final noReply =
+              metadata?['no_reply'] == true ||
               MessageParts.isNoReplyDirective(content);
           debugPrint('ChatController: AI response via backend (async push)');
           final requestId = metadata?['request_id']?.toString().trim();
@@ -1657,14 +1655,16 @@ class ChatController extends ChangeNotifier {
                 final success = pushPayload['success'] == true;
                 final content = pushPayload['content']?.toString();
                 // 若期间到达的迟推送已由监听器落地渲染，则此处不再重复。
-                if (success && content != null &&
+                if (success &&
+                    content != null &&
                     !_renderedTaskIds.contains(taskId)) {
                   _renderedTaskIds.add(taskId);
                   debugPrint('ChatController: AI response via recovery push');
                   final metadata = pushPayload['metadata'] is Map
                       ? Map<String, dynamic>.from(pushPayload['metadata'])
                       : null;
-                  final noReply = metadata?['no_reply'] == true ||
+                  final noReply =
+                      metadata?['no_reply'] == true ||
                       MessageParts.isNoReplyDirective(content);
                   final requestId = metadata?['request_id']?.toString().trim();
                   await MemoryService.appendJsonMemoryPair(
@@ -1919,14 +1919,17 @@ class ChatController extends ChangeNotifier {
     final stickerId =
         '${DateTime.now().microsecondsSinceEpoch}_sticker_${ref.hashCode}';
     await Future.delayed(Duration(milliseconds: 300 + _random.nextInt(500)));
-    await MessageStore.instance.addMessage(chatId, Message(
-      id: stickerId,
-      senderId: roleId,
-      receiverId: 'me',
-      content: StickerService.createStickerMessageContent(category, ref),
-      type: MessageType.sticker,
-      timestamp: DateTime.now(),
-    ));
+    await MessageStore.instance.addMessage(
+      chatId,
+      Message(
+        id: stickerId,
+        senderId: roleId,
+        receiverId: 'me',
+        content: StickerService.createStickerMessageContent(category, ref),
+        type: MessageType.sticker,
+        timestamp: DateTime.now(),
+      ),
+    );
   }
 
   Future<void> _appendAiSticker({
@@ -1942,14 +1945,17 @@ class ChatController extends ChangeNotifier {
       emotion,
       'placeholder://$emotion',
     );
-    await MessageStore.instance.addMessage(chatId, Message(
-      id: placeholderStickerId,
-      senderId: roleId,
-      receiverId: 'me',
-      content: placeholderContent,
-      type: MessageType.sticker,
-      timestamp: DateTime.now(),
-    ));
+    await MessageStore.instance.addMessage(
+      chatId,
+      Message(
+        id: placeholderStickerId,
+        senderId: roleId,
+        receiverId: 'me',
+        content: placeholderContent,
+        type: MessageType.sticker,
+        timestamp: DateTime.now(),
+      ),
+    );
 
     final candidates = <String>[emotion];
     if (defaultEmojiCategory != null && defaultEmojiCategory.isNotEmpty) {
@@ -1973,7 +1979,6 @@ class ChatController extends ChangeNotifier {
       } catch (e) {
         debugPrint('ChatController: Sticker fetch error on $candidate: $e');
       }
-
     }
 
     if (stickerUrl != null) {
@@ -1981,7 +1986,10 @@ class ChatController extends ChangeNotifier {
       await MessageStore.instance.updateMessage(
         chatId,
         placeholderStickerId,
-        content: StickerService.createStickerMessageContent(emotion, stickerUrl),
+        content: StickerService.createStickerMessageContent(
+          emotion,
+          stickerUrl,
+        ),
         type: MessageType.sticker,
       );
       return;

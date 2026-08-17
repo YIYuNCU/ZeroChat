@@ -5,8 +5,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from pydantic import ValidationError
+
 from services import scheduler_service
 from transport.ws_dispatcher import _handle_roles_upsert
+from routers.roles import ProactiveConfig
 
 
 class _FakeScheduler:
@@ -119,6 +122,39 @@ class ProactiveSchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         schedule.assert_called_once_with("role-1", reset=True)
 
+    def test_multiple_minute_quiet_periods_delay_to_the_matching_end(self):
+        periods = [(12 * 60 + 30, 13 * 60 + 45), (22 * 60, 7 * 60)]
+
+        self.assertEqual(
+            scheduler_service._next_allowed_time(
+                datetime(2026, 8, 17, 12, 45), periods
+            ),
+            datetime(2026, 8, 17, 13, 45),
+        )
+        self.assertEqual(
+            scheduler_service._next_allowed_time(
+                datetime(2026, 8, 17, 23, 30), periods
+            ),
+            datetime(2026, 8, 18, 7),
+        )
+
+    def test_legacy_hours_remain_a_single_quiet_period(self):
+        self.assertEqual(
+            scheduler_service._get_quiet_periods(
+                {"quiet_hours_start": 22, "quiet_hours_end": 8}
+            ),
+            [(22 * 60, 8 * 60)],
+        )
+
+    def test_quiet_period_schema_rejects_overlap_and_adjacency(self):
+        with self.assertRaises(ValidationError):
+            ProactiveConfig(
+                quiet_periods=[
+                    {"start_minute": 60, "end_minute": 120},
+                    {"start_minute": 120, "end_minute": 180},
+                ]
+            )
+
 
 class ProactiveUpsertTests(unittest.IsolatedAsyncioTestCase):
     async def test_upsert_merges_config_and_refreshes_scheduler(self):
@@ -168,6 +204,43 @@ class ProactiveUpsertTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["description"], "保留描述")
         save_role.assert_called_once()
         schedule.assert_called_once_with("role-1", reset=True)
+
+    async def test_upsert_replaces_legacy_hours_with_quiet_periods(self):
+        existing = {
+            "id": "role-1",
+            "name": "旧名称",
+            "proactive_config": {
+                "enabled": True,
+                "quiet_hours_start": 23,
+                "quiet_hours_end": 7,
+            },
+        }
+        save_role = MagicMock()
+
+        with patch("transport.ws_dispatcher.roles.load_role", return_value=existing), patch(
+            "transport.ws_dispatcher.roles.save_role", save_role
+        ), patch("services.scheduler_service.schedule_proactive_for_role"):
+            result = await _handle_roles_upsert(
+                {
+                    "role": {
+                        "id": "role-1",
+                        "name": "旧名称",
+                        "proactive_config": {
+                            "quiet_periods": [
+                                {"start_minute": 1320, "end_minute": 420}
+                            ],
+                        },
+                    }
+                },
+                "http://localhost:8000",
+            )
+
+        self.assertEqual(
+            result["proactive_config"]["quiet_periods"],
+            [{"start_minute": 1320, "end_minute": 420}],
+        )
+        self.assertNotIn("quiet_hours_start", result["proactive_config"])
+        self.assertNotIn("quiet_hours_end", result["proactive_config"])
 
 
 if __name__ == "__main__":
