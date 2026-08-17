@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:crypto/crypto.dart';
@@ -19,6 +20,12 @@ class MomentsService extends ChangeNotifier {
 
   List<MomentPost> _posts = [];
   String _localHash = '';
+
+  /// 同类请求去重：全量拉取优先于 hash 校验，保证推送不会被校验请求吞掉。
+  Future<bool>? _inFlightHashSync;
+  Future<bool>? _inFlightFullFetch;
+  DateTime? _lastHashCheckAt;
+  static const Duration _hashCheckThrottle = Duration(seconds: 30);
 
   MomentPost? _parseBackendMoment(Map<String, dynamic> json) {
     try {
@@ -165,8 +172,46 @@ class MomentsService extends ChangeNotifier {
     return null;
   }
 
-  /// 进入朋友圈时调用：仅在 hash 不一致时同步数据
-  Future<bool> syncIfHashMismatch({int limit = 50}) async {
+  /// 进入朋友圈时调用：仅在 hash 不一致时同步数据。
+  ///
+  /// 正常页面进入会在短时间内复用上一次 hash 校验；重连等对账路径可通过
+  /// [force] 跳过节流，但仍与其他网络刷新共享同一个 in-flight 请求。
+  Future<bool> syncIfHashMismatch({int limit = 50, bool force = false}) async {
+    // 已有全量拉取时直接复用，它一定满足本次校验所需的最新快照。
+    final fullFetch = _inFlightFullFetch;
+    if (fullFetch != null) {
+      return fullFetch;
+    }
+
+    final hashSync = _inFlightHashSync;
+    if (hashSync != null) {
+      return hashSync;
+    }
+
+    final future = _syncIfHashMismatch(limit: limit, force: force);
+    _inFlightHashSync = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_inFlightHashSync, future)) {
+        _inFlightHashSync = null;
+      }
+    }
+  }
+
+  Future<bool> _syncIfHashMismatch({
+    required int limit,
+    required bool force,
+  }) async {
+    final now = DateTime.now();
+    final lastCheckAt = _lastHashCheckAt;
+    if (!force &&
+        lastCheckAt != null &&
+        now.difference(lastCheckAt) < _hashCheckThrottle) {
+      return false;
+    }
+    _lastHashCheckAt = now;
+
     final backendHash = await _fetchBackendHash(limit: limit);
     if (backendHash == null || backendHash.isEmpty) {
       return false;
@@ -300,7 +345,30 @@ class MomentsService extends ChangeNotifier {
   // ========== 后端同步 ==========
 
   /// 从后端获取朋友圈列表
-  Future<bool> fetchFromBackend({int limit = 50, String? expectedHash}) async {
+  Future<bool> fetchFromBackend({
+    int limit = 50,
+    String? expectedHash,
+  }) async {
+    final inFlight = _inFlightFullFetch;
+    if (inFlight != null) {
+      return inFlight;
+    }
+
+    final future = _fetchFromBackend(limit: limit, expectedHash: expectedHash);
+    _inFlightFullFetch = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_inFlightFullFetch, future)) {
+        _inFlightFullFetch = null;
+      }
+    }
+  }
+
+  Future<bool> _fetchFromBackend({
+    required int limit,
+    String? expectedHash,
+  }) async {
     try {
       final response = await SecureWebSocketClient.instance.request(
         'moments_list',

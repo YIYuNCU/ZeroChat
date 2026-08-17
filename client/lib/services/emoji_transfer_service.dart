@@ -29,6 +29,19 @@ class EmojiTransferService {
     return _inFlight.putIfAbsent(normalized, () => _download(normalized));
   }
 
+  /// Runs bounded cache maintenance without opening an emoji transfer.
+  static Future<void> trimToBudget() async {
+    try {
+      final root = await getApplicationDocumentsDirectory();
+      final cacheDir = Directory(
+        '${root.path}${Platform.pathSeparator}emoji_cache',
+      );
+      await _enforceCacheBudget(cacheDir);
+    } catch (error) {
+      debugPrint('EmojiTransferService: cache maintenance failed: $error');
+    }
+  }
+
   static Future<String?> _download(String reference) async {
     try {
       final cachedPath = await _findCachedPath(reference);

@@ -266,6 +266,12 @@ class AvatarCacheService {
   static const int _maxCacheFiles = 200;
   static const int _maxCacheBytes = 100 * 1024 * 1024; // 100MB
 
+  /// Runs cache maintenance without resolving or downloading an avatar.
+  static Future<void> trimToBudget() async {
+    await _ensureInitialized();
+    await _enforceCacheLimit();
+  }
+
   /// 按 updated_at 升序（最旧优先）逐出，直到文件数与总大小回到上限内。
   static Future<void> _enforceCacheLimit() async {
     try {

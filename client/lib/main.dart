@@ -13,6 +13,7 @@ import 'services/storage_service.dart';
 import 'services/secure_storage_service.dart';
 import 'services/role_service.dart';
 import 'services/memory_service.dart';
+import 'services/media_cache_service.dart';
 import 'services/task_service.dart';
 import 'services/settings_service.dart';
 import 'services/chat_list_service.dart';
@@ -31,6 +32,7 @@ import 'core/message_store.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaCacheService.configureImageCache();
 
   // ========== 最小初始化（仅本地存储，无网络请求） ==========
   await StorageService.init();
@@ -81,6 +83,7 @@ Future<void> _initServicesInBackground() async {
     ChatController.init(),
   ]);
   debugPrint('✅ Local services initialized');
+  unawaited(MediaCacheService.trimDiskCaches());
 
   // ===== Memory/Task 本地部分（先加载缓存再发起网络同步） =====
   // _loadCoreMemory / _loadTasks 是本地 I/O，先完成让 UI 可用
@@ -191,8 +194,8 @@ Future<void> _syncWithBackend() async {
     // 同步角色数据
     await RoleService.syncIfHashMismatch();
 
-    // 同步朋友圈数据
-    await MomentsService.instance.fetchFromBackend();
+    // 本地快照可立即展示，仅在 hash 变化时下载完整朋友圈列表。
+    await MomentsService.instance.syncIfHashMismatch();
 
     // 同步任务数据
     await TaskService.fetchFromBackend();
@@ -275,6 +278,12 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
       unawaited(MessageStore.instance.flushPendingSaves());
       unawaited(SecureWebSocketClient.instance.ensureConnected());
     }
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    MediaCacheService.clearInMemoryImageCache();
+    debugPrint('MediaCacheService: cleared decoded image cache on memory pressure');
   }
 
   @override

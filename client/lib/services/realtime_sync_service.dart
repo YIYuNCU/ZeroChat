@@ -108,7 +108,7 @@ class RealtimeSyncService {
       // 避免刚渲染、尚未回传服务端的 AI 分段被快照合并判为差异而覆盖丢弃。
       await ChatController.instance.recoverPendingChatTasks();
       await TaskService.fetchFromBackend();
-      await MomentsService.instance.fetchFromBackend();
+      await MomentsService.instance.syncIfHashMismatch(force: true);
       debugPrint('RealtimeSyncService: full resync completed');
     } catch (e) {
       debugPrint('RealtimeSyncService: full resync failed: $e');
