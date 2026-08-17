@@ -309,18 +309,16 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 ),
                 onTap: _editProactiveCountdown,
               ),
-              const Divider(height: 1, indent: 16),
-              _buildItem(
-                title: '安静时间',
-                trailing: Text(
-                  _formatQuietPeriods(
-                    _currentRole.proactiveConfig.quietPeriods,
-                  ),
-                  style: const TextStyle(color: Color(0xFF888888)),
-                ),
-                onTap: _editQuietPeriods,
-              ),
             ],
+            const Divider(height: 1, indent: 16),
+            _buildItem(
+              title: '安静时间',
+              trailing: Text(
+                _formatQuietPeriods(_currentRole.proactiveConfig.quietPeriods),
+                style: const TextStyle(color: Color(0xFF888888)),
+              ),
+              onTap: _editQuietPeriods,
+            ),
           ]),
 
           const SizedBox(height: 10),
