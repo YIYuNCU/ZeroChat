@@ -288,6 +288,14 @@ def _build_chat_request(
     return _build_generic_chat_request(messages, api_key, model, temperature, max_tokens, tools)
 
 
+def _usage_platform(api_url: str) -> str:
+    """Return the provider host used for a usage-statistics bucket."""
+    try:
+        return (urlsplit(str(api_url or "")).hostname or "").lower() or "未知平台"
+    except (TypeError, ValueError):
+        return "未知平台"
+
+
 async def _post_chat(
     messages: List[Dict[str, str]],
     api_url: str,
@@ -328,7 +336,14 @@ async def _post_chat(
             if stats_role_id:
                 try:
                     from services.memory_service import record_usage, _run_db
-                    await _run_db(stats_role_id, record_usage, stats_role_id, usage, model)
+                    await _run_db(
+                        stats_role_id,
+                        record_usage,
+                        stats_role_id,
+                        usage,
+                        model,
+                        _usage_platform(api_url),
+                    )
                 except Exception as exc:
                     logger.warning("record_usage failed: %s", exc)
         result = {"success": True, "content": content, "user_content": messages[-1], "error": None}
@@ -577,7 +592,7 @@ def _build_system_prompt(
             "- $ 表示一条独立显示的消息：每个以 $ 分隔的消息都必须至少包含一个 <对话> 块。"
             "<动作> 和 <声音> 块不得单独成段；应与对应的 <对话> 块放在同一条消息内。\n"
             "- <声音> 用于描写可感知、短促的非对白声音（如衣料摩擦声、环境声、非语言人声，"
-            "如咳嗽声、打嗝声等）。当当前场景、动作或生理状态自然会产生这类声音时，"
+            "如咳嗽声、叹气声）。当当前场景、动作或生理状态自然会产生这类声音时，"
             "应输出一个简短的 <声音> 块，不要省略；例如："
             "<对话>抱歉，等我一下。</对话><声音>肚子咕噜响了一声</声音>。"
             "没有合理声源时不要凭空添加。声音块只写声音本身，不得替代实际对话；"

@@ -1463,6 +1463,10 @@ _PER_MODEL_TOKEN_FIELDS = (
     "cache_miss_tokens",
 )
 
+_HISTORICAL_USAGE_PLATFORM = "历史未标注平台"
+_UNKNOWN_USAGE_PLATFORM = "未知平台"
+_USAGE_BY_PLATFORM_MODEL_KEY = "usage_by_platform_model_json"
+
 def _parse_usage_fields(usage: Dict[str, Any]) -> Dict[str, int]:
     """从 API 返回的 usage 中兼容解析 token 与缓存命中/未命中量。
 
@@ -1496,7 +1500,7 @@ def _parse_usage_fields(usage: Dict[str, Any]) -> Dict[str, int]:
         "cache_miss_tokens": cache_miss,
     }
 
-def record_usage(role_id: str, usage: Optional[Dict[str, Any]], model: Optional[str] = None):
+def _legacy_record_usage(role_id: str, usage: Optional[Dict[str, Any]], model: Optional[str] = None):
     """累计记录一次 AI 请求的 token 用量与缓存量（按角色）。
 
     统计失败不得影响正常回复，全程静默兜底。
@@ -1546,7 +1550,7 @@ def record_usage(role_id: str, usage: Optional[Dict[str, Any]], model: Optional[
     except Exception as exc:
         logger.warning(f"record_usage failed for role={role_id}: {exc}")
 
-def get_usage_stats(role_id: str) -> Dict[str, Any]:
+def _legacy_get_usage_stats(role_id: str) -> Dict[str, Any]:
     """读取某角色的分模型用量与最近一次用量。
 
     返回 {"by_model": [ {model, prompt_tokens, ..., request_count}, ... ], "last": {...} | None}，
@@ -1610,7 +1614,7 @@ def get_usage_stats(role_id: str) -> Dict[str, Any]:
         logger.warning(f"get_usage_stats failed for role={role_id}: {exc}")
         return {"by_model": [], "last": None}
 
-def reset_usage_stats(role_id: str) -> bool:
+def _legacy_reset_usage_stats(role_id: str) -> bool:
     """清零某角色的用量统计。"""
     if is_tool_role_id(role_id):
         return False
@@ -1624,6 +1628,177 @@ def reset_usage_stats(role_id: str) -> bool:
     except Exception as exc:
         logger.warning(f"reset_usage_stats failed for role={role_id}: {exc}")
         return False
+
+def _normalize_usage_bucket(bucket: Any) -> Dict[str, int]:
+    """Normalize persisted usage data to the public numeric fields."""
+    value = bucket if isinstance(bucket, dict) else {}
+    normalized: Dict[str, int] = {}
+    for field in _PER_MODEL_TOKEN_FIELDS + ("request_count",):
+        try:
+            normalized[field] = int(value.get(field, 0))
+        except (TypeError, ValueError):
+            normalized[field] = 0
+    return normalized
+
+
+def _merge_usage_bucket(target: Dict[str, int], source: Dict[str, int]) -> None:
+    for field in _PER_MODEL_TOKEN_FIELDS + ("request_count",):
+        target[field] = target.get(field, 0) + source.get(field, 0)
+
+
+def record_usage(
+    role_id: str,
+    usage: Optional[Dict[str, Any]],
+    model: Optional[str] = None,
+    platform: Optional[str] = None,
+) -> None:
+    """Accumulate a request by API platform and model for one role."""
+    if is_tool_role_id(role_id) or not isinstance(usage, dict):
+        return
+    try:
+        parsed = _parse_usage_fields(usage)
+        model_key = (model or "").strip() or "未知"
+        platform_key = (platform or "").strip() or _UNKNOWN_USAGE_PLATFORM
+        with _USAGE_LOCK, _get_connection(role_id) as conn:
+            for field, key in _USAGE_TOTAL_KEYS.items():
+                if field != "request_count":
+                    _increment_meta(conn, key, parsed[field])
+            _increment_meta(conn, _USAGE_TOTAL_KEYS["request_count"], 1)
+
+            raw = _get_meta(conn, _USAGE_BY_PLATFORM_MODEL_KEY, None)
+            try:
+                by_platform = json.loads(raw) if raw else {}
+                if not isinstance(by_platform, dict):
+                    by_platform = {}
+            except Exception:
+                by_platform = {}
+
+            models = by_platform.get(platform_key)
+            if not isinstance(models, dict):
+                models = {}
+            bucket = _normalize_usage_bucket(models.get(model_key))
+            _merge_usage_bucket(bucket, {**parsed, "request_count": 1})
+            models[model_key] = bucket
+            by_platform[platform_key] = models
+            _set_meta(
+                conn,
+                _USAGE_BY_PLATFORM_MODEL_KEY,
+                json.dumps(by_platform, ensure_ascii=False),
+            )
+
+            last = dict(parsed)
+            last["platform"] = platform_key
+            last["model"] = model_key
+            last["timestamp"] = datetime.now().isoformat()
+            _set_meta(conn, "usage_last_json", json.dumps(last, ensure_ascii=False))
+    except Exception as exc:
+        logger.warning("record_usage failed for role=%s: %s", role_id, exc)
+
+
+def get_usage_stats(role_id: str) -> Dict[str, Any]:
+    """Return platform/model buckets, a legacy model summary, and last usage."""
+    empty = {"by_platform_model": [], "by_model": [], "last": None}
+    if is_tool_role_id(role_id):
+        return empty
+    try:
+        with _get_connection(role_id) as conn:
+            last = None
+            last_raw = _get_meta(conn, "usage_last_json", None)
+            if last_raw:
+                try:
+                    last = json.loads(last_raw)
+                except Exception:
+                    last = None
+            if isinstance(last, dict) and not str(last.get("platform") or "").strip():
+                last = {**last, "platform": _HISTORICAL_USAGE_PLATFORM}
+
+            entries: List[Dict[str, Any]] = []
+            platform_raw = _get_meta(conn, _USAGE_BY_PLATFORM_MODEL_KEY, None)
+            if platform_raw:
+                try:
+                    by_platform = json.loads(platform_raw)
+                except Exception:
+                    by_platform = {}
+                if isinstance(by_platform, dict):
+                    for platform_name, models in by_platform.items():
+                        if not isinstance(models, dict):
+                            continue
+                        for model_name, bucket in models.items():
+                            entry: Dict[str, Any] = {
+                                "platform": str(platform_name).strip() or _UNKNOWN_USAGE_PLATFORM,
+                                "model": str(model_name).strip() or "未知",
+                            }
+                            entry.update(_normalize_usage_bucket(bucket))
+                            entries.append(entry)
+
+            legacy_raw = _get_meta(conn, "usage_by_model_json", None)
+            try:
+                legacy_models = json.loads(legacy_raw) if legacy_raw else {}
+                if not isinstance(legacy_models, dict):
+                    legacy_models = {}
+            except Exception:
+                legacy_models = {}
+            for model_name, bucket in legacy_models.items():
+                entry = {
+                    "platform": _HISTORICAL_USAGE_PLATFORM,
+                    "model": str(model_name).strip() or "（历史合计）",
+                }
+                entry.update(_normalize_usage_bucket(bucket))
+                entries.append(entry)
+
+            # Databases predating the model blob only have the aggregate totals.
+            if not entries:
+                legacy_totals: Dict[str, int] = {}
+                for field, key in _USAGE_TOTAL_KEYS.items():
+                    try:
+                        legacy_totals[field] = int(_get_meta(conn, key, "0"))
+                    except (TypeError, ValueError):
+                        legacy_totals[field] = 0
+                if legacy_totals["total_tokens"] or legacy_totals["request_count"]:
+                    model_name = str((last or {}).get("model") or "").strip()
+                    entry = {
+                        "platform": _HISTORICAL_USAGE_PLATFORM,
+                        "model": model_name or "（历史合计）",
+                    }
+                    entry.update(_normalize_usage_bucket(legacy_totals))
+                    entries.append(entry)
+
+            entries.sort(key=lambda entry: entry["total_tokens"], reverse=True)
+
+            model_totals: Dict[str, Dict[str, int]] = {}
+            for entry in entries:
+                model_name = str(entry["model"])
+                _merge_usage_bucket(
+                    model_totals.setdefault(model_name, {}),
+                    _normalize_usage_bucket(entry),
+                )
+            by_model = [
+                {"model": model_name, **bucket}
+                for model_name, bucket in model_totals.items()
+            ]
+            by_model.sort(key=lambda entry: entry["total_tokens"], reverse=True)
+            return {"by_platform_model": entries, "by_model": by_model, "last": last}
+    except Exception as exc:
+        logger.warning("get_usage_stats failed for role=%s: %s", role_id, exc)
+        return empty
+
+
+def reset_usage_stats(role_id: str) -> bool:
+    """Clear all current and legacy usage statistics for one role."""
+    if is_tool_role_id(role_id):
+        return False
+    try:
+        with _get_connection(role_id) as conn:
+            for key in _USAGE_TOTAL_KEYS.values():
+                _set_meta(conn, key, "0")
+            _set_meta(conn, "usage_last_json", None)
+            _set_meta(conn, "usage_by_model_json", None)
+            _set_meta(conn, _USAGE_BY_PLATFORM_MODEL_KEY, None)
+        return True
+    except Exception as exc:
+        logger.warning("reset_usage_stats failed for role=%s: %s", role_id, exc)
+        return False
+
 
 def list_vector_memories(role_id: str, limit: int = 500, offset: int = 0) -> List[Dict]:
     """列出向量记忆条目（不含 embedding 本体）。"""

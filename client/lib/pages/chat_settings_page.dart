@@ -911,12 +911,17 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     );
   }
 
+  String _usageBucketLabel(Map<String, dynamic> bucket) {
+    final platform = '${bucket['platform'] ?? ''}'.trim();
+    final model = '${bucket['model'] ?? ''}'.trim();
+    if (platform.isEmpty) return model.isEmpty ? '未知' : model;
+    return model.isEmpty ? platform : '$platform / $model';
+  }
+
   void _showTokenUsage() {
     Map<String, dynamic>? stats;
     bool loading = true;
-    String? selectedModel = _currentRole.aiModel.trim().isEmpty
-        ? null
-        : _currentRole.aiModel.trim();
+    String? selectedBucket;
 
     showModalBottomSheet(
       context: context,
@@ -936,21 +941,20 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               setModalState(() {
                 stats = data;
                 loading = false;
-                final models =
-                    (data?['by_model'] as List?)
+                final buckets =
+                    (data?['by_platform_model'] as List?)
                         ?.whereType<Map>()
-                        .map((e) => '${e['model'] ?? ''}'.trim())
+                        .map((e) => _usageBucketLabel(e.cast<String, dynamic>()))
                         .where((e) => e.isNotEmpty)
                         .toSet()
                         .toList() ??
                     <String>[];
-                if (selectedModel == null || !models.contains(selectedModel)) {
-                  final latest = (data?['last'] as Map?)?['model']
-                      ?.toString()
-                      .trim();
-                  selectedModel = latest != null && latest.isNotEmpty
-                      ? latest
-                      : (models.isEmpty ? null : models.first);
+                if (selectedBucket == null || !buckets.contains(selectedBucket)) {
+                  final latest = (data?['last'] as Map?)?.cast<String, dynamic>();
+                  final latestBucket = latest == null ? '' : _usageBucketLabel(latest);
+                  selectedBucket = latestBucket.isNotEmpty && buckets.contains(latestBucket)
+                      ? latestBucket
+                      : (buckets.isEmpty ? null : buckets.first);
                 }
               });
             }
@@ -959,29 +963,26 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               reload();
             }
 
-            final byModel =
-                (stats?['by_model'] as List?)
+            final byPlatformModel =
+                (stats?['by_platform_model'] as List?)
                     ?.whereType<Map>()
                     .map((e) => e.cast<String, dynamic>())
                     .toList() ??
                 <Map<String, dynamic>>[];
             final last = (stats?['last'] as Map?)?.cast<String, dynamic>();
-            final modelOptions = byModel
-                .map((e) => '${e['model'] ?? ''}'.trim())
+            final bucketOptions = byPlatformModel
+                .map(_usageBucketLabel)
                 .where((e) => e.isNotEmpty)
                 .toSet()
                 .toList();
-            final visibleByModel = selectedModel == null
-                ? byModel
-                : byModel
-                      .where(
-                        (e) => '${e['model'] ?? ''}'.trim() == selectedModel,
-                      )
+            final visibleByPlatformModel = selectedBucket == null
+                ? byPlatformModel
+                : byPlatformModel
+                      .where((e) => _usageBucketLabel(e) == selectedBucket)
                       .toList();
             final visibleLast =
                 last != null &&
-                    (selectedModel == null ||
-                        '${last['model'] ?? ''}'.trim() == selectedModel)
+                    (selectedBucket == null || _usageBucketLabel(last) == selectedBucket)
                 ? last
                 : null;
 
@@ -1027,7 +1028,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                       ),
                     ),
                     const Divider(height: 1),
-                    if (modelOptions.length > 1)
+                    if (bucketOptions.length > 1)
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                         child: Row(
@@ -1039,17 +1040,17 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                             const SizedBox(width: 12),
                             Expanded(
                               child: DropdownButton<String>(
-                                value: modelOptions.contains(selectedModel)
-                                    ? selectedModel
-                                    : modelOptions.first,
+                                value: bucketOptions.contains(selectedBucket)
+                                    ? selectedBucket
+                                    : bucketOptions.first,
                                 isExpanded: true,
                                 underline: const SizedBox.shrink(),
-                                items: modelOptions
+                                items: bucketOptions
                                     .map(
-                                      (model) => DropdownMenuItem(
-                                        value: model,
+                                      (bucket) => DropdownMenuItem(
+                                        value: bucket,
                                         child: Text(
-                                          model,
+                                          bucket,
                                           overflow: TextOverflow.ellipsis,
                                         ),
                                       ),
@@ -1057,7 +1058,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                                     .toList(),
                                 onChanged: (value) {
                                   if (value != null) {
-                                    setModalState(() => selectedModel = value);
+                                    setModalState(() => selectedBucket = value);
                                   }
                                 },
                               ),
@@ -1072,7 +1073,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                               controller: scrollController,
                               padding: const EdgeInsets.all(16),
                               children: _buildUsageContent(
-                                visibleByModel,
+                                visibleByPlatformModel,
                                 visibleLast,
                               ),
                             ),
@@ -1088,7 +1089,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   List<Widget> _buildUsageContent(
-    List<Map<String, dynamic>> byModel,
+    List<Map<String, dynamic>> byPlatformModel,
     Map<String, dynamic>? last,
   ) {
     int asInt(Map<String, dynamic> m, String k) {
@@ -1106,7 +1107,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
     final widgets = <Widget>[];
 
-    if (byModel.isEmpty) {
+    if (byPlatformModel.isEmpty) {
       widgets.add(
         const Padding(
           padding: EdgeInsets.symmetric(vertical: 24),
@@ -1120,9 +1121,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       );
     }
 
-    for (var i = 0; i < byModel.length; i++) {
-      final m = byModel[i];
-      final model = '${m['model'] ?? ''}'.trim();
+    for (var i = 0; i < byPlatformModel.length; i++) {
+      final m = byPlatformModel[i];
+      final bucketLabel = _usageBucketLabel(m);
       final hit = asInt(m, 'cache_hit_tokens');
       final miss = asInt(m, 'cache_miss_tokens');
       final hitRate = (hit + miss) > 0
@@ -1132,7 +1133,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       if (i > 0) widgets.add(const SizedBox(height: 20));
       widgets.addAll([
         Text(
-          model.isEmpty ? '未知' : model,
+          bucketLabel,
           style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 8),
@@ -1159,6 +1160,8 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
         _usageRow('总 tokens', '${asInt(last, 'total_tokens')}'),
         _usageRow('缓存命中 tokens', '${asInt(last, 'cache_hit_tokens')}'),
         _usageRow('缓存未命中 tokens', '${asInt(last, 'cache_miss_tokens')}'),
+        if ('${last['platform'] ?? ''}'.isNotEmpty)
+          _usageRow('平台', '${last['platform']}'),
         if ('${last['model'] ?? ''}'.isNotEmpty)
           _usageRow('模型', '${last['model']}'),
         if ('${last['timestamp'] ?? ''}'.isNotEmpty)
