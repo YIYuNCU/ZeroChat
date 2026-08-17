@@ -652,7 +652,10 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                         ? totalMessagesCount
                         : _visibleMessageCount;
                     final visibleStart = totalMessagesCount - currentVisibleCount;
-                    final visibleMessages = messages.sublist(visibleStart);
+                    final visibleMessages = messages
+                        .sublist(visibleStart)
+                        .where(_shouldRenderMessage)
+                        .toList();
                     final hasMoreMessages =
                         totalMessagesCount > currentVisibleCount ||
                         MessageStore.instance.hasOlderMessages(widget.chatId);
@@ -982,6 +985,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
         ],
       ),
     );
+  }
+
+  bool _shouldRenderMessage(Message message) {
+    if (message.senderId == 'me' ||
+        !MessageParts.isNoReplyDirective(message.content)) {
+      return true;
+    }
+    return RoleService.getRoleById(message.senderId)?.showNoReply ?? false;
   }
 
   Widget _buildMessageBubble(Message message) {

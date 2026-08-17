@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:zerochat/core/message_parts.dart';
 import 'package:zerochat/models/message.dart';
+import 'package:zerochat/models/role.dart';
+import 'package:zerochat/services/role_service.dart';
+import 'package:zerochat/services/storage_service.dart';
 import 'package:zerochat/widgets/chat_bubble.dart';
 
 Message _message(String content, {String senderId = 'role-1'}) {
@@ -27,6 +31,21 @@ Widget _bubble(Message message, {required bool isSender}) {
 }
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    await StorageService.init();
+    await StorageService.setJsonList(StorageService.keyRoles, [
+      Role(
+        id: 'role-1',
+        name: 'AI',
+        systemPrompt: 'test',
+        showNoReply: true,
+      ).toJson(),
+    ]);
+    await StorageService.setString(StorageService.keyCurrentRoleId, 'role-1');
+    await RoleService.init();
+  });
+
   testWidgets('renders repeated mixed parts in source order', (tester) async {
     await tester.pumpWidget(
       _bubble(
@@ -100,6 +119,20 @@ void main() {
     await tester.pump();
 
     expect(find.text(MessageParts.noReplyDirective), findsOneWidget);
+    expect(find.byIcon(Icons.notifications_off_outlined), findsNothing);
+  });
+
+  testWidgets('hides no-reply directives when the role setting is disabled', (
+    tester,
+  ) async {
+    final role = RoleService.getRoleById('role-1')!;
+    await RoleService.updateRoleLocal(role.copyWith(showNoReply: false));
+
+    await tester.pumpWidget(
+      _bubble(_message(MessageParts.noReplyDirective), isSender: false),
+    );
+
+    expect(find.text('无回复'), findsNothing);
     expect(find.byIcon(Icons.notifications_off_outlined), findsNothing);
   });
 }

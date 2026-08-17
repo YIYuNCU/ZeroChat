@@ -1183,16 +1183,13 @@ class ChatController extends ChangeNotifier {
       final metadata = payload['metadata'] is Map
           ? Map<String, dynamic>.from(payload['metadata'])
           : null;
-      final noReply =
-          metadata?['no_reply'] == true ||
-          MessageParts.isNoReplyDirective(content);
       final requestId = metadata?['request_id']?.toString().trim();
 
       await MemoryService.appendJsonMemoryPair(
         roleId: roleId,
         userContent: userMessage,
         // 无回复仍是一次有效的 assistant 结果，需要进入记忆/数据库；
-        // 是否显示气泡由 showNoReply 单独控制。
+        // 是否显示气泡由聊天页面按当前角色的 showNoReply 设置控制。
         assistantContent: content,
         requestId: (requestId != null && requestId.isNotEmpty)
             ? requestId
@@ -1202,20 +1199,16 @@ class ChatController extends ChangeNotifier {
             : null,
       );
 
-      final role = RoleService.getRoleById(roleId);
-      final showNoReply = role?.showNoReply ?? false;
       await _clearRecoveryStatusMessage(taskId);
-      if (!(noReply && !showNoReply)) {
-        await MessageStore.instance.ensureLoaded(chatId);
-        await _sendSegmentsQueued(
-          chatId,
-          roleId,
-          content,
-          isGroup: isGroup,
-          toolEmotions: _extractToolEmotions(metadata),
-        );
-        debugPrint('ChatController: recovered reply rendered for task $taskId');
-      }
+      await MessageStore.instance.ensureLoaded(chatId);
+      await _sendSegmentsQueued(
+        chatId,
+        roleId,
+        content,
+        isGroup: isGroup,
+        toolEmotions: _extractToolEmotions(metadata),
+      );
+      debugPrint('ChatController: recovered reply stored for task $taskId');
 
       await _removePersistedPendingTask(taskId);
       await _persistRenderedTaskIds();
@@ -1601,9 +1594,6 @@ class ChatController extends ChangeNotifier {
         if (success && content != null) {
           // 由本次 await 负责渲染：立刻标记已渲染，避免并发恢复路径重复落地。
           _renderedTaskIds.add(taskId);
-          final noReply =
-              metadata?['no_reply'] == true ||
-              MessageParts.isNoReplyDirective(content);
           debugPrint('ChatController: AI response via backend (async push)');
           final requestId = metadata?['request_id']?.toString().trim();
           await MemoryService.appendJsonMemoryPair(
@@ -1621,7 +1611,6 @@ class ChatController extends ChangeNotifier {
             debugPrint('ChatController: Metadata from async push: $metadata');
           }
           await _markTaskRendered(taskId);
-          if (noReply && !role.showNoReply) return null;
           return _AiReply(content, _extractToolEmotions(metadata));
         }
 
@@ -1661,9 +1650,6 @@ class ChatController extends ChangeNotifier {
                   final metadata = pushPayload['metadata'] is Map
                       ? Map<String, dynamic>.from(pushPayload['metadata'])
                       : null;
-                  final noReply =
-                      metadata?['no_reply'] == true ||
-                      MessageParts.isNoReplyDirective(content);
                   final requestId = metadata?['request_id']?.toString().trim();
                   await MemoryService.appendJsonMemoryPair(
                     roleId: role.id,
@@ -1678,7 +1664,6 @@ class ChatController extends ChangeNotifier {
                         : null,
                   );
                   await _markTaskRendered(taskId);
-                  if (noReply && !role.showNoReply) return null;
                   return _AiReply(content, _extractToolEmotions(metadata));
                 }
               }

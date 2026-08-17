@@ -67,6 +67,9 @@ class ChatBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (_isHiddenNoReply) {
+      return const SizedBox.shrink();
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       child: Row(
@@ -142,6 +145,13 @@ class ChatBubble extends StatelessWidget {
 
   /// 是否是图片消息
   bool get _isImage => message.type == MessageType.image;
+
+  bool get _isHiddenNoReply {
+    if (isSender || !MessageParts.isNoReplyDirective(message.content)) {
+      return false;
+    }
+    return !(RoleService.getRoleById(message.senderId)?.showNoReply ?? false);
+  }
 
   /// 构建气泡内容
   Widget _buildBubbleContent(BuildContext context) {
@@ -238,6 +248,7 @@ class ChatBubble extends StatelessWidget {
     final showSound = role?.showSound ?? true;
     final showPsychology = role?.showPsychology ?? true;
     final showStats = role?.showStats ?? true;
+    final showNoReply = role?.showNoReply ?? false;
     final widgets = <Widget>[];
 
     void addPart(Widget widget, {double spacing = 6}) {
@@ -273,7 +284,7 @@ class ChatBubble extends StatelessWidget {
           }
           break;
         case MessagePartType.noReply:
-          addPart(_buildNoReply(part.text));
+          if (showNoReply) addPart(_buildNoReply(part.text));
           break;
       }
     }
