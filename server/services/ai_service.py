@@ -169,6 +169,22 @@ def _is_deepseek_model(model: Optional[str]) -> bool:
     return "deepseek" in str(model or "").lower()
 
 
+def _is_mimo_provider(model: Optional[str], api_url: Optional[str] = None) -> bool:
+    model_text = str(model or "").lower()
+    if "mimo" in model_text:
+        return True
+    try:
+        host = (urlsplit(str(api_url or "")).hostname or "").lower()
+    except (TypeError, ValueError):
+        host = ""
+    return "api.xiaomimimo.com" in host
+
+
+def _uses_conservative_tool_prompt_policy(model: Optional[str]) -> bool:
+    """Apply the stricter tool-call prompt policy to all non-DeepSeek models."""
+    return not _is_deepseek_model(model)
+
+
 def _is_gemini_model(model: Optional[str]) -> bool:
     """Identify Gemini models served through the OpenAI-compatible endpoint."""
     return "gemini" in str(model or "").lower()
@@ -267,6 +283,18 @@ def _build_gemini_chat_request(
     }
 
 
+def _build_mimo_chat_request(
+    messages: List[Dict[str, Any]], api_key: str, model: str,
+    temperature: float, max_tokens: int, tools: Optional[List[Dict]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Build a MiMo request with thinking explicitly disabled."""
+    payload = _build_base_chat_payload(messages, model, temperature, max_tokens, tools)
+    payload["thinking"] = {"type": "disabled"}
+    return payload, {
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+    }
+
+
 def _build_generic_chat_request(
     messages: List[Dict[str, Any]], api_key: str, model: str,
     temperature: float, max_tokens: int, tools: Optional[List[Dict]],
@@ -278,11 +306,13 @@ def _build_generic_chat_request(
 
 
 def _build_chat_request(
-    messages: List[Dict[str, Any]], api_key: str, model: str,
+    messages: List[Dict[str, Any]], api_key: str, model: str, api_url: str,
     temperature: float, max_tokens: int, tools: Optional[List[Dict]],
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     if _is_deepseek_model(model):
         return _build_deepseek_chat_request(messages, api_key, model, temperature, max_tokens, tools)
+    if _is_mimo_provider(model, api_url):
+        return _build_mimo_chat_request(messages, api_key, model, temperature, max_tokens, tools)
     if _is_gemini_model(model):
         return _build_gemini_chat_request(messages, api_key, model, temperature, max_tokens, tools)
     return _build_generic_chat_request(messages, api_key, model, temperature, max_tokens, tools)
@@ -311,6 +341,7 @@ async def _post_chat(
             messages,
             api_key,
             model,
+            api_url,
             temperature,
             max_tokens,
             tools,
@@ -581,6 +612,9 @@ def _build_system_prompt(
     sound_enabled = role_data.get("show_sound", True) is not False
     resolved_model, _, _, _ = _get_role_ai_config(role_data)
     is_grok = _is_grok_model(resolved_model)
+    use_conservative_tool_prompt_policy = _uses_conservative_tool_prompt_policy(
+        resolved_model
+    )
 
     if not is_onebot:
         parts.append(
@@ -592,7 +626,7 @@ def _build_system_prompt(
             "- $ 表示一条独立显示的消息：每个以 $ 分隔的消息都必须至少包含一个 <对话> 块。"
             "<动作> 和 <声音> 块不得单独成段；应与对应的 <对话> 块放在同一条消息内。\n"
             "- <声音> 用于描写可感知、短促的非对白声音（如衣料摩擦声、环境声、非语言人声，"
-            "如咳嗽声、叹气声）。当当前场景、动作或生理状态自然会产生这类声音时，"
+            "如咳嗽、打嗝等）。当当前场景、动作或生理状态自然会产生这类声音时，"
             "应输出一个简短的 <声音> 块，不要省略；例如："
             "<对话>抱歉，等我一下。</对话><声音>肚子咕噜响了一声</声音>。"
             "没有合理声源时不要凭空添加。声音块只写声音本身，不得替代实际对话；"
@@ -736,9 +770,9 @@ def _build_system_prompt(
         )
 
     grok_tool_policy = ""
-    if is_grok:
+    if use_conservative_tool_prompt_policy:
         grok_tool_policy = (
-            "【Grok 工具调用约束 - 高优先级】\n"
+            "【工具调用补充约束 - 高优先级】\n"
             "仅当用户明确要求工具操作、需要查询过去记忆、需要核验时效性外部事实，"
             "或必须识别用户附带图片时才调用工具。普通闲聊、角色扮演、情绪回应和可由当前上下文直接回答的内容一律直接回复。\n"
             "不要为了增加信息量、表达情绪或预防性保存记忆而调用工具；每次回复最多进行一项非必要工具操作。"
@@ -854,6 +888,26 @@ async def _call_with_role_config(
     )
 
 
+def _append_grok_reasoning_followup_context(
+    messages: List[Dict[str, Any]],
+    result: Dict[str, Any],
+    resolved_model: Optional[str],
+) -> None:
+    """Preserve Grok reasoning context when a turn needs a second pass."""
+    if not _is_grok_model(resolved_model):
+        return
+    assistant_content = result.get("assistant_content", result.get("content"))
+    if assistant_content is None and not result.get("reasoning_content"):
+        return
+    assistant_msg: Dict[str, Any] = {
+        "role": "assistant",
+        "content": assistant_content,
+    }
+    if result.get("reasoning_content"):
+        assistant_msg["reasoning_content"] = result["reasoning_content"]
+    messages.append(assistant_msg)
+
+
 from services.ai_tools import (
     _SCHEDULE_TASK_TOOL,
     _SET_ALARM_TOOL,
@@ -904,6 +958,7 @@ async def generate_with_role(
     messages = []
     is_onebot = origin.startswith("onebot")
     is_third_party = is_onebot and sender != "user"
+    resolved_model, _, _, _ = _get_role_ai_config(role_data)
     system_content = _build_system_prompt(
         role_data,
         None,
@@ -992,6 +1047,7 @@ async def generate_with_role(
             f"{image_understanding}\n"
             "Answer the user's current message using this image information."
         )
+        _append_grok_reasoning_followup_context(messages, result, resolved_model)
         # The vision response is external data. Keep it at user priority and
         # preserve the original system prompt for every provider.
         messages.append({"role": "user", "content": image_context})

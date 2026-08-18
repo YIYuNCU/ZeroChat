@@ -152,6 +152,36 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("thinking", client.post.await_args.kwargs["json"])
 
+    async def test_mimo_request_disables_thinking(self):
+        response = type(
+            "Response",
+            (),
+            {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {
+                    "choices": [{"message": {"content": "ok"}}],
+                },
+            },
+        )()
+        client = type("Client", (), {"post": AsyncMock(return_value=response)})()
+        with patch("services.ai_service._get_http_client", return_value=client), patch(
+            "services.ai_service.settings_service.load_settings",
+            return_value={"thinking_enabled": True},
+        ):
+            await _post_chat(
+                messages=[{"role": "user", "content": "hello"}],
+                api_url="https://api.xiaomimimo.com/v1/chat/completions",
+                api_key="test-key",
+                model="mimo-latest",
+                temperature=0.7,
+                max_tokens=100,
+            )
+
+        self.assertEqual(
+            client.post.await_args.kwargs["json"]["thinking"],
+            {"type": "disabled"},
+        )
+
     async def test_gemini_appends_image_fallback_to_preserve_cache_prefix(self):
         captured_messages = []
 
@@ -177,6 +207,42 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [item["role"] for item in captured_messages[1]],
             ["system", "user", "user"],
+        )
+        self.assertIn("Image recognition result", captured_messages[1][-1]["content"])
+
+    async def test_grok_image_fallback_replays_reasoning_context(self):
+        captured_messages = []
+
+        async def call_model(_role_data, messages, **_kwargs):
+            captured_messages.append(deepcopy(messages))
+            if len(captured_messages) == 1:
+                return {
+                    "success": True,
+                    "content": "I cannot inspect the image.",
+                    "reasoning_content": "Need image understanding before final reply.",
+                }
+            return {"success": True, "content": "done"}
+
+        with patch(
+            "services.ai_service._call_with_role_config", side_effect=call_model
+        ), patch(
+            "services.ai_service.execute_recognize_image",
+            new=AsyncMock(return_value="a sunset"),
+        ):
+            result = await generate_with_role(
+                {"id": "role-1", "ai_model": "grok-4.3"},
+                "what is in this image?",
+                vision_context={"image_data_urls": ["data:image/png;base64,AA=="]},
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            [item["role"] for item in captured_messages[1]],
+            ["system", "user", "assistant", "user"],
+        )
+        self.assertEqual(
+            captured_messages[1][-2]["reasoning_content"],
+            "Need image understanding before final reply.",
         )
         self.assertIn("Image recognition result", captured_messages[1][-1]["content"])
 

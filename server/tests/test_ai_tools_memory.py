@@ -65,13 +65,18 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("$ 是唯一允许的标签外分隔符", prompt)
         self.assertLess(prompt.index("消息格式协议 - 最高优先级"), prompt.index("你的人设：测试人设"))
 
-    def test_grok_prompt_uses_conservative_tool_policy(self):
+    def test_non_deepseek_prompt_uses_conservative_tool_policy(self):
         grok_prompt = _build_system_prompt({"id": "role-1", "ai_model": "xAI-gRoK-4"})
         standard_prompt = _build_system_prompt({"id": "role-1", "ai_model": "gpt-4o"})
+        deepseek_prompt = _build_system_prompt(
+            {"id": "role-1", "ai_model": "deepseek-chat"}
+        )
 
-        self.assertIn("Grok 工具调用约束", grok_prompt)
-        self.assertNotIn("Grok 工具调用约束", standard_prompt)
+        self.assertIn("工具调用补充约束", grok_prompt)
+        self.assertIn("工具调用补充约束", standard_prompt)
+        self.assertNotIn("工具调用补充约束", deepseek_prompt)
         self.assertIn("表情工具完全可选", grok_prompt)
+        self.assertIn("表情工具完全可选", standard_prompt)
 
     def test_stats_enabled_requires_a_stats_block_on_every_reply(self):
         prompt = _build_system_prompt(
