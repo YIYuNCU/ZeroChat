@@ -8,6 +8,8 @@ import '../widgets/smart_avatar_image.dart';
 import 'api_settings_page.dart';
 import 'favorites_page.dart';
 import 'settings_page.dart';
+import 'software_info_page.dart';
+import 'storage_info_page.dart';
 
 /// "我"页面
 /// ZeroChat 风格的个人中心和全局设置
@@ -80,6 +82,26 @@ class _ProfilePageState extends State<ProfilePage> {
               title: '设置',
               subtitle: '背景等',
               onTap: () => _navigateTo(const SettingsPage()),
+            ),
+          ]),
+
+          const SizedBox(height: 10),
+
+          _buildSection([
+            _buildItem(
+              icon: Icons.storage_outlined,
+              iconColor: const Color(0xFF4A90E2),
+              title: '存储信息',
+              subtitle: '查看和管理本地聊天记录与缓存',
+              onTap: () => _navigateTo(const StorageInfoPage()),
+            ),
+            const Divider(height: 1, indent: 56),
+            _buildItem(
+              icon: Icons.info_outline,
+              iconColor: const Color(0xFF888888),
+              title: '软件信息',
+              subtitle: '查看当前版本',
+              onTap: () => _navigateTo(const SoftwareInfoPage()),
             ),
           ]),
 

@@ -27,9 +27,11 @@ class MessageStore extends ChangeNotifier {
   /// 按 chatId 存储的消息列表
   // Resident windows only. Full histories are stored as JSONL archives on disk.
   final Map<String, List<Message>> _messages = {};
+  final Map<String, Message> _lastMessages = {};
   final Map<String, int> _messageCounts = {};
   final Set<String> _knownChatIds = {};
   final Set<String> _activeChatWindows = {};
+  final Map<String, Future<void>> _loadingFutures = {};
   String? _archiveDirectoryPath;
 
   static const int residentMessageLimit = 200;
@@ -59,8 +61,11 @@ class MessageStore extends ChangeNotifier {
   /// 正在 drain 的标记，避免重连风暴时并发重复 drain。
   bool _draining = false;
 
-  /// 本地用户消息变更时递增，用于识别可能覆盖刚发送消息的旧快照。
-  int _localUserMessageRevision = 0;
+  /// 本地归档变更时递增，用于识别可能覆盖新消息的旧快照。
+  int _localMessageRevision = 0;
+  Future<void> _archiveMutationTail = Future<void>.value();
+  bool _snapshotSyncRequested = false;
+  Future<void>? _snapshotSyncFuture;
 
   /// 初始化（确保只执行一次）
   static Future<void> init() async {
@@ -80,9 +85,37 @@ class MessageStore extends ChangeNotifier {
   /// 确保指定 chatId 的消息已加载
   Future<void> ensureLoaded(String chatId) async {
     if (!_messages.containsKey(chatId)) {
-      await _loadMessages(chatId);
+      final existing = _loadingFutures[chatId];
+      if (existing != null) {
+        await existing;
+        return;
+      }
+
+      late final Future<void> loading;
+      loading = _withArchiveMutation(() async {
+        if (!_messages.containsKey(chatId)) {
+          await _loadMessages(chatId);
+        }
+      });
+      _loadingFutures[chatId] = loading;
+      try {
+        await loading;
+      } finally {
+        if (identical(_loadingFutures[chatId], loading)) {
+          _loadingFutures.remove(chatId);
+        }
+      }
       debugPrint('MessageStore: Loaded messages for $chatId');
     }
+  }
+
+  Future<T> _withArchiveMutation<T>(Future<T> Function() operation) {
+    final next = _archiveMutationTail.then((_) => operation());
+    _archiveMutationTail = next.then<void>(
+      (_) {},
+      onError: (error, stackTrace) {},
+    );
+    return next;
   }
 
   // ========== 消息订阅 ==========
@@ -137,17 +170,20 @@ class MessageStore extends ChangeNotifier {
   Future<void> addMessage(String chatId, Message message) async {
     final messageToStore = prepareMessageForLocalInsert(message);
     await ensureLoaded(chatId);
-    _messages[chatId]!.add(messageToStore);
-    _trimResidentMessages(chatId);
-    if (messageToStore.senderId == 'me') {
-      _localUserMessageRevision += 1;
-    }
-    // 内存与 UI 立即更新；落盘走防抖，合并高频写入。
-    await _appendMessagesToArchive(chatId, [messageToStore]);
-    _notifyMessageUpdate(chatId);
-    if (!_activeChatWindows.contains(chatId)) {
-      _messages.remove(chatId);
-    }
+    await _withArchiveMutation(() async {
+      if (!_messages.containsKey(chatId)) {
+        await _loadMessages(chatId);
+      }
+      _messages[chatId]!.add(messageToStore);
+      _trimResidentMessages(chatId);
+      _lastMessages[chatId] = messageToStore;
+      _localMessageRevision += 1;
+      await _appendMessagesToArchive(chatId, [messageToStore]);
+      _notifyMessageUpdate(chatId);
+      if (!_activeChatWindows.contains(chatId)) {
+        _messages.remove(chatId);
+      }
+    });
     debugPrint(
       'MessageStore: Added message to $chatId (total: ${getMessageCount(chatId)})',
     );
@@ -158,39 +194,56 @@ class MessageStore extends ChangeNotifier {
 
   @visibleForTesting
   static Message prepareMessageForLocalInsert(Message message) {
-    if (message.senderId != 'me') {
-      return message;
-    }
     return message.copyWith(sendStatus: MessageSendStatus.sending);
   }
 
   /// 批量添加消息
   Future<void> addMessages(String chatId, List<Message> messages) async {
     if (messages.isEmpty) return;
+    final messagesToStore = messages
+        .map(prepareMessageForLocalInsert)
+        .toList(growable: false);
     await ensureLoaded(chatId);
-    _messages[chatId]!.addAll(messages);
-    _trimResidentMessages(chatId);
-    await _appendMessagesToArchive(chatId, messages);
-    _notifyMessageUpdate(chatId);
-    if (!_activeChatWindows.contains(chatId)) {
-      _messages.remove(chatId);
+    await _withArchiveMutation(() async {
+      if (!_messages.containsKey(chatId)) {
+        await _loadMessages(chatId);
+      }
+      _messages[chatId]!.addAll(messagesToStore);
+      _trimResidentMessages(chatId);
+      _lastMessages[chatId] = messagesToStore.last;
+      _localMessageRevision += 1;
+      await _appendMessagesToArchive(chatId, messagesToStore);
+      _notifyMessageUpdate(chatId);
+      if (!_activeChatWindows.contains(chatId)) {
+        _messages.remove(chatId);
+      }
+    });
+    for (final message in messagesToStore) {
+      _syncMessageToBackend(chatId, message);
     }
   }
 
   /// 删除消息
   Future<void> deleteMessage(String chatId, String messageId) async {
-    final messages = _messages[chatId];
-    if (messages != null) {
-      final isUserMessage = messages.any(
-        (message) => message.id == messageId && message.senderId == 'me',
-      );
+    await ensureLoaded(chatId);
+    final deleted = await _withArchiveMutation(() async {
+      final messages = _messages[chatId];
+      if (messages == null) return false;
+      final existed = messages.any((message) => message.id == messageId);
+      if (!existed) return false;
       messages.removeWhere((m) => m.id == messageId);
-      if (isUserMessage) {
-        _localUserMessageRevision += 1;
+      if (messages.isEmpty) {
+        _lastMessages.remove(chatId);
+      } else {
+        _lastMessages[chatId] = messages.last;
       }
+      _localMessageRevision += 1;
       await _removeArchivedMessage(chatId, messageId);
       _notifyMessageUpdate(chatId);
+      return true;
+    });
 
+    if (deleted) {
       // 同步到后端（fire-and-forget）
       _syncDeleteMessageToBackend(chatId, messageId);
     }
@@ -205,33 +258,35 @@ class MessageStore extends ChangeNotifier {
     String? quotedPreviewText,
     MessageSendStatus? sendStatus,
   }) async {
-    final messages = _messages[chatId];
-    if (messages == null || messages.isEmpty) {
-      return false;
-    }
+    await ensureLoaded(chatId);
+    Message? updatedMessage;
+    final updated = await _withArchiveMutation(() async {
+      final messages = _messages[chatId];
+      if (messages == null || messages.isEmpty) return false;
+      final index = messages.indexWhere((m) => m.id == messageId);
+      if (index < 0) return false;
 
-    final index = messages.indexWhere((m) => m.id == messageId);
-    if (index < 0) {
-      return false;
-    }
+      updatedMessage = messages[index].copyWith(
+        content: content,
+        type: type,
+        quotedPreviewText: quotedPreviewText,
+        sendStatus: sendStatus,
+      );
+      messages[index] = updatedMessage!;
+      if (_lastMessages[chatId]?.id == messageId) {
+        _lastMessages[chatId] = updatedMessage!;
+      }
+      _localMessageRevision += 1;
+      await _replaceArchivedMessage(chatId, updatedMessage!);
+      _notifyMessageUpdate(chatId);
+      return true;
+    });
+    if (!updated) return false;
 
-    final current = messages[index];
-    messages[index] = current.copyWith(
-      content: content,
-      type: type,
-      quotedPreviewText: quotedPreviewText,
-      sendStatus: sendStatus,
-    );
-    if (current.senderId == 'me') {
-      _localUserMessageRevision += 1;
-    }
-
-    await _replaceArchivedMessage(chatId, messages[index]);
-    _notifyMessageUpdate(chatId);
     final shouldSyncBackend =
         content != null || type != null || quotedPreviewText != null;
     if (shouldSyncBackend) {
-      _syncUpdateMessageToBackend(chatId, messages[index]);
+      _syncUpdateMessageToBackend(chatId, updatedMessage!);
     }
     return true;
   }
@@ -439,43 +494,85 @@ class MessageStore extends ChangeNotifier {
   /// 获取最后一条消息
   Message? getLastMessage(String chatId) {
     final messages = _messages[chatId];
-    return messages != null && messages.isNotEmpty ? messages.last : null;
+    return messages != null && messages.isNotEmpty
+        ? messages.last
+        : _lastMessages[chatId];
   }
 
   /// 清空指定聊天的消息
   Future<void> clearMessages(String chatId) async {
     _messages[chatId]?.clear();
+    _lastMessages.remove(chatId);
     _messageCounts[chatId] = 0;
     _knownChatIds.add(chatId);
-    await _writeArchivedMessages(chatId, const <Message>[]);
+    _localMessageRevision += 1;
+    await _withArchiveMutation(
+      () => _writeArchivedMessages(chatId, const <Message>[]),
+    );
     _notifyMessageUpdate(chatId);
   }
 
   Future<void> removeChatData(String chatId) async {
-    _saveDebounceTimers.remove(chatId)?.cancel();
-    _messages.remove(chatId);
-    _messageCounts.remove(chatId);
-    _knownChatIds.remove(chatId);
-    _unreadCounts.remove(chatId);
-    _placeholderRepairInProgress.removeWhere(
-      (key) => key.startsWith('$chatId::'),
-    );
-    _placeholderRepairLastAttempt.removeWhere(
-      (key, _) => key.startsWith('$chatId::'),
-    );
+    await _withArchiveMutation(() async {
+      _saveDebounceTimers.remove(chatId)?.cancel();
+      _messages.remove(chatId);
+      _lastMessages.remove(chatId);
+      _messageCounts.remove(chatId);
+      _knownChatIds.remove(chatId);
+      _unreadCounts.remove(chatId);
+      _localMessageRevision += 1;
+      _placeholderRepairInProgress.removeWhere(
+        (key) => key.startsWith('$chatId::'),
+      );
+      _placeholderRepairLastAttempt.removeWhere(
+        (key, _) => key.startsWith('$chatId::'),
+      );
+      final file = await _archiveFile(chatId);
+      if (await file.exists()) {
+        await file.delete();
+      }
+      await StorageService.remove('messages_v2_$chatId');
+      await StorageService.remove('messages_$chatId');
+      await _persistArchiveIndex();
+    });
     final streamController = _streamControllers.remove(chatId);
     if (streamController != null) {
       await streamController.close();
     }
-
-    final file = await _archiveFile(chatId);
-    if (await file.exists()) {
-      await file.delete();
-    }
-    await StorageService.remove('messages_v2_$chatId');
-    await StorageService.remove('messages_$chatId');
-    await _persistArchiveIndex();
     notifyListeners();
+  }
+
+  /// Deletes all locally archived conversations without sending any deletion
+  /// request to the backend. This is used by device storage management.
+  Future<void> clearAllLocalChatData() async {
+    await _withArchiveMutation(() async {
+      for (final timer in _saveDebounceTimers.values) {
+        timer.cancel();
+      }
+      _saveDebounceTimers.clear();
+      _messages.clear();
+      _lastMessages.clear();
+      _messageCounts.clear();
+      _knownChatIds.clear();
+      _unreadCounts.clear();
+      _localMessageRevision += 1;
+
+      final cachedDirectoryPath = _archiveDirectoryPath;
+      final directory = cachedDirectoryPath == null
+          ? Directory(
+              '${(await getApplicationDocumentsDirectory()).path}'
+              '${Platform.pathSeparator}message_archives',
+            )
+          : Directory(cachedDirectoryPath);
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+      _archiveDirectoryPath = null;
+      await StorageService.remove('message_store_chat_ids');
+      await StorageService.setStringList(_archiveChatIdsKey, const []);
+      await StorageService.setJson(_archiveCountsKey, const {});
+      notifyListeners();
+    });
   }
 
   // ========== 未读计数管理 ==========
@@ -557,6 +654,11 @@ class MessageStore extends ChangeNotifier {
     _knownChatIds.add(chatId);
     _messageCounts[chatId] = archive.length;
     _messages[chatId] = _residentTail(archive);
+    if (archive.isNotEmpty) {
+      _lastMessages[chatId] = archive.last;
+    } else {
+      _lastMessages.remove(chatId);
+    }
     await _persistArchiveIndex();
     debugPrint(
       'MessageStore: Loaded ${_messages[chatId]!.length}/${archive.length} messages for $chatId',
@@ -743,132 +845,159 @@ class MessageStore extends ChangeNotifier {
   }
 
   Future<void> _syncAllChatsFromBackendIfNeeded() async {
+    if (_snapshotSyncFuture != null) {
+      _snapshotSyncRequested = true;
+      return _snapshotSyncFuture!;
+    }
+    _snapshotSyncFuture = _runSnapshotSync();
     try {
-      final requestedAtRevision = _localUserMessageRevision;
-      final localMd5 = await _calculateLocalChatsMd5();
+      await _snapshotSyncFuture;
+    } finally {
+      _snapshotSyncFuture = null;
+      if (_snapshotSyncRequested) {
+        _snapshotSyncRequested = false;
+        unawaited(_syncAllChatsFromBackendIfNeeded());
+      }
+    }
+  }
+
+  Future<void> _runSnapshotSync() async {
+    try {
+      final requestContext = await _withArchiveMutation(() async {
+        return (
+          revision: _localMessageRevision,
+          localMd5: await _calculateLocalChatsMd5(),
+        );
+      });
       final data = await SecureWebSocketClient.instance.request(
         'chat_snapshot',
-        {'client_md5': localMd5},
+        {'client_md5': requestContext.localMd5},
       );
-      if (!isSnapshotRevisionCurrent(
-        requestedAtRevision,
-        _localUserMessageRevision,
-      )) {
-        debugPrint(
-          'MessageStore: discarded stale chat snapshot after local user message change',
-        );
-        unawaited(_syncAllChatsFromBackendIfNeeded());
-        return;
-      }
-      final needSync = data['need_sync'] == true;
-      if (!needSync) {
-        debugPrint('MessageStore: Chat snapshot MD5 matched, skip full sync');
-        return;
-      }
-
-      final chatsRaw = data['chats'];
-      if (chatsRaw is! Map) {
-        return;
-      }
-
-      var syncedChats = 0;
-      for (final entry in chatsRaw.entries) {
-        final chatId = entry.key.toString();
-        final rawMessages = entry.value;
-        if (rawMessages is! List) {
-          continue;
+      await _withArchiveMutation(() async {
+        if (!isSnapshotRevisionCurrent(
+          requestContext.revision,
+          _localMessageRevision,
+        )) {
+          debugPrint(
+            'MessageStore: discarded stale chat snapshot after local message change',
+          );
+          unawaited(_syncAllChatsFromBackendIfNeeded());
+          return;
+        }
+        final needSync = data['need_sync'] == true;
+        if (!needSync) {
+          debugPrint('MessageStore: Chat snapshot MD5 matched, skip full sync');
+          return;
         }
 
-        final previousIds = (await _readArchivedMessages(
-          chatId,
-        )).map((message) => message.id).toSet();
-        final messages = <Message>[];
-        for (final item in rawMessages) {
-          if (item is! Map) {
+        final chatsRaw = data['chats'];
+        if (chatsRaw is! Map) {
+          return;
+        }
+
+        var syncedChats = 0;
+        for (final entry in chatsRaw.entries) {
+          final chatId = entry.key.toString();
+          final rawMessages = entry.value;
+          if (rawMessages is! List) {
             continue;
           }
-          final map = Map<String, dynamic>.from(item);
-          final typeName = (map['type'] ?? 'text').toString();
-          final type = MessageType.values.firstWhere(
-            (e) => e.name == typeName,
-            orElse: () => MessageType.text,
-          );
 
-          final timestampStr = map['timestamp']?.toString() ?? '';
-          final timestamp = DateTime.tryParse(timestampStr) ?? DateTime.now();
+          final previousIds = (await _readArchivedMessages(
+            chatId,
+          )).map((message) => message.id).toSet();
+          final messages = <Message>[];
+          for (final item in rawMessages) {
+            if (item is! Map) {
+              continue;
+            }
+            final map = Map<String, dynamic>.from(item);
+            final typeName = (map['type'] ?? 'text').toString();
+            final type = MessageType.values.firstWhere(
+              (e) => e.name == typeName,
+              orElse: () => MessageType.text,
+            );
 
-          messages.add(
-            Message(
-              id:
-                  map['id']?.toString() ??
-                  '${timestamp.millisecondsSinceEpoch}',
-              senderId: map['sender_id']?.toString() ?? 'unknown',
-              receiverId: map['receiver_id']?.toString() ?? 'me',
-              content: map['content']?.toString() ?? '',
-              type: type,
-              timestamp: timestamp,
-              quotedMessageId:
-                  map['quoted_message_id']?.toString() ??
-                  map['quote_id']?.toString(),
-              quotedPreviewText:
-                  map['quoted_preview_text']?.toString() ??
-                  map['quote_content']?.toString(),
-            ),
+            final timestampStr = map['timestamp']?.toString() ?? '';
+            final timestamp = DateTime.tryParse(timestampStr) ?? DateTime.now();
+
+            messages.add(
+              Message(
+                id:
+                    map['id']?.toString() ??
+                    '${timestamp.millisecondsSinceEpoch}',
+                senderId: map['sender_id']?.toString() ?? 'unknown',
+                receiverId: map['receiver_id']?.toString() ?? 'me',
+                content: map['content']?.toString() ?? '',
+                type: type,
+                timestamp: timestamp,
+                quotedMessageId:
+                    map['quoted_message_id']?.toString() ??
+                    map['quote_id']?.toString(),
+                quotedPreviewText:
+                    map['quoted_preview_text']?.toString() ??
+                    map['quote_content']?.toString(),
+              ),
+            );
+          }
+
+          // 合并而非整体替换：保留服务端列表中缺失、且仍未同步（sending/failed）
+          // 的本地用户消息，避免快照覆盖丢失离线期间产生的消息。
+          // 因 drainOutbox() 先于本方法执行，多数本地消息已在服务端并自然去重，
+          // 合并只兜底真正未同步的那些。
+          final localArchive = await _readArchivedMessages(chatId);
+          final mergedMessages = mergeSnapshotWithLocalMessages(
+            messages,
+            localArchive,
           );
+          messages
+            ..clear()
+            ..addAll(mergedMessages);
+          final newBackgroundMessages = messages.where(
+            (message) =>
+                message.senderId != 'me' &&
+                !previousIds.contains(message.id) &&
+                (message.id.contains('_proactive') ||
+                    message.id.contains('_task_')),
+          );
+          final newUnreadCount = newBackgroundMessages.length;
+          await _writeArchivedMessages(chatId, messages);
+          if (messages.isNotEmpty) {
+            _lastMessages[chatId] = messages.last;
+          } else {
+            _lastMessages.remove(chatId);
+          }
+          if (_activeChatWindows.contains(chatId)) {
+            _messages[chatId] = _residentTail(messages);
+          } else {
+            _messages.remove(chatId);
+          }
+          if (messages.isNotEmpty) {
+            final lastMessage = messages.last;
+            ChatListService.instance.updateChat(
+              chatId: chatId,
+              // 预览只保留对话，剥离动作等格式化片段。
+              lastMessage: lastMessage.type == MessageType.text
+                  ? MessageParts.previewText(
+                      lastMessage.content,
+                      isUserMessage: lastMessage.senderId == 'me',
+                    )
+                  : '[图片]',
+              lastMessageTime: lastMessage.timestamp,
+              unreadIncrement: newUnreadCount,
+            );
+          }
+          if (newUnreadCount > 0) {
+            incrementUnread(chatId, count: newUnreadCount);
+          }
+          _notifyMessageUpdate(chatId);
+          syncedChats += 1;
         }
 
-        // 合并而非整体替换：保留服务端列表中缺失、且仍未同步（sending/failed）
-        // 的本地用户消息，避免快照覆盖丢失离线期间产生的消息。
-        // 因 drainOutbox() 先于本方法执行，多数本地消息已在服务端并自然去重，
-        // 合并只兜底真正未同步的那些。
-        final serverIds = messages.map((m) => m.id).toSet();
-        final localOnly = (_messages[chatId] ?? const <Message>[]).where(
-          (m) =>
-              m.senderId == 'me' &&
-              (m.sendStatus == MessageSendStatus.sending ||
-                  m.sendStatus == MessageSendStatus.failed) &&
-              !serverIds.contains(m.id),
+        debugPrint(
+          'MessageStore: Full chat sync completed, chats=$syncedChats',
         );
-        messages.addAll(localOnly);
-
-        messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-        final newBackgroundMessages = messages.where(
-          (message) =>
-              message.senderId != 'me' &&
-              !previousIds.contains(message.id) &&
-              (message.id.contains('_proactive') ||
-                  message.id.contains('_task_')),
-        );
-        final newUnreadCount = newBackgroundMessages.length;
-        await _writeArchivedMessages(chatId, messages);
-        if (_activeChatWindows.contains(chatId)) {
-          _messages[chatId] = _residentTail(messages);
-        } else {
-          _messages.remove(chatId);
-        }
-        if (messages.isNotEmpty) {
-          final lastMessage = messages.last;
-          ChatListService.instance.updateChat(
-            chatId: chatId,
-            // 预览只保留对话，剥离动作等格式化片段。
-            lastMessage: lastMessage.type == MessageType.text
-                ? MessageParts.previewText(
-                    lastMessage.content,
-                    isUserMessage: lastMessage.senderId == 'me',
-                  )
-                : '[图片]',
-            lastMessageTime: lastMessage.timestamp,
-            unreadIncrement: newUnreadCount,
-          );
-        }
-        if (newUnreadCount > 0) {
-          incrementUnread(chatId, count: newUnreadCount);
-        }
-        _notifyMessageUpdate(chatId);
-        syncedChats += 1;
-      }
-
-      debugPrint('MessageStore: Full chat sync completed, chats=$syncedChats');
+      });
     } catch (e) {
       debugPrint('MessageStore: WebSocket full sync skipped due to error: $e');
     }
@@ -895,14 +1024,10 @@ class MessageStore extends ChangeNotifier {
       }
       final serialized =
           list
-              // 排除尚未同步到后端的本地用户消息（sending/failed）：MD5 只代表
-              // "服务端应有的内容"，纯本地未同步消息不再触发破坏性 need_sync。
-              .where(
-                (m) =>
-                    !(m.senderId == 'me' &&
-                        (m.sendStatus == MessageSendStatus.sending ||
-                            m.sendStatus == MessageSendStatus.failed)),
-              )
+              // Exclude all unconfirmed local messages. They are retained
+              // separately during snapshot merge and must not cause every
+              // reconnect to request the same full snapshot.
+              .where((m) => m.sendStatus == MessageSendStatus.sent)
               .map(
                 (m) => {
                   'id': m.id,
@@ -944,6 +1069,24 @@ class MessageStore extends ChangeNotifier {
     return requested == current;
   }
 
+  @visibleForTesting
+  static List<Message> mergeSnapshotWithLocalMessages(
+    List<Message> serverMessages,
+    List<Message> localMessages,
+  ) {
+    final merged = <String, Message>{
+      for (final message in serverMessages) message.id: message,
+    };
+    for (final message in localMessages) {
+      if (message.sendStatus != MessageSendStatus.sent) {
+        merged.putIfAbsent(message.id, () => message);
+      }
+    }
+    final result = merged.values.toList()
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    return result;
+  }
+
   Future<void> _runOutboxSync(
     String chatId,
     Message message, {
@@ -968,13 +1111,11 @@ class MessageStore extends ChangeNotifier {
         debugPrint(
           'MessageStore: Synced message ${message.id} via websocket ✓',
         );
-        if (tracked) {
-          await updateMessageSendStatus(
-            chatId,
-            message.id,
-            MessageSendStatus.sent,
-          );
-        }
+        await updateMessageSendStatus(
+          chatId,
+          message.id,
+          MessageSendStatus.sent,
+        );
         return;
       } catch (e) {
         lastError = e;
@@ -1006,12 +1147,14 @@ class MessageStore extends ChangeNotifier {
     if (_draining) return;
     _draining = true;
     try {
+      for (final chatId in _knownChatIds.toList()) {
+        await ensureLoaded(chatId);
+      }
       final pending = <MapEntry<String, Message>>[];
       for (final entry in _messages.entries) {
         for (final m in entry.value) {
-          if (m.senderId == 'me' &&
-              (m.sendStatus == MessageSendStatus.failed ||
-                  m.sendStatus == MessageSendStatus.sending)) {
+          if (m.sendStatus == MessageSendStatus.failed ||
+              m.sendStatus == MessageSendStatus.sending) {
             pending.add(MapEntry(entry.key, m));
           }
         }
@@ -1020,7 +1163,11 @@ class MessageStore extends ChangeNotifier {
       if (pending.isEmpty) return;
       debugPrint('MessageStore: draining outbox (${pending.length} messages)');
       for (final entry in pending) {
-        await _runOutboxSync(entry.key, entry.value, tracked: true);
+        await _runOutboxSync(
+          entry.key,
+          entry.value,
+          tracked: entry.value.senderId == 'me',
+        );
       }
     } finally {
       _draining = false;

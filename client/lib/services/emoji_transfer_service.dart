@@ -42,6 +42,18 @@ class EmojiTransferService {
     }
   }
 
+  /// Clears only downloaded transfer assets. Imported sticker files are stored
+  /// elsewhere and are never affected.
+  static Future<void> clearCache() async {
+    final root = await getApplicationDocumentsDirectory();
+    final cacheDir = Directory(
+      '${root.path}${Platform.pathSeparator}emoji_cache',
+    );
+    if (await cacheDir.exists()) {
+      await cacheDir.delete(recursive: true);
+    }
+  }
+
   static Future<String?> _download(String reference) async {
     try {
       final cachedPath = await _findCachedPath(reference);
@@ -59,18 +71,29 @@ class EmojiTransferService {
       final size = init['size'] as int? ?? -1;
       final filename = (init['filename'] ?? '').toString();
       final expectedHash = (init['sha256'] ?? '').toString();
-      if (transferId.isEmpty || totalChunks <= 0 || size < 0 || size > _maxFileSize) {
+      if (transferId.isEmpty ||
+          totalChunks <= 0 ||
+          size < 0 ||
+          size > _maxFileSize) {
         return null;
       }
 
       final root = await getApplicationDocumentsDirectory();
-      final cacheDir = Directory('${root.path}${Platform.pathSeparator}emoji_cache');
-      if (!await cacheDir.exists()) await cacheDir.create(recursive: true);
+      final cacheDir = Directory(
+        '${root.path}${Platform.pathSeparator}emoji_cache',
+      );
+      if (!await cacheDir.exists()) {
+        await cacheDir.create(recursive: true);
+      }
 
       final extension = _extensionFrom(filename);
       final cacheKey = sha256.convert(utf8.encode(reference)).toString();
-      final target = File('${cacheDir.path}${Platform.pathSeparator}$cacheKey.$extension');
-      if (await target.exists() && await target.length() == size) return target.path;
+      final target = File(
+        '${cacheDir.path}${Platform.pathSeparator}$cacheKey.$extension',
+      );
+      if (await target.exists() && await target.length() == size) {
+        return target.path;
+      }
 
       final temp = File('${target.path}.part');
       if (await temp.exists()) await temp.delete();
@@ -83,18 +106,23 @@ class EmojiTransferService {
             {'transfer_id': transferId, 'chunk_index': index},
             timeout: const Duration(seconds: 20),
           );
-          if (chunk['chunk_index'] != index || chunk['chunk_base64'] is! String) {
+          if (chunk['chunk_index'] != index ||
+              chunk['chunk_base64'] is! String) {
             throw const FormatException('invalid emoji chunk response');
           }
           final bytes = base64Decode(chunk['chunk_base64'] as String);
           received += bytes.length;
-          if (received > size) throw const FormatException('emoji size overflow');
+          if (received > size) {
+            throw const FormatException('emoji size overflow');
+          }
           sink.add(bytes);
         }
       } finally {
         await sink.close();
       }
-      if (received != size) throw const FormatException('incomplete emoji transfer');
+      if (received != size) {
+        throw const FormatException('incomplete emoji transfer');
+      }
       if (expectedHash.isNotEmpty) {
         final actualHash = sha256.convert(await temp.readAsBytes()).toString();
         if (actualHash != expectedHash) {
@@ -189,12 +217,13 @@ class EmojiTransferService {
           final stat = await file.stat();
           stats[file] = (size: stat.size, modified: stat.modified);
         } catch (_) {
-          stats[file] = (size: 0, modified: DateTime.fromMillisecondsSinceEpoch(0));
+          stats[file] = (
+            size: 0,
+            modified: DateTime.fromMillisecondsSinceEpoch(0),
+          );
         }
       }
-      files.sort(
-        (a, b) => stats[a]!.modified.compareTo(stats[b]!.modified),
-      );
+      files.sort((a, b) => stats[a]!.modified.compareTo(stats[b]!.modified));
 
       var count = files.length;
       var totalBytes = files.fold<int>(0, (sum, f) => sum + stats[f]!.size);

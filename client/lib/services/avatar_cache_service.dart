@@ -170,7 +170,9 @@ class AvatarCacheService {
               await oldFile.delete();
             }
           } catch (e) {
-            debugPrint('AvatarCacheService: failed to delete stale file $entryPath: $e');
+            debugPrint(
+              'AvatarCacheService: failed to delete stale file $entryPath: $e',
+            );
           }
         }
         await file.writeAsBytes(response.bodyBytes, flush: true);
@@ -249,7 +251,9 @@ class AvatarCacheService {
             await file.delete();
           }
         } catch (e) {
-          debugPrint('AvatarCacheService: evictByPrefix delete failed $entryPath: $e');
+          debugPrint(
+            'AvatarCacheService: evictByPrefix delete failed $entryPath: $e',
+          );
         }
       }
       _resolvedPaths.remove(key);
@@ -260,6 +264,24 @@ class AvatarCacheService {
     if (changed) {
       await _persistMeta();
     }
+  }
+
+  /// Removes every downloaded avatar and its local metadata. User profile
+  /// settings and remote avatar files are intentionally left untouched.
+  static Future<void> clearAll() async {
+    await _ensureInitialized();
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    _metaDirty = false;
+    _resolvedPaths.clear();
+    _meta.clear();
+
+    final path = await _avatarsDir();
+    final directory = Directory(path);
+    if (await directory.exists()) {
+      await directory.delete(recursive: true);
+    }
+    await StorageService.remove(_metaStorageKey);
   }
 
   // 缓存上限：文件数与总字节数任一超出即按 LRU 逐出最旧文件。
@@ -292,7 +314,9 @@ class AvatarCacheService {
         final updatedAt =
             DateTime.tryParse(entry?['updated_at'] as String? ?? '') ??
             DateTime.fromMillisecondsSinceEpoch(0);
-        entries.add(_CacheEntry(key: key, path: path, size: size, updatedAt: updatedAt));
+        entries.add(
+          _CacheEntry(key: key, path: path, size: size, updatedAt: updatedAt),
+        );
         totalBytes += size;
       }
 
