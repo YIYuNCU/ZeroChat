@@ -8,6 +8,7 @@ import '../services/emoji_service.dart';
 import '../services/role_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/settings_service.dart';
+import '../widgets/emoji_image.dart';
 
 /// 表情管理页面
 /// 支持 AI 表情和用户表情的分类/上传/删除
@@ -438,11 +439,11 @@ class _EmojiManagerPageState extends State<EmojiManagerPage> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  Image.network(
-                    url,
+                  EmojiImage(
+                    source: url,
                     headers: SecureBackendClient.authHeaders,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => const Icon(Icons.broken_image),
+                    error: const Icon(Icons.broken_image),
                   ),
                   if (!_aiMode && (emoji.tag ?? '').isNotEmpty)
                     Align(

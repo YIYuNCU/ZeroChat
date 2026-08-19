@@ -1,13 +1,11 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../models/emoji_item.dart';
 import '../services/emoji_service.dart';
-import '../services/emoji_transfer_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/settings_service.dart';
+import 'emoji_image.dart';
 
 class InputBarController extends ChangeNotifier {
   void closeControls() {
@@ -985,25 +983,11 @@ class _EmojiPickerPanelState extends State<_EmojiPickerPanel> {
   }
 
   Widget _buildEmojiPreview(String source) {
-    if (EmojiTransferService.isTransferReference(source)) {
-      return FutureBuilder<String?>(
-        future: EmojiTransferService.resolveLocalPath(source),
-        builder: (context, snapshot) {
-          final localPath = snapshot.data;
-          if (localPath == null) return const Icon(Icons.image_not_supported);
-          return Image.file(
-            File(localPath),
-            fit: BoxFit.cover,
-            errorBuilder: (_, _, _) => const Icon(Icons.image_not_supported),
-          );
-        },
-      );
-    }
-    return Image.network(
-      source,
+    return EmojiImage(
+      source: source,
       fit: BoxFit.cover,
       headers: SecureBackendClient.authHeaders,
-      errorBuilder: (_, _, _) => const Icon(Icons.image_not_supported),
+      error: const Icon(Icons.image_not_supported),
     );
   }
 
