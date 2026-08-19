@@ -171,6 +171,12 @@ class EmojiTransferService {
           continue;
         }
         if (await entry.length() > 0) {
+          // Keep frequently displayed emoji assets near the end of LRU cleanup.
+          try {
+            await entry.setLastModified(DateTime.now());
+          } catch (error) {
+            debugPrint('EmojiTransferService: cache access update failed: $error');
+          }
           return entry.path;
         }
       }
