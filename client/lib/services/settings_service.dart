@@ -44,7 +44,9 @@ class SettingsService extends ChangeNotifier {
   String _chatApiUrl = '';
   String _chatApiKey = '';
   String _chatModel = 'gpt-3.5-turbo';
+  String _chatApiFormat = 'auto';
   List<AiModelProfile> _modelProfiles = [];
+  List<VisionModelProfile> _visionModelProfiles = [];
   Map<String, String> _roleModelProfileSelections = {};
 
   // 意图识别 API
@@ -59,6 +61,7 @@ class SettingsService extends ChangeNotifier {
   String _visionApiKey = '';
   String _visionModel = 'gpt-4-vision-preview';
   String _visionMode = 'standalone';
+  String _visionApiFormat = 'auto';
 
   // 向量记忆 API (embedding)
   bool _embeddingEnabled = false;
@@ -88,7 +91,10 @@ class SettingsService extends ChangeNotifier {
   String get chatApiUrl => _chatApiUrl;
   String get chatApiKey => _chatApiKey;
   String get chatModel => _chatModel;
+  String get chatApiFormat => _chatApiFormat;
   List<AiModelProfile> get modelProfiles => List.unmodifiable(_modelProfiles);
+  List<VisionModelProfile> get visionModelProfiles =>
+      List.unmodifiable(_visionModelProfiles);
 
   /// Returns the local model profile selected for a role, if one was saved.
   /// Profile associations are device-local because profile API keys are local too.
@@ -105,6 +111,7 @@ class SettingsService extends ChangeNotifier {
   String get visionApiKey => _visionApiKey;
   String get visionModel => _visionModel;
   String get visionMode => _visionMode;
+  String get visionApiFormat => _visionApiFormat;
 
   bool get embeddingEnabled => _embeddingEnabled;
   String get embeddingApiUrl => _embeddingApiUrl;
@@ -157,7 +164,11 @@ class SettingsService extends ChangeNotifier {
     _chatApiUrl = StorageService.getString('chat_api_url') ?? '';
     _chatApiKey = SecureStorageService.getString('chat_api_key');
     _chatModel = StorageService.getString('chat_model') ?? 'gpt-3.5-turbo';
+    _chatApiFormat = normalizeApiFormat(
+      StorageService.getString('chat_api_format'),
+    );
     await _loadModelProfiles();
+    await _loadVisionModelProfiles();
     _loadRoleModelProfileSelections();
 
     // 意图识别 API
@@ -173,6 +184,9 @@ class SettingsService extends ChangeNotifier {
     _visionModel =
         StorageService.getString('vision_model') ?? 'gpt-4-vision-preview';
     _visionMode = StorageService.getString('vision_mode') ?? 'standalone';
+    _visionApiFormat = normalizeApiFormat(
+      StorageService.getString('vision_api_format'),
+    );
 
     // 向量记忆 API
     _embeddingEnabled = StorageService.getBool('embedding_enabled') ?? false;
@@ -316,13 +330,16 @@ class SettingsService extends ChangeNotifier {
     required String url,
     required String key,
     required String model,
+    String? apiFormat,
   }) async {
     _chatApiUrl = url;
     _chatApiKey = key;
     _chatModel = model;
+    if (apiFormat != null) _chatApiFormat = normalizeApiFormat(apiFormat);
     await StorageService.setString('chat_api_url', url);
     await SecureStorageService.setString('chat_api_key', key);
     await StorageService.setString('chat_model', model);
+    await StorageService.setString('chat_api_format', _chatApiFormat);
     notifyListeners();
   }
 
@@ -334,6 +351,22 @@ class SettingsService extends ChangeNotifier {
           return AiModelProfile.fromJson(
             json,
             apiKey: SecureStorageService.getString('ai_model_profile_key_$id'),
+          );
+        })
+        .where((profile) => profile.id.isNotEmpty)
+        .toList();
+  }
+
+  Future<void> _loadVisionModelProfiles() async {
+    final raw = StorageService.getJsonList('vision_model_profiles') ?? [];
+    _visionModelProfiles = raw
+        .map((json) {
+          final id = '${json['id'] ?? ''}';
+          return VisionModelProfile.fromJson(
+            json,
+            apiKey: SecureStorageService.getString(
+              'vision_model_profile_key_$id',
+            ),
           );
         })
         .where((profile) => profile.id.isNotEmpty)
@@ -373,6 +406,7 @@ class SettingsService extends ChangeNotifier {
     required String url,
     required String model,
     required String key,
+    String apiFormat = 'auto',
   }) async {
     final profile = AiModelProfile(
       id: id,
@@ -380,6 +414,7 @@ class SettingsService extends ChangeNotifier {
       apiUrl: url,
       model: model,
       apiKey: key,
+      apiFormat: apiFormat,
     );
     _modelProfiles = [
       ..._modelProfiles.where((item) => item.id != id),
@@ -405,6 +440,50 @@ class SettingsService extends ChangeNotifier {
       'role_model_profile_selections',
       _roleModelProfileSelections,
     );
+    notifyListeners();
+  }
+
+  Future<void> saveVisionModelProfile({
+    required String id,
+    required String name,
+    required String url,
+    required String model,
+    required String key,
+    required bool enabled,
+    required String mode,
+    String apiFormat = 'auto',
+  }) async {
+    final profile = VisionModelProfile(
+      id: id,
+      name: name,
+      apiUrl: url,
+      model: model,
+      apiKey: key,
+      enabled: enabled,
+      mode: mode,
+      apiFormat: apiFormat,
+    );
+    _visionModelProfiles = [
+      ..._visionModelProfiles.where((item) => item.id != id),
+      profile,
+    ];
+    await StorageService.setJsonList(
+      'vision_model_profiles',
+      _visionModelProfiles.map((item) => item.toJson()).toList(),
+    );
+    await SecureStorageService.setString('vision_model_profile_key_$id', key);
+    notifyListeners();
+  }
+
+  Future<void> deleteVisionModelProfile(String id) async {
+    _visionModelProfiles = _visionModelProfiles
+        .where((item) => item.id != id)
+        .toList();
+    await StorageService.setJsonList(
+      'vision_model_profiles',
+      _visionModelProfiles.map((item) => item.toJson()).toList(),
+    );
+    await SecureStorageService.remove('vision_model_profile_key_$id');
     notifyListeners();
   }
 
@@ -442,6 +521,7 @@ class SettingsService extends ChangeNotifier {
     required String key,
     required String model,
     String? mode,
+    String? apiFormat,
   }) async {
     _visionEnabled = enabled;
     _visionApiUrl = url;
@@ -450,11 +530,13 @@ class SettingsService extends ChangeNotifier {
     if (mode != null && mode.isNotEmpty) {
       _visionMode = mode;
     }
+    if (apiFormat != null) _visionApiFormat = normalizeApiFormat(apiFormat);
     await StorageService.setBool('vision_enabled', enabled);
     await StorageService.setString('vision_api_url', url);
     await SecureStorageService.setString('vision_api_key', key);
     await StorageService.setString('vision_model', model);
     await StorageService.setString('vision_mode', _visionMode);
+    await StorageService.setString('vision_api_format', _visionApiFormat);
     notifyListeners();
   }
 
@@ -522,6 +604,7 @@ class SettingsService extends ChangeNotifier {
             'ai_api_url': _chatApiUrl,
             'ai_api_key': _chatApiKey,
             'ai_model': _chatModel,
+            'ai_api_format': _chatApiFormat,
             'intent_enabled': _intentEnabled,
             'intent_api_url': _intentApiUrl,
             'intent_api_key': _intentApiKey,
@@ -531,6 +614,7 @@ class SettingsService extends ChangeNotifier {
             'vision_api_key': _visionApiKey,
             'vision_model': _visionModel,
             'vision_mode': _visionMode,
+            'vision_api_format': _visionApiFormat,
             'embedding_enabled': _embeddingEnabled,
             'embedding_api_url': _embeddingApiUrl,
             'embedding_api_key': _embeddingApiKey,
@@ -570,6 +654,7 @@ class SettingsService extends ChangeNotifier {
           (server['ai_model']?.toString() ?? _chatModel).trim().isEmpty
           ? _chatModel
           : (server['ai_model']?.toString() ?? _chatModel).trim();
+      final chatApiFormat = normalizeApiFormat(server['ai_api_format']);
 
       final intentEnabled = server['intent_enabled'] == true;
       final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
@@ -593,6 +678,7 @@ class SettingsService extends ChangeNotifier {
           const {'standalone', 'pre_model', 'tool'}.contains(visionModeRaw)
           ? visionModeRaw
           : 'standalone';
+      final visionApiFormat = normalizeApiFormat(server['vision_api_format']);
 
       final embeddingEnabled = server['embedding_enabled'] == true;
       final embeddingUrl = (server['embedding_api_url']?.toString() ?? '')
@@ -606,7 +692,12 @@ class SettingsService extends ChangeNotifier {
           ? _embeddingModel
           : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
 
-      await updateChatApi(url: chatUrl, key: chatKey, model: chatModel);
+      await updateChatApi(
+        url: chatUrl,
+        key: chatKey,
+        model: chatModel,
+        apiFormat: chatApiFormat,
+      );
       await updateIntentApi(
         enabled: intentEnabled,
         url: intentUrl,
@@ -619,6 +710,7 @@ class SettingsService extends ChangeNotifier {
         key: visionKey,
         model: visionModel,
         mode: visionMode,
+        apiFormat: visionApiFormat,
       );
       await updateEmbeddingApi(
         enabled: embeddingEnabled,
@@ -654,6 +746,7 @@ class SettingsService extends ChangeNotifier {
           (server['ai_model']?.toString() ?? _chatModel).trim().isEmpty
           ? _chatModel
           : (server['ai_model']?.toString() ?? _chatModel).trim();
+      final chatApiFormat = normalizeApiFormat(server['ai_api_format']);
 
       final intentEnabled = server['intent_enabled'] == true;
       final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
@@ -675,6 +768,7 @@ class SettingsService extends ChangeNotifier {
           const {'standalone', 'pre_model', 'tool'}.contains(visionModeRaw)
           ? visionModeRaw
           : 'standalone';
+      final visionApiFormat = normalizeApiFormat(server['vision_api_format']);
 
       final embeddingEnabled = server['embedding_enabled'] == true;
       final embeddingUrl = (server['embedding_api_url']?.toString() ?? '')
@@ -686,7 +780,12 @@ class SettingsService extends ChangeNotifier {
           ? _embeddingModel
           : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
 
-      await updateChatApi(url: chatUrl, key: _chatApiKey, model: chatModel);
+      await updateChatApi(
+        url: chatUrl,
+        key: _chatApiKey,
+        model: chatModel,
+        apiFormat: chatApiFormat,
+      );
       await updateIntentApi(
         enabled: intentEnabled,
         url: intentUrl,
@@ -699,6 +798,7 @@ class SettingsService extends ChangeNotifier {
         key: _visionApiKey,
         model: visionModel,
         mode: visionMode,
+        apiFormat: visionApiFormat,
       );
       await updateEmbeddingApi(
         enabled: embeddingEnabled,

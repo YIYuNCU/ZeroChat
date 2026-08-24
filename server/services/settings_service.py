@@ -34,6 +34,7 @@ def get_default_settings() -> Dict[str, Any]:
         "ai_api_url": "",
         "ai_api_key": "",
         "ai_model": "deepseek-chat",
+        "ai_api_format": "auto",
         "intent_enabled": False,
         "intent_api_url": "",
         "intent_api_key": "",
@@ -43,6 +44,7 @@ def get_default_settings() -> Dict[str, Any]:
         "vision_api_key": "",
         "vision_model": "gpt-4o",
         "vision_mode": "standalone",
+        "vision_api_format": "auto",
         "embedding_enabled": True,
         "embedding_api_url": "",
         "embedding_api_key": "",
@@ -107,6 +109,7 @@ def get_ai_config() -> Dict[str, str]:
         "api_url": settings.get("ai_api_url", ""),
         "api_key": settings.get("ai_api_key", ""),
         "model": settings.get("ai_model", "deepseek-chat"),
+        "api_format": _normalize_api_format(settings.get("ai_api_format")),
     }
 
 
@@ -133,7 +136,13 @@ def get_vision_config() -> Dict[str, Any]:
         "api_key": settings.get("vision_api_key", ""),
         "model": settings.get("vision_model", "gpt-4o"),
         "mode": mode,
+        "api_format": _normalize_api_format(settings.get("vision_api_format")),
     }
+
+
+def _normalize_api_format(value: Any) -> str:
+    value = str(value or "auto").strip().lower()
+    return value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
 
 
 def get_embedding_config() -> Dict[str, Any]:

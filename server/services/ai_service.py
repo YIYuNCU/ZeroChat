@@ -7,7 +7,7 @@ import json
 import logging
 import httpx
 import re
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -125,40 +125,118 @@ def close_http_client():
 atexit.register(close_http_client)
 
 
-def _normalize_api_url(api_url: str) -> str:
-    if not api_url.endswith("/v1/chat/completions"):
-        api_url = api_url.rstrip("/") + "/v1/chat/completions"
-    return api_url
+def _is_google_gemini_endpoint(api_url: Optional[str]) -> bool:
+    try:
+        return (urlsplit(str(api_url or "")).hostname or "").lower() == "generativelanguage.googleapis.com"
+    except (TypeError, ValueError):
+        return False
+
+
+_API_FORMATS = {"auto", "gemini_native", "openai_compatible"}
+
+
+def _normalize_api_format(value: Optional[str]) -> str:
+    value = str(value or "auto").strip().lower()
+    return value if value in _API_FORMATS else "auto"
+
+
+def _uses_native_gemini(
+    model: Optional[str], api_url: Optional[str], api_format: Optional[str] = None,
+) -> bool:
+    """Determine whether this request must use Gemini's native protocol."""
+    api_format = _normalize_api_format(api_format)
+    if api_format == "gemini_native":
+        return True
+    if api_format == "openai_compatible" or not _is_google_gemini_endpoint(api_url):
+        return False
+    return _is_gemini_model(model) and "/openai" not in urlsplit(str(api_url or "")).path.lower()
+
+
+def _normalize_native_gemini_endpoint(api_url: str, model: str) -> str:
+    parsed = urlsplit(str(api_url or "").strip())
+    path = parsed.path.rstrip("/")
+    # Settings may contain a base URL, an OpenAI compatibility URL, or a
+    # complete Gemini resource URL. Always rebuild from the API version root.
+    path = re.sub(r"/openai(?:/|$)", "/", path, count=1, flags=re.IGNORECASE)
+    path = re.sub(r"/models(?:/.*)?$", "", path, flags=re.IGNORECASE)
+    path = re.sub(r"/chat/completions$", "", path, flags=re.IGNORECASE).rstrip("/")
+    if not path.lower().endswith(("/v1", "/v1beta")):
+        path = f"{path}/v1beta"
+    normalized_model = str(model or "gemini-2.5-flash").removeprefix("models/")
+    return urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        f"{path}/models/{normalized_model}:generateContent",
+        "",
+        "",
+    ))
+
+
+def _with_gemini_api_key(api_url: str, api_key: str) -> str:
+    """Use Gemini's query-string API key form required by some gateways."""
+    parsed = urlsplit(api_url)
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "key"]
+    query.append(("key", api_key))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+
+
+def _api_url_without_query(api_url: str) -> str:
+    parsed = urlsplit(api_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _normalize_api_url(
+    api_url: str, model: Optional[str] = None, api_format: Optional[str] = None,
+) -> str:
+    """Normalize both OpenAI-compatible and official Gemini endpoints."""
+    if _uses_native_gemini(model, api_url, api_format):
+        return _normalize_native_gemini_endpoint(api_url, str(model or "gemini-2.5-flash"))
+    value = str(api_url or "").strip().rstrip("/")
+    if value.endswith("/chat/completions"):
+        return value
+    # Gemini's compatibility endpoint is rooted at /v1beta/openai, not /v1.
+    if _is_google_gemini_endpoint(value):
+        if _normalize_api_format(api_format) == "openai_compatible" and "/openai" not in urlsplit(value).path.lower():
+            value = f"{value}/openai"
+        if value.endswith("/openai"):
+            return f"{value}/chat/completions"
+    return f"{value}/v1/chat/completions"
 
 def _resolve_ai_config(
     model: Optional[str],
     api_url: Optional[str],
     api_key: Optional[str],
-    temperature: Optional[float] = None
-) -> Tuple[Optional[str], Optional[str], Optional[str],Optional[float]]:
+    temperature: Optional[float] = None,
+    api_format: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[float], str]:
     config = settings_service.load_settings()
     resolved_model = model or config.get("ai_model", "deepseek-chat")
-    resolved_url = _normalize_api_url(api_url or config.get("ai_api_url", ""))
+    resolved_format = _normalize_api_format(api_format or config.get("ai_api_format"))
+    resolved_url = _normalize_api_url(
+        api_url or config.get("ai_api_url", ""), resolved_model, resolved_format,
+    )
     resolved_key = api_key or config.get("ai_api_key", "")
     resolved_temperature = temperature if temperature is not None else config.get("ai_temperature", 0.7)
-    return resolved_model, resolved_url, resolved_key, resolved_temperature
+    return resolved_model, resolved_url, resolved_key, resolved_temperature, resolved_format
 
-def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[float]]:
+def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[float], str]:
     if not role_data:
-        return _resolve_ai_config(None, None, None, None)
+        return _resolve_ai_config(None, None, None, None, None)
 
     model = role_data.get("ai_model")
     api_url = role_data.get("ai_api_url")
     api_key = role_data.get("ai_api_key")
     temperature = role_data.get("ai_temperature")
+    api_format = role_data.get("ai_api_format")
     metadata = role_data.get("metadata")
     if isinstance(metadata, dict):
         model = model or metadata.get("ai_model")
         api_url = api_url or metadata.get("ai_api_url")
         api_key = api_key or metadata.get("ai_api_key")
         temperature = temperature if temperature is not None else metadata.get("ai_temperature")
+        api_format = api_format or metadata.get("ai_api_format")
 
-    return _resolve_ai_config(model, api_url, api_key, temperature)
+    return _resolve_ai_config(model, api_url, api_key, temperature, api_format)
 
 
 def _is_grok_model(model: Optional[str]) -> bool:
@@ -262,6 +340,139 @@ def _build_base_chat_payload(
     return payload
 
 
+def _gemini_inline_data(image_url: str) -> Optional[Dict[str, str]]:
+    """Convert an OpenAI data URL into Gemini's native inlineData part."""
+    if not image_url.startswith("data:") or ";base64," not in image_url:
+        return None
+    prefix, encoded = image_url.split(",", 1)
+    mime_type = prefix[5:].split(";", 1)[0].strip()
+    if not mime_type or not encoded:
+        return None
+    return {"mimeType": mime_type, "data": encoded}
+
+
+def _gemini_parts_from_content(content: Any) -> List[Dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"text": content}]
+    if not isinstance(content, list):
+        return [{"text": str(content or "")}]
+
+    parts: List[Dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text":
+            parts.append({"text": str(item.get("text") or "")})
+        elif item.get("type") == "image_url":
+            image = item.get("image_url") or {}
+            image_url = str(image.get("url") if isinstance(image, dict) else image)
+            inline_data = _gemini_inline_data(image_url)
+            if inline_data:
+                parts.append({"inlineData": inline_data})
+            elif image_url:
+                # Gemini native supports externally hosted images through fileData.
+                parts.append({"fileData": {"mimeType": "image/*", "fileUri": image_url}})
+        elif item.get("type") == "file" and item.get("file_id"):
+            # This form is not emitted by Gemini paths, but preserving it as text
+            # avoids silently dropping context when a profile is changed mid-chat.
+            parts.append({"text": f"Attached file: {item['file_id']}"})
+    return parts or [{"text": ""}]
+
+
+def _build_native_gemini_request(
+    messages: List[Dict[str, Any]], api_key: str, model: str,
+    temperature: float, max_tokens: int, tools: Optional[List[Dict]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Translate the internal OpenAI-shaped conversation to generateContent."""
+    contents: List[Dict[str, Any]] = []
+    system_parts: List[Dict[str, Any]] = []
+    tool_names: Dict[str, str] = {}
+
+    for message in messages:
+        role = str(message.get("role") or "user")
+        if role == "system":
+            system_parts.extend(_gemini_parts_from_content(message.get("content", "")))
+            continue
+        if role == "assistant":
+            parts = _gemini_parts_from_content(message.get("content", ""))
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function") or {}
+                name = str(function.get("name") or "")
+                if not name:
+                    continue
+                arguments = function.get("arguments", {})
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments or "{}")
+                    except json.JSONDecodeError:
+                        arguments = {}
+                part: Dict[str, Any] = {"functionCall": {"name": name, "args": arguments or {}}}
+                signature = ((call.get("extra_content") or {}).get("google") or {}).get("thought_signature")
+                if signature:
+                    part["thoughtSignature"] = signature
+                parts.append(part)
+                tool_names[str(call.get("id") or name)] = name
+            contents.append({"role": "model", "parts": parts})
+            continue
+        if role == "tool":
+            name = tool_names.get(str(message.get("tool_call_id") or ""))
+            if name:
+                contents.append({
+                    "role": "user",
+                    "parts": [{"functionResponse": {"name": name, "response": {"result": str(message.get("content") or "")}}}],
+                })
+            continue
+        contents.append({"role": "user", "parts": _gemini_parts_from_content(message.get("content", ""))})
+
+    payload: Dict[str, Any] = {
+        "contents": contents,
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
+    }
+    if system_parts:
+        payload["systemInstruction"] = {"parts": system_parts}
+    declarations = []
+    for tool in tools or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if isinstance(function, dict) and function.get("name"):
+            declarations.append({
+                "name": function["name"],
+                "description": function.get("description", ""),
+                "parameters": function.get("parameters", {"type": "object", "properties": {}}),
+            })
+    if declarations:
+        payload["tools"] = [{"functionDeclarations": declarations}]
+    return payload, {"Content-Type": "application/json"}
+
+
+def _parse_native_gemini_response(data: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    candidate = (data.get("candidates") or [{}])[0]
+    content = candidate.get("content") or {}
+    text_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    for index, part in enumerate(content.get("parts") or []):
+        if not isinstance(part, dict):
+            continue
+        if part.get("text"):
+            text_parts.append(str(part["text"]))
+        function_call = part.get("functionCall")
+        if isinstance(function_call, dict) and function_call.get("name"):
+            call_id = f"gemini-{index}-{function_call['name']}"
+            call: Dict[str, Any] = {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": str(function_call["name"]),
+                    "arguments": function_call.get("args") or {},
+                },
+            }
+            if part.get("thoughtSignature"):
+                call["extra_content"] = {"google": {"thought_signature": part["thoughtSignature"]}}
+            tool_calls.append(call)
+    return "\n".join(text_parts).strip(), tool_calls, data.get("usageMetadata")
+
+
 def _build_deepseek_chat_request(
     messages: List[Dict[str, Any]], api_key: str, model: str,
     temperature: float, max_tokens: int, tools: Optional[List[Dict]],
@@ -308,7 +519,12 @@ def _build_generic_chat_request(
 def _build_chat_request(
     messages: List[Dict[str, Any]], api_key: str, model: str, api_url: str,
     temperature: float, max_tokens: int, tools: Optional[List[Dict]],
+    api_format: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    if _uses_native_gemini(model, api_url, api_format):
+        return _build_native_gemini_request(messages, api_key, model, temperature, max_tokens, tools)
+    if _normalize_api_format(api_format) == "openai_compatible":
+        return _build_generic_chat_request(messages, api_key, model, temperature, max_tokens, tools)
     if _is_deepseek_model(model):
         return _build_deepseek_chat_request(messages, api_key, model, temperature, max_tokens, tools)
     if _is_mimo_provider(model, api_url):
@@ -335,8 +551,14 @@ async def _post_chat(
     max_tokens: int,
     tools: Optional[List[Dict]] = None,
     stats_role_id: Optional[str] = None,
+    api_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
+        api_format = _normalize_api_format(api_format)
+        native_gemini = _uses_native_gemini(model, api_url, api_format)
+        endpoint = _normalize_api_url(api_url, model, api_format) if native_gemini else api_url
+        if native_gemini:
+            endpoint = _with_gemini_api_key(endpoint, api_key)
         payload, headers = _build_chat_request(
             messages,
             api_key,
@@ -345,23 +567,29 @@ async def _post_chat(
             temperature,
             max_tokens,
             tools,
+            api_format,
         )
         client = _get_http_client()
         response = await client.post(
-            api_url,
+            endpoint,
             headers=headers,
             json=payload,
         )
         response.raise_for_status()
         data = response.json()
-        message = data["choices"][0]["message"]
-        assistant_content = message.get("content")
-        content = _extract_plain_message_content(assistant_content or "")
-        tool_calls = message.get("tool_calls")
+        if native_gemini:
+            assistant_content, tool_calls, usage = _parse_native_gemini_response(data)
+            content = _extract_plain_message_content(assistant_content)
+            message: Dict[str, Any] = {}
+        else:
+            message = data["choices"][0]["message"]
+            assistant_content = message.get("content")
+            content = _extract_plain_message_content(assistant_content or "")
+            tool_calls = message.get("tool_calls")
+            usage = data.get("usage")
         # DeepSeek 等 API 可能在限速时返回 200 OK 但 content 为空
         if not content and not tool_calls:
             return {"success": False, "content": None, "error": "AI 返回了空内容，可能是 API 限速或服务不稳定，请重试"}
-        usage = data.get("usage")
         if usage:
             # 按角色累计 token 用量与缓存量（无角色的辅助调用不计入）
             if stats_role_id:
@@ -373,7 +601,7 @@ async def _post_chat(
                         stats_role_id,
                         usage,
                         model,
-                        _usage_platform(api_url),
+                        _usage_platform(endpoint),
                     )
                 except Exception as exc:
                     logger.warning("record_usage failed: %s", exc)
@@ -395,7 +623,7 @@ async def _post_chat(
         logger.error(
             "AI API HTTP %s 错误: url=%s, model=%s, tool_count=%d, response=%s",
             e.response.status_code if e.response else "?",
-            api_url,
+            _api_url_without_query(endpoint) if 'endpoint' in locals() else _api_url_without_query(api_url),
             model,
             len(tools) if tools else 0,
             resp_body[:1000],
@@ -414,6 +642,7 @@ async def call_ai(
     max_tokens: int = 1000,
     tools: Optional[List[Dict]] = None,
     stats_role_id: Optional[str] = None,
+    api_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     统一 AI API 调用
@@ -428,8 +657,8 @@ async def call_ai(
     Returns:
         {"success": bool, "content": str, "error": str}
     """
-    resolved_model, resolved_url, resolved_key, resolved_temperature = _resolve_ai_config(
-        model, api_url, api_key, temperature,
+    resolved_model, resolved_url, resolved_key, resolved_temperature, resolved_format = _resolve_ai_config(
+        model, api_url, api_key, temperature, api_format,
     )
     if not resolved_url or not resolved_key:
         return {"success": False, "content": None, "error": "AI API 未配置"}
@@ -443,6 +672,7 @@ async def call_ai(
         max_tokens=max_tokens,
         tools=tools,
         stats_role_id=stats_role_id,
+        api_format=resolved_format,
     )
 
 async def call_ai_direct(
@@ -451,21 +681,23 @@ async def call_ai_direct(
     api_key: str,
     model: str,
     temperature: float = 0.7,
-    max_tokens: int = 1000
+    max_tokens: int = 1000,
+    api_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     独立调用 AI（不依赖全局配置）
     """
     if not api_url or not api_key or not model:
         return {"success": False, "content": None, "error": "AI API 未配置"}
-    api_url = _normalize_api_url(api_url)
+    api_url = _normalize_api_url(api_url, model, api_format)
     return await _post_chat(
         messages=messages,
         api_url=api_url,
         api_key=api_key,
         model=model,
         temperature=temperature,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        api_format=api_format,
     )
 
 async def generate_embedding(
@@ -550,7 +782,7 @@ def _build_stats_instruction(
     if not stats:
         return ""
     stats_current = stats_current or {}
-    resolved_model, _, _, _ = _get_role_ai_config(role_data)
+    resolved_model, _, _, _, _ = _get_role_ai_config(role_data)
     is_grok = _is_grok_model(resolved_model)
     layout_rule = (
         "  - Grok 专项格式：<数值> 块必须位于整组对话的最后，紧贴最后一个 <对话> 块；"
@@ -610,7 +842,7 @@ def _build_system_prompt(
     stats_config = role_data.get("stats_config") or {}
     stats_enabled = bool(stats_config.get("enabled") and stats_config.get("stats"))
     sound_enabled = role_data.get("show_sound", True) is not False
-    resolved_model, _, _, _ = _get_role_ai_config(role_data)
+    resolved_model, _, _, _, _ = _get_role_ai_config(role_data)
     is_grok = _is_grok_model(resolved_model)
     use_conservative_tool_prompt_policy = _uses_conservative_tool_prompt_policy(
         resolved_model
@@ -626,7 +858,7 @@ def _build_system_prompt(
             "- $ 表示一条独立显示的消息：每个以 $ 分隔的消息都必须至少包含一个 <对话> 块。"
             "<动作> 和 <声音> 块不得单独成段；应与对应的 <对话> 块放在同一条消息内。\n"
             "- <声音> 用于描写可感知、短促的非对白声音（如衣料摩擦声、环境声、非语言人声，"
-            "如咳嗽、打嗝等）。当当前场景、动作或生理状态自然会产生这类声音时，"
+            "以及放屁声、排泄声等生理声响）。当当前场景、动作或生理状态自然会产生这类声音时，"
             "应输出一个简短的 <声音> 块，不要省略；例如："
             "<对话>抱歉，等我一下。</对话><声音>肚子咕噜响了一声</声音>。"
             "没有合理声源时不要凭空添加。声音块只写声音本身，不得替代实际对话；"
@@ -875,7 +1107,7 @@ async def _call_with_role_config(
     tools: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """Call AI using role-specific model configuration."""
-    model_override, url_override, key_override, temp_override = _get_role_ai_config(role_data)
+    model_override, url_override, key_override, temp_override, format_override = _get_role_ai_config(role_data)
     stats_role_id = str(role_data.get("id") or "").strip() if isinstance(role_data, dict) else ""
     return await call_ai(
         messages,
@@ -885,6 +1117,7 @@ async def _call_with_role_config(
         temperature=temp_override or default_temp,
         tools=tools,
         stats_role_id=stats_role_id or None,
+        api_format=format_override,
     )
 
 
@@ -958,7 +1191,7 @@ async def generate_with_role(
     messages = []
     is_onebot = origin.startswith("onebot")
     is_third_party = is_onebot and sender != "user"
-    resolved_model, _, _, _ = _get_role_ai_config(role_data)
+    resolved_model, _, _, _, _ = _get_role_ai_config(role_data)
     system_content = _build_system_prompt(
         role_data,
         None,

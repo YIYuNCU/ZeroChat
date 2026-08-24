@@ -22,6 +22,7 @@ ROLES_DIR = DATA_DIR / "roles"
 USER_EMOJI_DIR = DATA_DIR / "user_emojis"
 USER_EMOJI_DB = DATA_DIR / "user_emojis.sqlite"
 from core.utils import ensure_path_within_root, ensure_simple_path_segment, is_tool_role_id
+from core.quiet_rules import QuietRule, validate_quiet_rules
 
 def _normalize_category_name(name: str) -> str:
     normalized = str(name or "").strip().lower()
@@ -96,19 +97,6 @@ class EmojiCategoryPayload(BaseModel):
 class ResolveUserEmojiTagPayload(BaseModel):
     emoji_id: str
 
-class QuietPeriod(BaseModel):
-    """A daily quiet period expressed as minutes after midnight."""
-
-    start_minute: int = Field(ge=0, lt=24 * 60)
-    end_minute: int = Field(ge=0, lt=24 * 60)
-
-    @model_validator(mode="after")
-    def validate_non_empty(self):
-        if self.start_minute == self.end_minute:
-            raise ValueError("quiet period start and end must differ")
-        return self
-
-
 class ProactiveConfig(BaseModel):
     """主动消息配置"""
     enabled: bool = False
@@ -118,25 +106,14 @@ class ProactiveConfig(BaseModel):
     # Kept only for existing role profiles. New clients write quiet_periods.
     quiet_hours_start: Optional[int] = None
     quiet_hours_end: Optional[int] = None
-    quiet_periods: Optional[List[QuietPeriod]] = None
+    quiet_periods: Optional[List[QuietRule]] = None
     next_trigger_time: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_quiet_periods(self):
         if self.quiet_periods is None:
             return self
-
-        spans = []
-        for period in self.quiet_periods:
-            if period.start_minute < period.end_minute:
-                spans.append((period.start_minute, period.end_minute))
-            else:
-                spans.extend(((0, period.end_minute), (period.start_minute, 24 * 60)))
-
-        spans.sort()
-        for (_, previous_end), (start, _) in zip(spans, spans[1:]):
-            if start <= previous_end:
-                raise ValueError("quiet periods must not overlap or touch")
+        validate_quiet_rules(self.quiet_periods)
         return self
 
 class FollowupConfig(BaseModel):

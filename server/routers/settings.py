@@ -4,6 +4,8 @@
 """
 from typing import Optional
 import hashlib
+import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict
 from fastapi import APIRouter, HTTPException, Query
 
@@ -17,12 +19,97 @@ router = APIRouter()
 # 导入设置服务
 from services import settings_service
 
+
+def _is_google_gemini_url(api_url: str) -> bool:
+    try:
+        return (urlsplit(str(api_url or "")).hostname or "").lower() == "generativelanguage.googleapis.com"
+    except (TypeError, ValueError):
+        return False
+
+
+def _with_gemini_api_key(api_url: str, api_key: str) -> str:
+    parsed = urlsplit(api_url)
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "key"]
+    query.append(("key", api_key))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+
+
+def _models_request(
+    api_url: str, api_key: str, api_format: str = "auto",
+) -> tuple[str, dict[str, str], bool]:
+    """Build a model-list request for OpenAI-compatible or native Gemini APIs."""
+    value = str(api_url or "").strip().rstrip("/")
+    normalized_format = str(api_format or "auto").strip().lower()
+    is_native_gemini = (
+        normalized_format == "gemini_native"
+        or (
+            _is_google_gemini_url(value)
+            and normalized_format != "openai_compatible"
+            and "/openai" not in urlsplit(value).path.lower()
+        )
+    )
+    if is_native_gemini:
+        parsed = urlsplit(value)
+        path = parsed.path.rstrip("/")
+        # A saved endpoint can point at the native resource itself. Strip it
+        # before requesting the collection resource to avoid duplicated paths.
+        path = re.sub(r"/openai(?:/|$)", "/", path, count=1, flags=re.IGNORECASE)
+        path = re.sub(r"/models(?:/.*)?$", "", path, flags=re.IGNORECASE)
+        path = re.sub(r"/chat/completions$", "", path, flags=re.IGNORECASE).rstrip("/")
+        if not path.lower().endswith(("/v1", "/v1beta")):
+            path = f"{path}/v1beta"
+        return (
+            _with_gemini_api_key(
+                urlunsplit((parsed.scheme, parsed.netloc, f"{path}/models", "", "")),
+                api_key,
+            ),
+            {},
+            True,
+        )
+    parsed = urlsplit(value)
+    path = parsed.path.rstrip("/")
+    if (
+        _is_google_gemini_url(value)
+        and normalized_format == "openai_compatible"
+        and "/openai" not in path.lower()
+    ):
+        path = f"{path}/openai"
+    if path.endswith("/chat/completions"):
+        path = path[:-len("/chat/completions")]
+    if not path.endswith("/models"):
+        if _is_google_gemini_url(value) and path.endswith("/openai"):
+            path = f"{path}/models"
+        else:
+            path = f"{path}/models" if path.endswith("/v1") else f"{path}/v1/models"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")), {"Authorization": f"Bearer {api_key}"}, False
+
+
+def _model_ids(payload: dict, native_gemini: bool) -> list[str]:
+    records = payload.get("models") if native_gemini else payload.get("data")
+    if not isinstance(records, list):
+        return []
+    result = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        if native_gemini:
+            methods = item.get("supportedGenerationMethods")
+            if isinstance(methods, list) and "generateContent" not in methods:
+                continue
+            model_id = str(item.get("name") or "").removeprefix("models/")
+        else:
+            model_id = str(item.get("id") or "")
+        if model_id:
+            result.append(model_id)
+    return sorted(set(result))
+
 class SettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ai_api_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_model: Optional[str] = None
+    ai_api_format: Optional[str] = None
     intent_enabled: Optional[bool] = None
     intent_api_url: Optional[str] = None
     intent_api_key: Optional[str] = None
@@ -32,6 +119,7 @@ class SettingsUpdate(BaseModel):
     vision_api_key: Optional[str] = None
     vision_model: Optional[str] = None
     vision_mode: Optional[str] = None
+    vision_api_format: Optional[str] = None
     embedding_enabled: Optional[bool] = None
     embedding_api_url: Optional[str] = None
     embedding_api_key: Optional[str] = None
@@ -64,6 +152,9 @@ async def update_settings(update: SettingsUpdate):
         updates["ai_api_key"] = update.ai_api_key
     if update.ai_model is not None:
         updates["ai_model"] = update.ai_model
+    if update.ai_api_format is not None:
+        value = update.ai_api_format.strip().lower()
+        updates["ai_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
     if update.intent_api_url is not None:
@@ -83,6 +174,9 @@ async def update_settings(update: SettingsUpdate):
     if update.vision_mode is not None:
         mode = update.vision_mode.strip().lower()
         updates["vision_mode"] = mode if mode in {"standalone", "pre_model", "tool"} else "standalone"
+    if update.vision_api_format is not None:
+        value = update.vision_api_format.strip().lower()
+        updates["vision_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
     if update.embedding_enabled is not None:
         updates["embedding_enabled"] = update.embedding_enabled
     if update.embedding_api_url is not None:
@@ -143,20 +237,19 @@ async def get_available_models():
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             # 构建 models 端点 URL
-            models_url = api_url.rstrip("/")
-            if not models_url.endswith("/models"):
-                models_url = f"{models_url}/models"
-            
+            models_url, headers, native_gemini = _models_request(
+                api_url, api_key, config.get("api_format", "auto"),
+            )
             response = await client.get(
                 models_url,
-                headers={"Authorization": f"Bearer {api_key}"}
+                headers=headers,
             )
             
             if response.status_code == 200:
                 data = response.json()
-                models = data.get("data", [])
+                models = _model_ids(data, native_gemini)
                 # 提取模型 ID 列表
-                model_ids = [m.get("id") for m in models if m.get("id")]
+                model_ids = models
                 # 过滤常见的可用模型
                 chat_models = [m for m in model_ids if any(x in m.lower() for x in ["gpt", "claude", "gemini", "llama", "qwen", "glm", "deepseek"])]
                 return {"success": True, "models": chat_models or model_ids[:20]}

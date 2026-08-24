@@ -376,6 +376,7 @@ async def _describe_onebot_images(image_urls: List[str]) -> List[str]:
     api_url = vision_cfg.get("api_url", "")
     api_key = vision_cfg.get("api_key", "")
     model = vision_cfg.get("model", "gpt-4o")
+    api_format = vision_cfg.get("api_format", "auto")
 
     if not api_url or not api_key:
         logger.info("OneBot 图片识别跳过：未配置 Vision API")
@@ -414,7 +415,7 @@ async def _describe_onebot_images(image_urls: List[str]) -> List[str]:
                     "messages": messages,
                     "max_tokens": 256,
                 }
-                api_result = await vision_service.call_vision_api(api_url, api_key, body)
+                api_result = await vision_service.call_vision_api(api_url, api_key, body, api_format=api_format)
                 if api_result:
                     descriptions.append(api_result)
                     logger.info(f"OneBot 图片识别成功: {api_result[:50]}...")

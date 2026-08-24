@@ -584,6 +584,7 @@ async def execute_recognize_image(
     api_url = vision_cfg.get("api_url", "")
     api_key = vision_cfg.get("api_key", "")
     model = vision_cfg.get("model", "gpt-4o")
+    api_format = vision_cfg.get("api_format", "auto")
     if not api_url or not api_key:
         return "识图失败：未配置识图模型（Vision API）"
 
@@ -595,7 +596,7 @@ async def execute_recognize_image(
         "max_tokens": 1024,
     }
     try:
-        result = await vision_service.call_vision_api(api_url, api_key, body)
+        result = await vision_service.call_vision_api(api_url, api_key, body, api_format=api_format)
         if not result:
             return "识图失败：识图模型未返回内容，请稍后重试"
         return result

@@ -36,6 +36,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   late TextEditingController _chatUrlController;
   late TextEditingController _chatKeyController;
   late TextEditingController _chatModelController;
+  String _chatApiFormat = 'auto';
 
   // 意图识别 API
   bool _intentEnabled = false;
@@ -51,6 +52,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   late TextEditingController _visionKeyController;
   late TextEditingController _visionModelController;
   String _visionMode = 'standalone';
+  String _visionApiFormat = 'auto';
   List<String> _visionModels = [];
   bool _isLoadingVisionModels = false;
 
@@ -63,6 +65,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   bool _isLoadingEmbeddingModels = false;
   String? _testingApi;
   String? _selectedProfileId;
+  String? _selectedVisionProfileId;
 
   @override
   void initState() {
@@ -83,6 +86,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     _chatUrlController = TextEditingController(text: settings.chatApiUrl);
     _chatKeyController = TextEditingController(text: settings.chatApiKey);
     _chatModelController = TextEditingController(text: settings.chatModel);
+    _chatApiFormat = settings.chatApiFormat;
     _selectedProfileId =
         settings.modelProfiles.any(
           (p) =>
@@ -107,6 +111,23 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     _visionKeyController = TextEditingController(text: settings.visionApiKey);
     _visionModelController = TextEditingController(text: settings.visionModel);
     _visionMode = settings.visionMode;
+    _visionApiFormat = settings.visionApiFormat;
+    _selectedVisionProfileId =
+        settings.visionModelProfiles.any(
+          (p) =>
+              p.apiUrl == settings.visionApiUrl &&
+              p.model == settings.visionModel &&
+              p.mode == settings.visionMode,
+        )
+        ? settings.visionModelProfiles
+              .firstWhere(
+                (p) =>
+                    p.apiUrl == settings.visionApiUrl &&
+                    p.model == settings.visionModel &&
+                    p.mode == settings.visionMode,
+              )
+              .id
+        : null;
 
     _embeddingEnabled = settings.embeddingEnabled;
     _embeddingUrlController = TextEditingController(
@@ -232,6 +253,11 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               'https://api.openai.com/v1',
             ),
             _buildDivider(),
+            _buildApiFormatSelector(
+              value: _chatApiFormat,
+              onChanged: (value) => setState(() => _chatApiFormat = value),
+            ),
+            _buildDivider(),
             _buildTextField(
               'API Key',
               _chatKeyController,
@@ -261,6 +287,11 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                 'API URL',
                 _intentUrlController,
                 'https://api.openai.com/v1',
+              ),
+              _buildDivider(),
+              _buildApiFormatSelector(
+                value: _visionApiFormat,
+                onChanged: (value) => setState(() => _visionApiFormat = value),
               ),
               _buildDivider(),
               _buildTextField(
@@ -308,6 +339,8 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               _buildVisionModelSelector(),
               _buildDivider(),
               _buildVisionModeSelector(),
+              _buildDivider(),
+              _buildVisionModelProfiles(),
             ],
           ]),
 
@@ -432,6 +465,61 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
   Widget _buildDivider() {
     return const Divider(height: 1, indent: 16);
+  }
+
+  Widget _buildApiFormatSelector({
+    required String value,
+    required ValueChanged<String> onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 80,
+            child: Text('接口格式', style: TextStyle(fontSize: 15)),
+          ),
+          Expanded(
+            child: DropdownButtonFormField<String>(
+              initialValue:
+                  const {
+                    'auto',
+                    'gemini_native',
+                    'openai_compatible',
+                  }.contains(value)
+                  ? value
+                  : 'auto',
+              decoration: const InputDecoration(
+                border: InputBorder.none,
+                isDense: true,
+              ),
+              items: const [
+                DropdownMenuItem(value: 'auto', child: Text('自动识别')),
+                DropdownMenuItem(
+                  value: 'gemini_native',
+                  child: Text('Gemini 原生'),
+                ),
+                DropdownMenuItem(
+                  value: 'openai_compatible',
+                  child: Text('OpenAI 兼容'),
+                ),
+              ],
+              onChanged: (next) {
+                if (next != null) onChanged(next);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _apiFormatLabel(String value) {
+    return switch (value) {
+      'gemini_native' => 'Gemini 原生',
+      'openai_compatible' => 'OpenAI 兼容',
+      _ => '自动识别',
+    };
   }
 
   Widget _buildVisionModeSelector() {
@@ -686,6 +774,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       _chatUrlController.text = settings.chatApiUrl;
       _chatKeyController.text = settings.chatApiKey;
       _chatModelController.text = settings.chatModel;
+      _chatApiFormat = settings.chatApiFormat;
 
       _intentEnabled = settings.intentEnabled;
       _intentUrlController.text = settings.intentApiUrl;
@@ -697,6 +786,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       _visionKeyController.text = settings.visionApiKey;
       _visionModelController.text = settings.visionModel;
       _visionMode = settings.visionMode;
+      _visionApiFormat = settings.visionApiFormat;
 
       _embeddingEnabled = settings.embeddingEnabled;
       _embeddingUrlController.text = settings.embeddingApiUrl;
@@ -706,6 +796,76 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
   }
 
   /// 获取可用模型列表
+  (String, Map<String, String>, bool) _buildModelsRequest(
+    String apiUrl,
+    String apiKey, {
+    String apiFormat = 'auto',
+  }) {
+    final uri = Uri.parse(apiUrl.trim());
+    final isGoogleGemini =
+        uri.host.toLowerCase() == 'generativelanguage.googleapis.com';
+    final isNativeGemini =
+        apiFormat == 'gemini_native' ||
+        (apiFormat != 'openai_compatible' &&
+            isGoogleGemini &&
+            !uri.path.toLowerCase().contains('/openai'));
+    var path = uri.path.replaceAll(RegExp(r'/+$'), '');
+
+    if (isNativeGemini) {
+      path = _nativeGeminiBasePath(path);
+      if (!path.toLowerCase().endsWith('/v1') &&
+          !path.toLowerCase().endsWith('/v1beta')) {
+        path = '$path/v1beta';
+      }
+      return (
+        uri.replace(path: '$path/models', queryParameters: {'key': apiKey}).toString(),
+        <String, String>{},
+        true,
+      );
+    }
+
+    if (isGoogleGemini &&
+        apiFormat == 'openai_compatible' &&
+        !path.toLowerCase().contains('/openai')) {
+      path = '$path/openai';
+    }
+    path = path.replaceFirst(RegExp(r'/chat/completions$'), '');
+    if (!path.endsWith('/models')) {
+      if (uri.host.toLowerCase() == 'generativelanguage.googleapis.com' &&
+          path.toLowerCase().endsWith('/openai')) {
+        path = '$path/models';
+      } else {
+        path = path.endsWith('/v1') ? '$path/models' : '$path/v1/models';
+      }
+    }
+    return (
+      uri.replace(path: path, query: null).toString(),
+      {'Authorization': 'Bearer $apiKey', 'Content-Type': 'application/json'},
+      false,
+    );
+  }
+
+  List<String> _readModelIds(dynamic decoded, bool isNativeGemini) {
+    if (decoded is! Map<String, dynamic>) return [];
+    final records = decoded[isNativeGemini ? 'models' : 'data'];
+    if (records is! List) return [];
+    final modelIds = <String>{};
+    for (final record in records) {
+      if (record is! Map) continue;
+      if (isNativeGemini) {
+        final methods = record['supportedGenerationMethods'];
+        if (methods is List && !methods.contains('generateContent')) continue;
+        final name = record['name']?.toString() ?? '';
+        final modelId = name.replaceFirst(RegExp(r'^models/'), '');
+        if (modelId.isNotEmpty) modelIds.add(modelId);
+      } else {
+        final modelId = record['id']?.toString() ?? '';
+        if (modelId.isNotEmpty) modelIds.add(modelId);
+      }
+    }
+    return modelIds.toList()..sort();
+  }
+
   Future<void> _fetchModels() async {
     final url = _chatUrlController.text.trim();
     final key = _chatKeyController.text.trim();
@@ -720,25 +880,16 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     setState(() => _isLoadingModels = true);
 
     try {
-      var modelsUrl = url;
-      if (!modelsUrl.endsWith('/')) modelsUrl += '/';
-      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
-      modelsUrl += 'models';
+      final request = _buildModelsRequest(url, key, apiFormat: _chatApiFormat);
 
       final response = await SecureBackendClient.getRaw(
-        modelsUrl,
-        headers: {
-          'Authorization': 'Bearer $key',
-          'Content-Type': 'application/json',
-        },
+        request.$1,
+        headers: request.$2,
         includeAuth: false,
       ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final models =
-            (data['data'] as List).map((m) => m['id'].toString()).toList()
-              ..sort();
+        final models = _readModelIds(jsonDecode(response.body), request.$3);
 
         setState(() {
           _availableModels = models;
@@ -858,6 +1009,12 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
     setState(() => _testingApi = kind);
     try {
+      final apiFormat = switch (kind) {
+        'chat' => _chatApiFormat,
+        'vision' => _visionApiFormat,
+        _ => 'auto',
+      };
+      final nativeGemini = _usesNativeGemini(url, apiFormat);
       final response = kind == 'embedding'
           ? await SecureBackendClient.postRawJson(
               _embeddingEndpoint(url),
@@ -867,9 +1024,15 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
               timeout: const Duration(seconds: 20),
             )
           : await SecureBackendClient.postRawJson(
-              _chatEndpoint(url),
-              body: _chatTestBody(kind, model),
-              headers: {'Authorization': 'Bearer $key'},
+              nativeGemini
+                  ? _nativeGeminiEndpoint(url, model, key)
+                  : _chatEndpoint(url),
+              body: nativeGemini
+                  ? _nativeGeminiTestBody(kind)
+                  : _chatTestBody(kind, model),
+              headers: nativeGemini
+                  ? {'Content-Type': 'application/json'}
+                  : {'Authorization': 'Bearer $key'},
               includeAuth: false,
               timeout: const Duration(seconds: 30),
             );
@@ -925,6 +1088,65 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       'messages': [
         {'role': 'user', 'content': 'Reply with OK.'},
       ],
+    };
+  }
+
+  bool _usesNativeGemini(String value, String apiFormat) {
+    final uri = Uri.parse(value.trim());
+    if (apiFormat == 'gemini_native') return true;
+    if (uri.host.toLowerCase() != 'generativelanguage.googleapis.com' ||
+        apiFormat == 'openai_compatible') {
+      return false;
+    }
+    return !uri.path.toLowerCase().contains('/openai');
+  }
+
+  String _nativeGeminiEndpoint(String value, String model, String apiKey) {
+    final uri = Uri.parse(value.trim());
+    var path = _nativeGeminiBasePath(uri.path.replaceFirst(RegExp(r'/+$'), ''));
+    if (!path.toLowerCase().endsWith('/v1') &&
+        !path.toLowerCase().endsWith('/v1beta')) {
+      path = '$path/v1beta';
+    }
+    final normalizedModel = model.replaceFirst(RegExp(r'^models/'), '');
+    return uri
+        .replace(
+          path: '$path/models/$normalizedModel:generateContent',
+          queryParameters: {'key': apiKey},
+          fragment: '',
+        )
+        .toString();
+  }
+
+  String _nativeGeminiBasePath(String path) {
+    var result = path.replaceFirst(
+      RegExp(r'/openai(?:/|$)', caseSensitive: false),
+      '/',
+    );
+    result = result.replaceFirst(RegExp(r'/models(?:/.*)?$', caseSensitive: false), '');
+    result = result.replaceFirst(
+      RegExp(r'/chat/completions$', caseSensitive: false),
+      '',
+    );
+    return result.replaceAll(RegExp(r'/+$'), '');
+  }
+
+  Map<String, dynamic> _nativeGeminiTestBody(String kind) {
+    const imageData =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=';
+    final parts = <Map<String, dynamic>>[
+      {'text': 'Reply with OK.'},
+    ];
+    if (kind == 'vision') {
+      parts.add({
+        'inlineData': {'mimeType': 'image/png', 'data': imageData},
+      });
+    }
+    return {
+      'contents': [
+        {'role': 'user', 'parts': parts},
+      ],
+      'generationConfig': {'maxOutputTokens': 8},
     };
   }
 
@@ -1068,7 +1290,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
                 leading: Radio<String>(value: profile.id),
                 title: Text(profile.name),
                 subtitle: Text(
-                  '${profile.model}  ·  ${profile.apiUrl}',
+                  '${profile.model}  ·  ${_apiFormatLabel(profile.apiFormat)}  ·  ${profile.apiUrl}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -1096,11 +1318,13 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       _chatUrlController.text = profile.apiUrl;
       _chatModelController.text = profile.model;
       _chatKeyController.text = profile.apiKey;
+      _chatApiFormat = profile.apiFormat;
     });
     await SettingsService.instance.updateChatApi(
       url: profile.apiUrl,
       key: profile.apiKey,
       model: profile.model,
+      apiFormat: profile.apiFormat,
     );
   }
 
@@ -1138,11 +1362,140 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       url: _chatUrlController.text.trim(),
       model: _chatModelController.text.trim(),
       key: _chatKeyController.text.trim(),
+      apiFormat: _chatApiFormat,
     );
     if (mounted) setState(() => _selectedProfileId = id);
   }
 
   /// 意图识别模型获取按钮
+  Widget _buildVisionModelProfiles() {
+    final profiles = SettingsService.instance.visionModelProfiles;
+    return RadioGroup<String>(
+      groupValue: _selectedVisionProfileId,
+      onChanged: (profileId) {
+        if (profileId == null) return;
+        _applyVisionModelProfile(
+          profiles.firstWhere((candidate) => candidate.id == profileId),
+        );
+      },
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text('识图配置档案', style: TextStyle(fontSize: 15)),
+                ),
+                TextButton.icon(
+                  onPressed: _saveCurrentVisionModelProfile,
+                  icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                  label: const Text('保存当前'),
+                ),
+              ],
+            ),
+          ),
+          if (profiles.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '可保存多组识图模型、运行模式和接口格式，随时切换。',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+                ),
+              ),
+            )
+          else
+            ...profiles.map(
+              (profile) => ListTile(
+                dense: true,
+                leading: Radio<String>(value: profile.id),
+                title: Text(profile.name),
+                subtitle: Text(
+                  '${profile.model}  ·  ${_apiFormatLabel(profile.apiFormat)}  ·  ${profile.mode}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: IconButton(
+                  tooltip: '删除识图配置档案',
+                  icon: const Icon(Icons.delete_outline, size: 20),
+                  onPressed: () async {
+                    await SettingsService.instance.deleteVisionModelProfile(
+                      profile.id,
+                    );
+                    if (mounted) setState(() {});
+                  },
+                ),
+                onTap: () => _applyVisionModelProfile(profile),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _applyVisionModelProfile(VisionModelProfile profile) async {
+    setState(() {
+      _selectedVisionProfileId = profile.id;
+      _visionEnabled = profile.enabled;
+      _visionUrlController.text = profile.apiUrl;
+      _visionKeyController.text = profile.apiKey;
+      _visionModelController.text = profile.model;
+      _visionMode = profile.mode;
+      _visionApiFormat = profile.apiFormat;
+    });
+    await SettingsService.instance.updateVisionApi(
+      enabled: profile.enabled,
+      url: profile.apiUrl,
+      key: profile.apiKey,
+      model: profile.model,
+      mode: profile.mode,
+      apiFormat: profile.apiFormat,
+    );
+  }
+
+  Future<void> _saveCurrentVisionModelProfile() async {
+    final nameController = TextEditingController(
+      text: _visionModelController.text.trim(),
+    );
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('保存识图配置档案'),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: '档案名称'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, nameController.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    nameController.dispose();
+    if (name == null || name.isEmpty) return;
+    final id = 'vision_profile_${DateTime.now().microsecondsSinceEpoch}';
+    await SettingsService.instance.saveVisionModelProfile(
+      id: id,
+      name: name,
+      url: _visionUrlController.text.trim(),
+      key: _visionKeyController.text.trim(),
+      model: _visionModelController.text.trim(),
+      enabled: _visionEnabled,
+      mode: _visionMode,
+      apiFormat: _visionApiFormat,
+    );
+    if (mounted) setState(() => _selectedVisionProfileId = id);
+  }
+
   Widget _buildIntentModelFetchButton() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -1417,27 +1770,16 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
 
     try {
       // 构建模型列表请求 URL
-      var modelsUrl = url;
-      modelsUrl = modelsUrl.replaceFirst(RegExp(r'/chat/completions/?$'), '');
-      modelsUrl = modelsUrl.replaceFirst(RegExp(r'/models/?$'), '');
-      if (!modelsUrl.endsWith('/')) modelsUrl += '/';
-      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
-      modelsUrl += 'models';
+      final request = _buildModelsRequest(url, key);
 
       final response = await SecureBackendClient.getRaw(
-        modelsUrl,
-        headers: {
-          'Authorization': 'Bearer $key',
-          'Content-Type': 'application/json',
-        },
+        request.$1,
+        headers: request.$2,
         includeAuth: false,
       ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final models =
-            (data['data'] as List).map((m) => m['id'].toString()).toList()
-              ..sort();
+        final models = _readModelIds(jsonDecode(response.body), request.$3);
 
         setState(() {
           _intentModels = models;
@@ -1478,25 +1820,20 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     setState(() => _isLoadingVisionModels = true);
 
     try {
-      var modelsUrl = url;
-      if (!modelsUrl.endsWith('/')) modelsUrl += '/';
-      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
-      modelsUrl += 'models';
+      final request = _buildModelsRequest(
+        url,
+        key,
+        apiFormat: _visionApiFormat,
+      );
 
       final response = await SecureBackendClient.getRaw(
-        modelsUrl,
-        headers: {
-          'Authorization': 'Bearer $key',
-          'Content-Type': 'application/json',
-        },
+        request.$1,
+        headers: request.$2,
         includeAuth: false,
       ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final models =
-            (data['data'] as List).map((m) => m['id'].toString()).toList()
-              ..sort();
+        final models = _readModelIds(jsonDecode(response.body), request.$3);
 
         setState(() {
           _visionModels = models;
@@ -1541,25 +1878,16 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
     setState(() => _isLoadingEmbeddingModels = true);
 
     try {
-      var modelsUrl = url;
-      if (!modelsUrl.endsWith('/')) modelsUrl += '/';
-      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
-      modelsUrl += 'models';
+      final request = _buildModelsRequest(url, key);
 
       final response = await SecureBackendClient.getRaw(
-        modelsUrl,
-        headers: {
-          'Authorization': 'Bearer $key',
-          'Content-Type': 'application/json',
-        },
+        request.$1,
+        headers: request.$2,
         includeAuth: false,
       ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final models =
-            (data['data'] as List).map((m) => m['id'].toString()).toList()
-              ..sort();
+        final models = _readModelIds(jsonDecode(response.body), request.$3);
 
         setState(() {
           _embeddingModels = models;
@@ -1624,6 +1952,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       url: _chatUrlController.text.trim(),
       key: _chatKeyController.text.trim(),
       model: _chatModelController.text.trim(),
+      apiFormat: _chatApiFormat,
     );
 
     // 保存后端鉴权与加密配置
@@ -1647,6 +1976,7 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
       key: _visionKeyController.text.trim(),
       model: _visionModelController.text.trim(),
       mode: _visionMode,
+      apiFormat: _visionApiFormat,
     );
 
     // 保存向量记忆 API

@@ -1300,6 +1300,7 @@ def _resolve_role_or_global_chat_config(role_id: Optional[str]) -> Dict[str, str
         "api_url": global_ai.get("api_url", ""),
         "api_key": global_ai.get("api_key", ""),
         "model": global_ai.get("model", "deepseek-chat"),
+        "api_format": global_ai.get("api_format", "auto"),
     }
 
     role_key = str(role_id or "").strip()
@@ -1314,6 +1315,7 @@ def _resolve_role_or_global_chat_config(role_id: Optional[str]) -> Dict[str, str
     role_model = str(role_data.get("ai_model") or metadata.get("ai_model") or "").strip()
     role_api_url = str(role_data.get("ai_api_url") or metadata.get("ai_api_url") or "").strip()
     role_api_key = str(role_data.get("ai_api_key") or metadata.get("ai_api_key") or "").strip()
+    role_api_format = str(role_data.get("ai_api_format") or metadata.get("ai_api_format") or "").strip()
 
     if role_model:
         resolved["model"] = role_model
@@ -1321,33 +1323,26 @@ def _resolve_role_or_global_chat_config(role_id: Optional[str]) -> Dict[str, str
         resolved["api_url"] = role_api_url
     if role_api_key:
         resolved["api_key"] = role_api_key
+    if role_api_format:
+        resolved["api_format"] = role_api_format
 
     return resolved
 
 
-async def _post_chat_completion(api_url: str, api_key: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    endpoint = _normalize_chat_completions_endpoint(api_url)
-    if not endpoint or not api_key:
+async def _post_chat_completion(
+    api_url: str, api_key: str, body: Dict[str, Any], api_format: str = "auto",
+) -> Dict[str, Any]:
+    if not api_url or not api_key:
         raise HTTPException(status_code=400, detail="AI API 未配置")
 
-    from services.ai_service import _get_http_client
-    client = _get_http_client()
-    response = await client.post(
-        endpoint,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        },
-        json=body,
-    )
-
-    if response.status_code != 200:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"AI API 错误: {response.text}",
-        )
-    return response.json()
-
+    from services.vision_service import VisionApiError, call_vision_api
+    try:
+        content = await call_vision_api(api_url, api_key, body, api_format=api_format)
+    except VisionApiError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    if not content:
+        raise HTTPException(status_code=502, detail="Vision API did not return content")
+    return {"choices": [{"message": {"content": content}}]}
 
 # _append_vision_memory 已迁移至 services.vision_service
 
@@ -1372,6 +1367,7 @@ async def chat_with_vision(request: VisionRequest):
         vision_api_url = vision_cfg.get("api_url", "")
         vision_api_key = vision_cfg.get("api_key", "")
         vision_model = vision_cfg.get("model", "gpt-4o")
+        vision_api_format = vision_cfg.get("api_format", "auto")
 
         upload_id = str(request.upload_id or "").strip()
         image_base64_value = str(request.image_base64 or "").strip()
@@ -1409,6 +1405,7 @@ async def chat_with_vision(request: VisionRequest):
             result = await _post_chat_completion(
                 api_url=vision_api_url,
                 api_key=vision_api_key,
+                api_format=vision_api_format,
                 body={
                     "model": vision_model,
                     "messages": multimodal_messages,
@@ -1525,6 +1522,7 @@ async def chat_with_vision(request: VisionRequest):
         pre_result = await _post_chat_completion(
             api_url=vision_api_url,
             api_key=vision_api_key,
+            api_format=vision_api_format,
             body={
                 "model": vision_model,
                 "messages": pre_messages,
@@ -1595,6 +1593,7 @@ async def chat_with_vision(request: VisionRequest):
             final_result = await _post_chat_completion(
                 api_url=str(chat_cfg.get("api_url") or ""),
                 api_key=str(chat_cfg.get("api_key") or ""),
+                api_format=str(chat_cfg.get("api_format") or "auto"),
                 body={
                     "model": str(chat_cfg.get("model") or "deepseek-chat"),
                     "messages": final_messages,
@@ -1619,6 +1618,8 @@ async def chat_with_vision(request: VisionRequest):
             "chat_model": chat_model,
         }
         
+    except HTTPException:
+        raise
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="AI 请求超时")
     except Exception as e:
