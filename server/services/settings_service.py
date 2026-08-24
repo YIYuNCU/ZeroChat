@@ -52,6 +52,7 @@ def get_default_settings() -> Dict[str, Any]:
         "auth_token": "",
         "encryption_secret": "",
         "onebot_enabled": True,
+        "quiet_rules": [],
         "updated_at": None,
     }
 
@@ -166,6 +167,21 @@ def _default_embedding_model(api_url: str) -> str:
     if "siliconflow" in api_url.lower():
         return "BAAI/bge-m3"
     return "text-embedding-ada-002"
+
+
+def get_quiet_rules() -> list:
+    """获取供应商+模型级安静规则（enabled 过滤）。"""
+    settings = load_settings()
+    raw = settings.get("quiet_rules")
+    if not isinstance(raw, list):
+        return []
+    from core.quiet_rules import normalize_provider_rule_dict
+    rules = []
+    for item in raw:
+        rule = normalize_provider_rule_dict(item)
+        if rule is not None:
+            rules.append(rule)
+    return rules
 
 
 def update_ai_config(api_url: Optional[str] = None,

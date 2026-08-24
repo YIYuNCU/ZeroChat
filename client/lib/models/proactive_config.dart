@@ -1,28 +1,108 @@
-class QuietPeriod {
+/// 星期名称（ISO 1=周一 .. 7=周日）
+const List<String> kWeekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+bool _isValidDate(String value) {
+  final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(value);
+  if (match == null) return false;
+  final year = int.parse(match.group(1)!);
+  final month = int.parse(match.group(2)!);
+  final day = int.parse(match.group(3)!);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  final date = DateTime(year, month, day);
+  return date.year == year && date.month == month && date.day == day;
+}
+
+/// 一条安静时间规则（可自定义循环：每天 / 每周自选星期 / 指定日期一次）。
+class QuietRule {
   final int startMinute;
   final int endMinute;
+  final String repeatType;
+  final List<int> weekdays;
+  final String? date;
 
-  const QuietPeriod({required this.startMinute, required this.endMinute});
+  static const String repeatDaily = 'daily';
+  static const String repeatWeekly = 'weekly';
+  static const String repeatOnce = 'once';
 
-  factory QuietPeriod.fromJson(Map<String, dynamic> json) {
-    return QuietPeriod(
-      startMinute: (json['start_minute'] as num?)?.toInt() ?? 0,
-      endMinute: (json['end_minute'] as num?)?.toInt() ?? 0,
+  const QuietRule({
+    required this.startMinute,
+    required this.endMinute,
+    this.repeatType = repeatDaily,
+    this.weekdays = const [],
+    this.date,
+  });
+
+  bool get isWeekly => repeatType == repeatWeekly;
+  bool get isOnce => repeatType == repeatOnce;
+
+  factory QuietRule.fromJson(Map<String, dynamic> json) {
+    final startMinute = (json['start_minute'] as num?)?.toInt() ?? 0;
+    final endMinute = (json['end_minute'] as num?)?.toInt() ?? 0;
+    final repeatType = json['repeat_type']?.toString() ?? repeatDaily;
+    final rawWeekdays = json['weekdays'];
+    var weekdays = rawWeekdays is List
+        ? rawWeekdays
+              .whereType<num>()
+              .map((item) => item.toInt())
+              .where((day) => day >= 1 && day <= 7)
+              .toSet()
+              .toList()
+        : <int>[];
+    weekdays.sort();
+    final date = json['date']?.toString();
+    return QuietRule(
+      startMinute: startMinute,
+      endMinute: endMinute,
+      repeatType: repeatType,
+      weekdays: repeatType == repeatWeekly ? weekdays : const [],
+      date: repeatType == repeatOnce && date != null && date.isNotEmpty
+          ? date
+          : null,
     );
   }
 
   Map<String, dynamic> toJson() => {
     'start_minute': startMinute,
     'end_minute': endMinute,
+    'repeat_type': repeatType,
+    'weekdays': isWeekly ? weekdays : const <int>[],
+    if (isOnce) 'date': date,
   };
 
-  QuietPeriod copyWith({int? startMinute, int? endMinute}) => QuietPeriod(
-    startMinute: startMinute ?? this.startMinute,
-    endMinute: endMinute ?? this.endMinute,
-  );
+  QuietRule copyWith({
+    int? startMinute,
+    int? endMinute,
+    String? repeatType,
+    List<int>? weekdays,
+    String? date,
+  }) {
+    final nextRepeatType = repeatType ?? this.repeatType;
+    return QuietRule(
+      startMinute: startMinute ?? this.startMinute,
+      endMinute: endMinute ?? this.endMinute,
+      repeatType: nextRepeatType,
+      weekdays: weekdays ?? this.weekdays,
+      date: nextRepeatType == repeatOnce ? (date ?? this.date) : null,
+    );
+  }
 
-  String get label =>
-      '${formatMinute(startMinute)} - ${formatMinute(endMinute)}';
+  String get label {
+    final range = '${formatMinute(startMinute)} - ${formatMinute(endMinute)}';
+    switch (repeatType) {
+      case repeatDaily:
+        return '每天 $range';
+      case repeatWeekly:
+        final names = weekdays.map((day) => kWeekdayNames[day - 1]).join('、');
+        return '每周$names $range';
+      case repeatOnce:
+        final shortDate = date == null || date!.length < 10
+            ? ''
+            : '${date!.substring(5, 7)}-${date!.substring(8, 10)}';
+        return '$shortDate $range';
+      default:
+        return range;
+    }
+  }
 
   static String formatMinute(int value) {
     final hour = value ~/ 60;
@@ -31,29 +111,62 @@ class QuietPeriod {
   }
 }
 
-String? validateQuietPeriods(List<QuietPeriod> periods) {
-  final spans = <({int start, int end})>[];
-  for (final period in periods) {
-    if (period.startMinute < 0 ||
-        period.startMinute >= 24 * 60 ||
-        period.endMinute < 0 ||
-        period.endMinute >= 24 * 60) {
+/// 校验安静规则列表。
+/// 结构：时间范围合法；weekly 需有有效星期；once 需有合法日期。
+/// 重叠：同一星期几上的非 once 规则不得重叠或首尾相接（once 为单次例外）。
+String? validateQuietRules(List<QuietRule> rules) {
+  final buckets = <int, List<({int start, int end})>>{};
+  for (final rule in rules) {
+    if (rule.startMinute < 0 ||
+        rule.startMinute >= 24 * 60 ||
+        rule.endMinute < 0 ||
+        rule.endMinute >= 24 * 60) {
       return '安静时间必须在 00:00 到 23:59 之间';
     }
-    if (period.startMinute == period.endMinute) {
+    if (rule.startMinute == rule.endMinute) {
       return '安静时间的开始和结束不能相同';
     }
-    if (period.startMinute < period.endMinute) {
-      spans.add((start: period.startMinute, end: period.endMinute));
-    } else {
-      spans.add((start: 0, end: period.endMinute));
-      spans.add((start: period.startMinute, end: 24 * 60));
+
+    if (rule.isWeekly) {
+      if (rule.weekdays.isEmpty) {
+        return '每周规则需要选择至少一个星期';
+      }
+      if (rule.weekdays.any((day) => day < 1 || day > 7)) {
+        return '星期取值需在 1-7（1=周一 .. 7=周日）';
+      }
+      if (rule.weekdays.toSet().length != rule.weekdays.length) {
+        return '星期不能重复选择';
+      }
+    }
+    if (rule.isOnce) {
+      final value = rule.date;
+      if (value == null || value.isEmpty || !_isValidDate(value)) {
+        return '指定日期规则需要有效日期（YYYY-MM-DD）';
+      }
+    }
+    if (rule.isOnce) continue; // 单次例外不参与跨规则重叠校验
+
+    final days = rule.isWeekly ? rule.weekdays : [1, 2, 3, 4, 5, 6, 7];
+    for (final day in days) {
+      final spans = buckets.putIfAbsent(day, () => []);
+      if (rule.startMinute < rule.endMinute) {
+        spans.add((start: rule.startMinute, end: rule.endMinute));
+      } else {
+        spans.add((start: rule.startMinute, end: 24 * 60));
+        final nextDay = day % 7 + 1;
+        buckets
+            .putIfAbsent(nextDay, () => [])
+            .add((start: 0, end: rule.endMinute));
+      }
     }
   }
-  spans.sort((left, right) => left.start.compareTo(right.start));
-  for (var index = 1; index < spans.length; index++) {
-    if (spans[index].start <= spans[index - 1].end) {
-      return '安静时间不能重叠或首尾相接';
+
+  for (final spans in buckets.values) {
+    final sorted = [...spans]..sort((a, b) => a.start.compareTo(b.start));
+    for (var index = 1; index < sorted.length; index++) {
+      if (sorted[index].start <= sorted[index - 1].end) {
+        return '安静时间不能重叠或首尾相接';
+      }
     }
   }
   return null;
@@ -77,8 +190,8 @@ class ProactiveConfig {
   /// 下次触发时间（时间戳，持久化用）
   final DateTime? nextTriggerTime;
 
-  /// 角色安静时段，精确到分钟。
-  final List<QuietPeriod> quietPeriods;
+  /// 角色安静规则（精确到分钟，支持每天/每周/指定日期循环）。
+  final List<QuietRule> quietRules;
 
   const ProactiveConfig({
     this.enabled = false,
@@ -86,8 +199,8 @@ class ProactiveConfig {
     this.minIntervalMinutes = 60,
     this.maxIntervalMinutes = 240,
     this.nextTriggerTime,
-    this.quietPeriods = const [
-      QuietPeriod(startMinute: 23 * 60, endMinute: 7 * 60),
+    this.quietRules = const [
+      QuietRule(startMinute: 23 * 60, endMinute: 7 * 60),
     ],
   });
 
@@ -104,16 +217,16 @@ class ProactiveConfig {
         (json['max_interval_minutes'] as num?)?.round() ??
         (((json['max_countdown_hours'] as num?)?.toDouble() ?? 4.0) * 60)
             .round();
-    final rawPeriods = json['quiet_periods'];
-    final quietPeriods = rawPeriods is List
-        ? rawPeriods
+    final rawRules = json['quiet_periods'];
+    final quietRules = rawRules is List
+        ? rawRules
               .whereType<Map>()
               .map(
-                (item) => QuietPeriod.fromJson(Map<String, dynamic>.from(item)),
+                (item) => QuietRule.fromJson(Map<String, dynamic>.from(item)),
               )
               .toList()
         : [
-            QuietPeriod(
+            QuietRule(
               startMinute:
                   ((json['quiet_hours_start'] as num?)?.toInt() ?? 23) * 60,
               endMinute: ((json['quiet_hours_end'] as num?)?.toInt() ?? 7) * 60,
@@ -128,11 +241,11 @@ class ProactiveConfig {
       nextTriggerTime: json['next_trigger_time'] != null
           ? DateTime.parse(json['next_trigger_time'] as String)
           : null,
-      quietPeriods: quietPeriods,
+      quietRules: quietRules,
     );
   }
 
-  /// 转换为 JSON
+  /// 转换为 JSON（本地存储）
   Map<String, dynamic> toJson() {
     return {
       'enabled': enabled,
@@ -140,7 +253,7 @@ class ProactiveConfig {
       'min_interval_minutes': minIntervalMinutes,
       'max_interval_minutes': maxIntervalMinutes,
       'next_trigger_time': nextTriggerTime?.toIso8601String(),
-      'quiet_periods': quietPeriods.map((period) => period.toJson()).toList(),
+      'quiet_periods': quietRules.map((rule) => rule.toJson()).toList(),
     };
   }
 
@@ -151,7 +264,7 @@ class ProactiveConfig {
       'trigger_prompt': triggerPrompt,
       'min_interval_minutes': minIntervalMinutes,
       'max_interval_minutes': maxIntervalMinutes,
-      'quiet_periods': quietPeriods.map((period) => period.toJson()).toList(),
+      'quiet_periods': quietRules.map((rule) => rule.toJson()).toList(),
     };
   }
 
@@ -162,7 +275,7 @@ class ProactiveConfig {
     int? minIntervalMinutes,
     int? maxIntervalMinutes,
     DateTime? nextTriggerTime,
-    List<QuietPeriod>? quietPeriods,
+    List<QuietRule>? quietRules,
   }) {
     return ProactiveConfig(
       enabled: enabled ?? this.enabled,
@@ -170,7 +283,7 @@ class ProactiveConfig {
       minIntervalMinutes: minIntervalMinutes ?? this.minIntervalMinutes,
       maxIntervalMinutes: maxIntervalMinutes ?? this.maxIntervalMinutes,
       nextTriggerTime: nextTriggerTime ?? this.nextTriggerTime,
-      quietPeriods: quietPeriods ?? this.quietPeriods,
+      quietRules: quietRules ?? this.quietRules,
     );
   }
 
@@ -182,7 +295,7 @@ class ProactiveConfig {
       minIntervalMinutes: minIntervalMinutes,
       maxIntervalMinutes: maxIntervalMinutes,
       nextTriggerTime: null,
-      quietPeriods: quietPeriods,
+      quietRules: quietRules,
     );
   }
 }

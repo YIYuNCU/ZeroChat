@@ -18,6 +18,13 @@ from apscheduler.triggers.cron import CronTrigger
 logger = logging.getLogger(__name__)
 
 from core.utils import is_tool_role_id, load_moments_posts, atomic_write_json
+from core.quiet_rules import (
+    normalize_quiet_rule_dict,
+    provider_rule_matches,
+    quiet_period_end,
+    next_allowed_time,
+)
+from services import settings_service
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
@@ -71,70 +78,113 @@ def _init_proactive_jobs():
         if role_dir.is_dir():
             schedule_proactive_for_role(role_dir.name)
 
-def _is_quiet_hour(hour: int, start: int, end: int) -> bool:
-    if start == end:
-        return False
-    if start < end:
-        return start <= hour < end
-    return hour >= start or hour < end
+_DEFAULT_QUIET_RULE: Dict = {
+    "start_minute": 23 * 60,
+    "end_minute": 7 * 60,
+    "repeat_type": "daily",
+    "weekdays": [],
+    "date": None,
+}
 
 
-def _get_quiet_periods(proactive_config: Dict) -> List[tuple[int, int]]:
-    """Return configured minute-precision periods, with legacy-hour fallback."""
+def _get_quiet_rules(proactive_config: Dict) -> List[Dict]:
+    """Return role-level quiet rules (daily/weekly/once), with legacy-hour fallback."""
     raw_periods = proactive_config.get("quiet_periods")
     if isinstance(raw_periods, list):
-        periods = []
+        rules = []
         for item in raw_periods:
-            if not isinstance(item, dict):
-                continue
-            try:
-                start = int(item.get("start_minute"))
-                end = int(item.get("end_minute"))
-            except (TypeError, ValueError):
-                continue
-            if 0 <= start < 24 * 60 and 0 <= end < 24 * 60 and start != end:
-                periods.append((start, end))
-        return periods
+            rule = normalize_quiet_rule_dict(item)
+            if rule is not None:
+                rules.append(rule)
+        return rules
 
     try:
         start = int(proactive_config.get("quiet_hours_start", 23)) * 60
         end = int(proactive_config.get("quiet_hours_end", 7)) * 60
     except (TypeError, ValueError):
-        return [(23 * 60, 7 * 60)]
-    return [] if start == end else [(start, end)]
+        return [dict(_DEFAULT_QUIET_RULE)]
+    if start == end:
+        return []
+    return [
+        {
+            "start_minute": start,
+            "end_minute": end,
+            "repeat_type": "daily",
+            "weekdays": [],
+            "date": None,
+        }
+    ]
 
 
-def _quiet_period_end(candidate: datetime, periods: List[tuple[int, int]]) -> Optional[datetime]:
-    """Return the end of the quiet period containing candidate, if any."""
-    minute = candidate.hour * 60 + candidate.minute
-    for start, end in periods:
-        in_period = start <= minute < end if start < end else minute >= start or minute < end
-        if not in_period:
-            continue
-
-        end_date = candidate.date()
-        if start > end and minute >= start:
-            end_date += timedelta(days=1)
-        return candidate.replace(
-            year=end_date.year,
-            month=end_date.month,
-            day=end_date.day,
-            hour=end // 60,
-            minute=end % 60,
-            second=0,
-            microsecond=0,
-        )
-    return None
+def _load_role_profile(role_id: str) -> Optional[Dict]:
+    """Load a role profile from disk."""
+    profile_file = ROLES_DIR / role_id / "profile.json"
+    if not profile_file.exists():
+        return None
+    try:
+        with open(profile_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
-def _next_allowed_time(candidate: datetime, periods: List[tuple[int, int]]) -> datetime:
-    """Move a scheduled time out of any configured quiet period."""
-    for _ in range(len(periods) + 1):
-        quiet_end = _quiet_period_end(candidate, periods)
-        if quiet_end is None:
-            return candidate
-        candidate = quiet_end
-    return candidate
+def _resolve_role_ai_target(role_data: Optional[Dict]) -> tuple[str, str]:
+    """Resolve a role's effective (api_url, model): role fields → metadata → global settings."""
+    model = role_data.get("ai_model") if role_data else None
+    api_url = role_data.get("ai_api_url") if role_data else None
+    metadata = role_data.get("metadata") if role_data else None
+    if isinstance(metadata, dict):
+        model = model or metadata.get("ai_model")
+        api_url = api_url or metadata.get("ai_api_url")
+    config = settings_service.load_settings()
+    model = model or config.get("ai_model", "")
+    api_url = api_url or config.get("ai_api_url", "")
+    return str(api_url or "").strip(), str(model or "").strip()
+
+
+def _get_provider_rules_for_role(role_data: Optional[Dict]) -> List[Dict]:
+    """Provider+model quiet rules matching the role's effective target (enabled only)."""
+    provider_rules = settings_service.get_quiet_rules()
+    if not provider_rules:
+        return []
+    api_url, model = _resolve_role_ai_target(role_data)
+    if not api_url or not model:
+        return []
+    return [
+        rule
+        for rule in provider_rules
+        if rule.get("enabled") is not False
+        and provider_rule_matches(rule, api_url, model)
+    ]
+
+
+def _get_quiet_rules_for_role(role_id: str, role_data: Optional[Dict] = None) -> List[Dict]:
+    """Merged quiet rules for a role: role-level rules + matching provider rules."""
+    if role_data is None:
+        role_data = _load_role_profile(role_id)
+    if not role_data:
+        return [dict(_DEFAULT_QUIET_RULE)]
+    proactive_config = role_data.get("proactive_config") or {}
+    return _get_quiet_rules(proactive_config) + _get_provider_rules_for_role(role_data)
+
+
+def is_role_provider_quiet(role_id: str, role_data: Optional[Dict] = None) -> bool:
+    """Whether the role's provider+model quiet time is active right now.
+
+    Used to gate autonomous behaviors (moments, group chats) outside the
+    scheduler's deferral path.
+    """
+    if role_data is None:
+        role_data = _load_role_profile(role_id)
+    rules = _get_provider_rules_for_role(role_data)
+    if not rules:
+        return False
+    return quiet_period_end(datetime.now(), rules) is not None
+
+
+def refresh_proactive_jobs():
+    """Re-schedule all proactive jobs (e.g. after global quiet rules change)."""
+    _init_proactive_jobs()
 
 
 def _persist_next_proactive_time(
@@ -199,7 +249,9 @@ def schedule_proactive_for_role(role_id: str, *, reset: bool = False):
         max_minutes = max(min_minutes, int(proactive_config.get("max_interval_minutes", 120)))
         next_run = now + timedelta(minutes=random.randint(min_minutes, max_minutes))
     
-    next_run = _next_allowed_time(next_run, _get_quiet_periods(proactive_config))
+    next_run = next_allowed_time(
+        next_run, _get_quiet_rules_for_role(role_id, role_data=role)
+    )
 
     _persist_next_proactive_time(profile_file, role, next_run)
     
@@ -386,18 +438,7 @@ def _save_followups(data: Dict[str, Dict]):
         logger.warning(f"Failed to save followups: {e}")
 
 
-def _get_role_quiet_periods(role_id: str) -> List[tuple[int, int]]:
-    """Read a role's quiet periods for follow-up scheduling."""
-    profile_file = ROLES_DIR / role_id / "profile.json"
-    if not profile_file.exists():
-        return [(23 * 60, 7 * 60)]
-    try:
-        with open(profile_file, "r", encoding="utf-8") as f:
-            role = json.load(f)
-        proactive_config = role.get("proactive_config") or {}
-        return _get_quiet_periods(proactive_config)
-    except Exception:
-        return [(23 * 60, 7 * 60)]
+
 
 
 def schedule_followup(
@@ -421,7 +462,7 @@ def schedule_followup(
     now = datetime.now()
     next_run = now + timedelta(minutes=max(1, int(delay_minutes)))
 
-    next_run = _next_allowed_time(next_run, _get_role_quiet_periods(role_id))
+    next_run = next_allowed_time(next_run, _get_quiet_rules_for_role(role_id))
 
     followups = _load_followups()
     followups[role_id] = {
@@ -600,6 +641,9 @@ async def _check_moment_posts():
         role_id = str(role.get("id", "")).strip()
         if not role_id:
             continue
+        if is_role_provider_quiet(role_id, role):
+            logger.debug(f"供应商静默：跳过朋友圈发帖候选 role={role_id}")
+            continue
         last = last_posts.get(role_id)
         if last is None:
             # 从未发过：视为需要补发；按角色 ID 做轻微错峰，避免所有新角色同一小时齐发。
@@ -715,6 +759,10 @@ async def _check_moment_comments():
         if has_replied:
             continue
 
+        if is_role_provider_quiet(post_author_id):
+            logger.debug(f"供应商静默：跳过朋友圈评论回复 role={post_author_id}")
+            continue
+
         latest_user_comment = user_comments[-1]
         reply_candidates.append(
             {
@@ -755,6 +803,7 @@ async def _check_moment_comments():
     # 普通评论：AI 评论最近 24h 的非自己帖子
     comment_candidates: List[Dict] = []
     role_ids = {str(r.get("id", "")).strip() for r in roles}
+    role_map = {str(r.get("id", "")).strip(): r for r in roles}
     for post in posts:
         post_id = str(post.get("id", "")).strip()
         post_author_id = str(post.get("author_id", "")).strip()
@@ -791,6 +840,8 @@ async def _check_moment_comments():
             if not role_id or role_id == post_author_id:
                 continue
             if role_id in commenters:
+                continue
+            if is_role_provider_quiet(role_id, role_map.get(role_id)):
                 continue
             comment_candidates.append(
                 {
@@ -903,6 +954,9 @@ async def trigger_interactions_for_user_post(post_id: str):
         role_id = str(role.get("id", "")).strip()
         role_name = str(role.get("name", "AI")) or "AI"
         if not role_id:
+            continue
+        if is_role_provider_quiet(role_id, role):
+            logger.debug(f"供应商静默：跳过用户发帖互动 role={role_id}")
             continue
 
         # 概率点赞

@@ -5,6 +5,7 @@ import 'intent_service.dart';
 import 'secure_backend_client.dart';
 import 'secure_websocket_client.dart';
 import '../models/ai_model_profile.dart';
+import '../models/provider_quiet_rule.dart';
 
 /// 全局设置服务。
 class SettingsService extends ChangeNotifier {
@@ -48,6 +49,9 @@ class SettingsService extends ChangeNotifier {
   List<AiModelProfile> _modelProfiles = [];
   List<VisionModelProfile> _visionModelProfiles = [];
   Map<String, String> _roleModelProfileSelections = {};
+
+  // 供应商+模型级安静规则（以服务端 settings.json `quiet_rules` 为准）
+  List<ProviderQuietRule> _providerQuietRules = [];
 
   // 意图识别 API
   bool _intentEnabled = false;
@@ -95,6 +99,8 @@ class SettingsService extends ChangeNotifier {
   List<AiModelProfile> get modelProfiles => List.unmodifiable(_modelProfiles);
   List<VisionModelProfile> get visionModelProfiles =>
       List.unmodifiable(_visionModelProfiles);
+  List<ProviderQuietRule> get providerQuietRules =>
+      List.unmodifiable(_providerQuietRules);
 
   /// Returns the local model profile selected for a role, if one was saved.
   /// Profile associations are device-local because profile API keys are local too.
@@ -170,6 +176,7 @@ class SettingsService extends ChangeNotifier {
     await _loadModelProfiles();
     await _loadVisionModelProfiles();
     _loadRoleModelProfileSelections();
+    _loadProviderQuietRules();
 
     // 意图识别 API
     _intentEnabled = StorageService.getBool('intent_enabled') ?? false;
@@ -340,6 +347,25 @@ class SettingsService extends ChangeNotifier {
     await SecureStorageService.setString('chat_api_key', key);
     await StorageService.setString('chat_model', model);
     await StorageService.setString('chat_api_format', _chatApiFormat);
+    notifyListeners();
+  }
+
+  void _loadProviderQuietRules() {
+    final raw = StorageService.getJsonList('provider_quiet_rules') ?? [];
+    _providerQuietRules = raw
+        .map((json) => ProviderQuietRule.fromJson(json))
+        .where((rule) => rule.apiUrl.isNotEmpty && rule.model.isNotEmpty)
+        .toList();
+  }
+
+  /// 更新供应商+模型级安静规则并本地持久化。
+  /// 服务端同步由 syncApiSettingsToBackend 统一推送 `quiet_rules`。
+  Future<void> updateProviderQuietRules(List<ProviderQuietRule> rules) async {
+    _providerQuietRules = List<ProviderQuietRule>.from(rules);
+    await StorageService.setJsonList(
+      'provider_quiet_rules',
+      _providerQuietRules.map((rule) => rule.toJson()).toList(),
+    );
     notifyListeners();
   }
 
@@ -619,6 +645,9 @@ class SettingsService extends ChangeNotifier {
             'embedding_api_url': _embeddingApiUrl,
             'embedding_api_key': _embeddingApiKey,
             'embedding_model': _embeddingModel,
+            'quiet_rules': _providerQuietRules
+                .map((rule) => rule.toJson())
+                .toList(),
           },
         },
       );
@@ -691,6 +720,19 @@ class SettingsService extends ChangeNotifier {
               .isEmpty
           ? _embeddingModel
           : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
+
+      final rawQuietRules = server['quiet_rules'];
+      if (rawQuietRules is List) {
+        final quietRules = rawQuietRules
+            .whereType<Map>()
+            .map(
+              (item) =>
+                  ProviderQuietRule.fromJson(Map<String, dynamic>.from(item)),
+            )
+            .where((rule) => rule.apiUrl.isNotEmpty && rule.model.isNotEmpty)
+            .toList();
+        await updateProviderQuietRules(quietRules);
+      }
 
       await updateChatApi(
         url: chatUrl,
@@ -779,6 +821,19 @@ class SettingsService extends ChangeNotifier {
               .isEmpty
           ? _embeddingModel
           : (server['embedding_model']?.toString() ?? _embeddingModel).trim();
+
+      final rawQuietRules = server['quiet_rules'];
+      if (rawQuietRules is List) {
+        final quietRules = rawQuietRules
+            .whereType<Map>()
+            .map(
+              (item) =>
+                  ProviderQuietRule.fromJson(Map<String, dynamic>.from(item)),
+            )
+            .where((rule) => rule.apiUrl.isNotEmpty && rule.model.isNotEmpty)
+            .toList();
+        await updateProviderQuietRules(quietRules);
+      }
 
       await updateChatApi(
         url: chatUrl,

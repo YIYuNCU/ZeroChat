@@ -401,6 +401,10 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
         updates["embedding_api_key"] = update.embedding_api_key
     if update.embedding_model is not None:
         updates["embedding_model"] = update.embedding_model
+    if update.quiet_rules is not None:
+        updates["quiet_rules"] = [
+            rule.model_dump(exclude_none=True) for rule in update.quiet_rules
+        ]
     if update.host is not None:
         updates["host"] = update.host
     if update.port is not None:
@@ -409,6 +413,10 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
     if not updates:
         return {"success": True, "message": "No changes"}
     if settings_service.save_settings(updates):
+        if "quiet_rules" in updates:
+            # 供应商级安静规则变更：立即按新规则重排主动消息调度。
+            from services import scheduler_service
+            scheduler_service.refresh_proactive_jobs()
         return {"success": True, "message": "Settings updated"}
     return {"success": False, "error": "Failed to save settings"}
 

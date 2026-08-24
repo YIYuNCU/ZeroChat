@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 

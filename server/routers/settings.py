@@ -2,15 +2,16 @@
 设置路由
 管理全局配置的 API 端点
 """
-from typing import Optional
 import hashlib
 import re
+from typing import List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict
 from fastapi import APIRouter, HTTPException, Query
 
 import logging
 from core.utils import ensure_path_within_root, ensure_simple_path_segment, mask_api_key
+from core.quiet_rules import ProviderQuietRule
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class SettingsUpdate(BaseModel):
     embedding_api_url: Optional[str] = None
     embedding_api_key: Optional[str] = None
     embedding_model: Optional[str] = None
+    quiet_rules: Optional[List[ProviderQuietRule]] = None
     host: Optional[str] = None
     port: Optional[int] = None
 
@@ -185,6 +187,10 @@ async def update_settings(update: SettingsUpdate):
         updates["embedding_api_key"] = update.embedding_api_key
     if update.embedding_model is not None:
         updates["embedding_model"] = update.embedding_model
+    if update.quiet_rules is not None:
+        updates["quiet_rules"] = [
+            rule.model_dump(exclude_none=True) for rule in update.quiet_rules
+        ]
     if update.host is not None:
         updates["host"] = update.host
     if update.port is not None:

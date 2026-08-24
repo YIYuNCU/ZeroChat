@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import '../models/message.dart';
 import '../models/role.dart';
 import '../models/chat_context.dart';
+import '../models/provider_quiet_rule.dart';
 import '../services/api_service.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
@@ -974,8 +975,11 @@ class ChatController extends ChangeNotifier {
     String lastMessage = userMessage;
     String? lastSpeakerId;
 
+    var anySpokeInRound = false;
+
     while (currentRound < maxRounds) {
       currentRound++;
+      anySpokeInRound = false;
 
       final schedule = GroupScheduler.selectRespondingRoles(
         memberIds: context.memberIds,
@@ -994,6 +998,12 @@ class ChatController extends ChangeNotifier {
 
       for (var i = 0; i < schedule.selectedRoles.length; i++) {
         final role = schedule.selectedRoles[i];
+
+        // 供应商+模型级安静时间：只抑制 AI 自主行为（AI↔AI 续聊轮次），
+        // 用户发起的第一轮回复不受影响；被抑制的角色本轮不发言。
+        if (currentRound > 1 && _isRoleProviderQuiet(role)) {
+          continue;
+        }
 
         if (i > 0 || currentRound > 1) {
           await Future.delayed(
@@ -1022,6 +1032,7 @@ class ChatController extends ChangeNotifier {
             isGroup: true,
             toolEmotions: rawReply.emojisCalled,
           );
+          anySpokeInRound = true;
           if (MessageParts.isNoReplyDirective(rawReply.content)) {
             continue;
           }
@@ -1031,11 +1042,26 @@ class ChatController extends ChangeNotifier {
         }
       }
 
+      // 本轮所有角色均被安静时间抑制时，结束 AI 自主互动
+      if (!anySpokeInRound) break;
+
       // 决定是否继续 AI↔AI 互动
       if (!allowAiToAi) break;
       final continueProbability = 0.3 / currentRound;
       if (_random.nextDouble() > continueProbability) break;
     }
+  }
+
+  /// 判断角色当前是否命中供应商+模型级安静时间（AI 自主行为 gating 用）。
+  /// 角色生效目标 = 角色级 ai_api_url/ai_model（缺省回退全局聊天配置）。
+  bool _isRoleProviderQuiet(Role role) {
+    return ProviderQuietRule.isProviderQuietNow(
+      rules: SettingsService.instance.providerQuietRules,
+      roleApiUrl: role.aiApiUrl,
+      roleModel: role.aiModel,
+      globalApiUrl: SettingsService.instance.chatApiUrl,
+      globalModel: SettingsService.instance.chatModel,
+    );
   }
 
   // ========== AI 调用 ==========

@@ -1300,6 +1300,10 @@ async def _handle_ws_frame(
                     if transformed["group_id"] not in allowed_groups:
                         logger.debug(f"OneBot 群聊不在白名单，跳过随机回复: group={transformed['group_id']}")
                         return
+                from services import scheduler_service
+                if scheduler_service.is_role_provider_quiet(role_id):
+                    logger.debug(f"OneBot 群聊供应商静默，跳过随机回复: role={role_id}")
+                    return
                 if _check_random_reply(onebot_config, role_id, time.time(), conv_key):
                     logger.debug(f"OneBot 随机回复放行: role={role_id}, sender={transformed['sender']}")
                 else:
@@ -1424,6 +1428,10 @@ async def handle_onebot_event(
             effective_self_id = config_self_id or event.self_id
             if not _is_at_bot(event.message, effective_self_id):
                 conv_key = _build_conversation_key(transformed)
+                from services import scheduler_service
+                if scheduler_service.is_role_provider_quiet(role_id):
+                    logger.debug(f"OneBot HTTP 群聊供应商静默，跳过随机回复: role={role_id}")
+                    return {"status": "ignored", "reason": "provider quiet"}
                 if _check_random_reply(onebot_config, role_id, time.time(), conv_key):
                     logger.debug(f"OneBot HTTP 随机回复放行: role={role_id}")
                 else:

@@ -6,6 +6,9 @@ import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/secure_websocket_client.dart';
 import '../models/ai_model_profile.dart';
+import '../models/proactive_config.dart';
+import '../models/provider_quiet_rule.dart';
+import '../widgets/quiet_rule_editor.dart';
 
 /// API 设置页面
 /// 配置主聊天、意图识别、图像识别 API
@@ -271,6 +274,21 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
             _buildDivider(),
             _buildModelSelector(),
             _buildModelProfiles(),
+          ]),
+
+          const SizedBox(height: 20),
+
+          // 模型安静时间（供应商+模型级）
+          _buildSectionTitle('模型安静时间'),
+          _buildSection([
+            ..._buildProviderQuietRows(),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 8, 16, 10),
+              child: Text(
+                '按“API 地址 + 模型”设置安静时间；对使用该供应商+模型的角色（主动消息、朋友圈互动、群聊自动回复等 AI 自主行为）生效，用户主动发起的对话不受影响。',
+                style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+              ),
+            ),
           ]),
 
           const SizedBox(height: 20),
@@ -1240,6 +1258,151 @@ class _ApiSettingsPageState extends State<ApiSettingsPage> {
         ],
       ),
     );
+  }
+
+  List<ProviderQuietRule> _rulesForTarget(String apiUrl, String model) {
+    if (apiUrl.isEmpty || model.isEmpty) return const [];
+    return SettingsService.instance.providerQuietRules
+        .where((rule) => ProviderQuietRule.matches(rule, apiUrl, model))
+        .toList();
+  }
+
+  List<Widget> _buildProviderQuietRows() {
+    final settings = SettingsService.instance;
+    final rows = <Widget>[];
+
+    void addRow({
+      required String name,
+      required String apiUrl,
+      required String model,
+      bool custom = false,
+    }) {
+      final rules = _rulesForTarget(apiUrl, model);
+      rows.add(
+        ListTile(
+          dense: true,
+          title: Text(name),
+          subtitle: Text(
+            rules.isEmpty
+                ? '未设置'
+                : rules.map((rule) => rule.label).join('、'),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: const Icon(
+            Icons.arrow_forward_ios,
+            size: 16,
+            color: Color(0xFFCCCCCC),
+          ),
+          onTap: () => _editProviderQuiet(
+            apiUrl: apiUrl,
+            model: model,
+            custom: custom,
+          ),
+        ),
+      );
+      rows.add(_buildDivider());
+    }
+
+    addRow(
+      name: '当前聊天',
+      apiUrl: settings.chatApiUrl,
+      model: settings.chatModel,
+    );
+    for (final profile in settings.modelProfiles) {
+      addRow(name: profile.name, apiUrl: profile.apiUrl, model: profile.model);
+    }
+    addRow(name: '自定义…', apiUrl: '', model: '', custom: true);
+    return rows;
+  }
+
+  Future<void> _editProviderQuiet({
+    required String apiUrl,
+    required String model,
+    bool custom = false,
+  }) async {
+    var targetUrl = apiUrl;
+    var targetModel = model;
+    if (custom) {
+      final result = await showDialog<({String url, String model})>(
+        context: context,
+        builder: (dialogContext) {
+          final urlController = TextEditingController(text: apiUrl);
+          final modelController = TextEditingController(text: model);
+          return AlertDialog(
+            title: const Text('自定义安静时间目标'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: urlController,
+                  decoration: const InputDecoration(labelText: 'API 地址'),
+                ),
+                TextField(
+                  controller: modelController,
+                  decoration: const InputDecoration(labelText: '模型'),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final url = urlController.text.trim();
+                  final modelName = modelController.text.trim();
+                  if (url.isEmpty || modelName.isEmpty) return;
+                  Navigator.pop(dialogContext, (url: url, model: modelName));
+                },
+                child: const Text('确定'),
+              ),
+            ],
+          );
+        },
+      );
+      if (result == null) return;
+      targetUrl = result.url;
+      targetModel = result.model;
+    }
+    if (!mounted) return;
+
+    final all = SettingsService.instance.providerQuietRules;
+    final targetRules = _rulesForTarget(targetUrl, targetModel);
+    final initial = targetRules.map((rule) => rule.toRule()).toList();
+    final edited = await showQuietRuleEditor(context, initialRules: initial);
+    if (edited == null) return;
+
+    // 保留原规则的 enabled 状态（以相同时间规则为键）
+    String ruleKey(QuietRule rule) =>
+        '${rule.startMinute}:${rule.endMinute}:${rule.repeatType}:'
+        '${([...rule.weekdays]..sort()).join(',')}:${rule.date}';
+    final previousByKey = {
+      for (final rule in targetRules) ruleKey(rule.toRule()): rule,
+    };
+    final updatedTarget = edited.map((rule) {
+      final previous = previousByKey[ruleKey(rule)];
+      return ProviderQuietRule.fromRuleAndTarget(
+        rule: rule,
+        apiUrl: targetUrl,
+        model: targetModel,
+        enabled: previous?.enabled ?? true,
+      );
+    }).toList();
+
+    final kept = all
+        .where(
+          (rule) => !ProviderQuietRule.matches(rule, targetUrl, targetModel),
+        )
+        .toList();
+
+    await SettingsService.instance.updateProviderQuietRules([
+      ...kept,
+      ...updatedTarget,
+    ]);
+    await SettingsService.instance.syncApiSettingsToBackend();
+    if (mounted) setState(() {});
   }
 
   Widget _buildModelProfiles() {

@@ -11,6 +11,7 @@ import '../services/task_service.dart';
 import '../services/secure_websocket_client.dart';
 import '../core/message_store.dart';
 import '../widgets/countdown_interval_dialog.dart';
+import '../widgets/quiet_rule_editor.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'role_settings_page.dart';
 import 'task_manager_page.dart';
@@ -317,7 +318,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 constraints: const BoxConstraints(maxWidth: 160),
                 child: Text(
                   _formatQuietPeriods(
-                    _currentRole.proactiveConfig.quietPeriods,
+                    _currentRole.proactiveConfig.quietRules,
                   ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
@@ -2003,166 +2004,20 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     }
   }
 
-  String _formatQuietPeriods(List<QuietPeriod> periods) {
-    if (periods.isEmpty) return '未设置';
-    return periods.map((period) => period.label).join('、');
+  String _formatQuietPeriods(List<QuietRule> rules) {
+    if (rules.isEmpty) return '未设置';
+    return rules.map((rule) => rule.label).join('、');
   }
 
   Future<void> _editQuietPeriods() async {
-    final draft = List<QuietPeriod>.from(
-      _currentRole.proactiveConfig.quietPeriods,
+    final result = await showQuietRuleEditor(
+      context,
+      initialRules: _currentRole.proactiveConfig.quietRules,
     );
-    String? validationMessage;
-
-    final result = await showDialog<List<QuietPeriod>>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) => AlertDialog(
-          title: Row(
-            children: [
-              const Expanded(child: Text('安静时间')),
-              IconButton(
-                tooltip: '添加时段',
-                icon: const Icon(Icons.add),
-                onPressed: () {
-                  setDialogState(() {
-                    draft.add(
-                      const QuietPeriod(
-                        startMinute: 13 * 60,
-                        endMinute: 14 * 60,
-                      ),
-                    );
-                    validationMessage = null;
-                  });
-                },
-              ),
-            ],
-          ),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (var index = 0; index < draft.length; index++)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: TextButton(
-                              onPressed: () async {
-                                final period = draft[index];
-                                final picked = await showTimePicker(
-                                  context: dialogContext,
-                                  initialTime: TimeOfDay(
-                                    hour: period.startMinute ~/ 60,
-                                    minute: period.startMinute % 60,
-                                  ),
-                                );
-                                if (!dialogContext.mounted) return;
-                                if (picked != null) {
-                                  setDialogState(() {
-                                    draft[index] = period.copyWith(
-                                      startMinute:
-                                          picked.hour * 60 + picked.minute,
-                                    );
-                                    validationMessage = null;
-                                  });
-                                }
-                              },
-                              child: Text(
-                                QuietPeriod.formatMinute(
-                                  draft[index].startMinute,
-                                ),
-                              ),
-                            ),
-                          ),
-                          const Text('至'),
-                          Expanded(
-                            child: TextButton(
-                              onPressed: () async {
-                                final period = draft[index];
-                                final picked = await showTimePicker(
-                                  context: dialogContext,
-                                  initialTime: TimeOfDay(
-                                    hour: period.endMinute ~/ 60,
-                                    minute: period.endMinute % 60,
-                                  ),
-                                );
-                                if (!dialogContext.mounted) return;
-                                if (picked != null) {
-                                  setDialogState(() {
-                                    draft[index] = period.copyWith(
-                                      endMinute:
-                                          picked.hour * 60 + picked.minute,
-                                    );
-                                    validationMessage = null;
-                                  });
-                                }
-                              },
-                              child: Text(
-                                QuietPeriod.formatMinute(
-                                  draft[index].endMinute,
-                                ),
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: '删除时段',
-                            icon: const Icon(Icons.delete_outline),
-                            onPressed: () {
-                              setDialogState(() {
-                                draft.removeAt(index);
-                                validationMessage = null;
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                  if (draft.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      child: Text('未设置安静时间'),
-                    ),
-                  if (validationMessage != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        validationMessage!,
-                        style: const TextStyle(color: Colors.red),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () {
-                final message = validateQuietPeriods(draft);
-                if (message != null) {
-                  setDialogState(() => validationMessage = message);
-                  return;
-                }
-                Navigator.pop(dialogContext, List<QuietPeriod>.from(draft));
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
-      ),
-    );
-
     if (result == null) return;
     _currentRole = _currentRole.copyWith(
       proactiveConfig: _currentRole.proactiveConfig.copyWith(
-        quietPeriods: result,
+        quietRules: result,
       ),
     );
     await RoleService.updateRole(_currentRole);
