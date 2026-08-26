@@ -379,6 +379,9 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
         updates["intent_api_key"] = update.intent_api_key
     if update.intent_model is not None:
         updates["intent_model"] = update.intent_model
+    if update.intent_api_format is not None:
+        value = str(update.intent_api_format).strip().lower()
+        updates["intent_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
     if update.vision_enabled is not None:
         updates["vision_enabled"] = update.vision_enabled
     if update.vision_api_url is not None:
@@ -781,6 +784,11 @@ async def _handle_ai_intent(payload: dict, backend_base_url: str) -> dict:
         model=(
             str(payload.get("model"))
             if payload.get("model") is not None
+            else None
+        ),
+        api_format=(
+            str(payload.get("api_format"))
+            if payload.get("api_format") is not None
             else None
         ),
     )

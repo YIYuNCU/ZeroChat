@@ -1,2153 +1,1240 @@
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
-import '../services/role_service.dart';
-import '../services/settings_service.dart';
-import '../services/secure_backend_client.dart';
-import '../services/secure_websocket_client.dart';
+
 import '../models/ai_model_profile.dart';
 import '../models/proactive_config.dart';
 import '../models/provider_quiet_rule.dart';
+import '../services/role_service.dart';
+import '../services/secure_backend_client.dart';
+import '../services/secure_websocket_client.dart';
+import '../services/settings_service.dart';
 import '../widgets/quiet_rule_editor.dart';
 
-/// API 设置页面
-/// 配置主聊天、意图识别、图像识别 API
-class ApiSettingsPage extends StatefulWidget {
+class ApiSettingsPage extends StatelessWidget {
   const ApiSettingsPage({super.key});
 
   @override
-  State<ApiSettingsPage> createState() => _ApiSettingsPageState();
+  Widget build(BuildContext context) => const _ApiSettingsOverview();
 }
 
-class _ApiSettingsPageState extends State<ApiSettingsPage> {
-  // 后端服务器
-  late TextEditingController _backendUrlController;
-  late TextEditingController _backendTokenController;
-  late TextEditingController _backendEncryptionSecretController;
-  bool _backendTokenObscured = true;
-  bool _backendEncryptionSecretObscured = true;
-  bool _isTestingConnection = false;
-  bool _isPullingBackendConfig = false;
-  bool? _connectionSuccess;
-  String? _connectionError;
+class _ApiSettingsOverview extends StatefulWidget {
+  const _ApiSettingsOverview();
 
-  // 模型列表
-  List<String> _availableModels = [];
-  bool _isLoadingModels = false;
+  @override
+  State<_ApiSettingsOverview> createState() => _ApiSettingsOverviewState();
+}
 
-  // 主聊天 API
-  late TextEditingController _chatUrlController;
-  late TextEditingController _chatKeyController;
-  late TextEditingController _chatModelController;
-  String _chatApiFormat = 'auto';
-
-  // 意图识别 API
-  bool _intentEnabled = false;
-  late TextEditingController _intentUrlController;
-  late TextEditingController _intentKeyController;
-  late TextEditingController _intentModelController;
-  List<String> _intentModels = [];
-  bool _isLoadingIntentModels = false;
-
-  // 图像识别 API（全角色）
-  bool _visionEnabled = false;
-  late TextEditingController _visionUrlController;
-  late TextEditingController _visionKeyController;
-  late TextEditingController _visionModelController;
-  String _visionMode = 'standalone';
-  String _visionApiFormat = 'auto';
-  List<String> _visionModels = [];
-  bool _isLoadingVisionModels = false;
-
-  // 向量记忆 API
-  bool _embeddingEnabled = false;
-  late TextEditingController _embeddingUrlController;
-  late TextEditingController _embeddingKeyController;
-  late TextEditingController _embeddingModelController;
-  List<String> _embeddingModels = [];
-  bool _isLoadingEmbeddingModels = false;
-  String? _testingApi;
-  String? _selectedProfileId;
-  String? _selectedVisionProfileId;
-
+class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
   @override
   void initState() {
     super.initState();
-    final settings = SettingsService.instance;
-
-    _backendUrlController = TextEditingController(text: settings.backendUrl);
-    _backendTokenController = TextEditingController(
-      text: settings.backendAuthToken,
-    );
-    _backendEncryptionSecretController = TextEditingController(
-      text: settings.backendEncryptionSecret,
-    );
-    _backendUrlController.addListener(_markConnectionDirty);
-    _backendTokenController.addListener(_markConnectionDirty);
-    _backendEncryptionSecretController.addListener(_markConnectionDirty);
-
-    _chatUrlController = TextEditingController(text: settings.chatApiUrl);
-    _chatKeyController = TextEditingController(text: settings.chatApiKey);
-    _chatModelController = TextEditingController(text: settings.chatModel);
-    _chatApiFormat = settings.chatApiFormat;
-    _selectedProfileId =
-        settings.modelProfiles.any(
-          (p) =>
-              p.apiUrl == settings.chatApiUrl && p.model == settings.chatModel,
-        )
-        ? settings.modelProfiles
-              .firstWhere(
-                (p) =>
-                    p.apiUrl == settings.chatApiUrl &&
-                    p.model == settings.chatModel,
-              )
-              .id
-        : null;
-
-    _intentEnabled = settings.intentEnabled;
-    _intentUrlController = TextEditingController(text: settings.intentApiUrl);
-    _intentKeyController = TextEditingController(text: settings.intentApiKey);
-    _intentModelController = TextEditingController(text: settings.intentModel);
-
-    _visionEnabled = settings.visionEnabled;
-    _visionUrlController = TextEditingController(text: settings.visionApiUrl);
-    _visionKeyController = TextEditingController(text: settings.visionApiKey);
-    _visionModelController = TextEditingController(text: settings.visionModel);
-    _visionMode = settings.visionMode;
-    _visionApiFormat = settings.visionApiFormat;
-    _selectedVisionProfileId =
-        settings.visionModelProfiles.any(
-          (p) =>
-              p.apiUrl == settings.visionApiUrl &&
-              p.model == settings.visionModel &&
-              p.mode == settings.visionMode,
-        )
-        ? settings.visionModelProfiles
-              .firstWhere(
-                (p) =>
-                    p.apiUrl == settings.visionApiUrl &&
-                    p.model == settings.visionModel &&
-                    p.mode == settings.visionMode,
-              )
-              .id
-        : null;
-
-    _embeddingEnabled = settings.embeddingEnabled;
-    _embeddingUrlController = TextEditingController(
-      text: settings.embeddingApiUrl,
-    );
-    _embeddingKeyController = TextEditingController(
-      text: settings.embeddingApiKey,
-    );
-    _embeddingModelController = TextEditingController(
-      text: settings.embeddingModel,
-    );
+    SettingsService.instance.addListener(_refresh);
   }
 
   @override
   void dispose() {
-    _backendUrlController.dispose();
-    _backendTokenController.dispose();
-    _backendEncryptionSecretController.dispose();
-    _chatUrlController.dispose();
-    _chatKeyController.dispose();
-    _chatModelController.dispose();
-    _intentUrlController.dispose();
-    _intentKeyController.dispose();
-    _intentModelController.dispose();
-    _visionUrlController.dispose();
-    _visionKeyController.dispose();
-    _visionModelController.dispose();
-    _embeddingUrlController.dispose();
-    _embeddingKeyController.dispose();
-    _embeddingModelController.dispose();
+    SettingsService.instance.removeListener(_refresh);
     super.dispose();
   }
 
-  void _markConnectionDirty() {
-    if (_isTestingConnection) {
-      return;
-    }
-    if (_connectionSuccess != null || _connectionError != null) {
-      setState(() {
-        _connectionSuccess = null;
-        _connectionError = null;
-      });
-    }
+  void _refresh() {
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
+    final settings = SettingsService.instance;
     return Scaffold(
       backgroundColor: const Color(0xFFEDEDED),
       appBar: AppBar(
         backgroundColor: const Color(0xFFEDEDED),
         elevation: 0,
         title: const Text('AI 接口设置'),
-        leading: IconButton(
-          onPressed: () => Navigator.pop(context),
-          icon: const Icon(Icons.arrow_back_ios, size: 20),
-        ),
-        actions: [
-          TextButton(
-            onPressed: _saveSettings,
-            child: const Text('保存', style: TextStyle(color: Color(0xFF07C160))),
-          ),
-        ],
       ),
       body: ListView(
         children: [
           const SizedBox(height: 10),
-
-          // 后端服务器
-          _buildSectionTitle('后端服务器'),
-          _buildSection([
-            _buildTextField(
-              '服务器地址',
-              _backendUrlController,
-              'http://localhost:8000',
-            ),
-            _buildDivider(),
-            _buildTextField(
-              'Token',
-              _backendTokenController,
-              '请填写后端鉴权 Token',
-              obscure: _backendTokenObscured,
-              onToggleObscure: () {
-                setState(() {
-                  _backendTokenObscured = !_backendTokenObscured;
-                });
-              },
-            ),
-            _buildDivider(),
-            _buildTextField(
-              '加密密钥',
-              _backendEncryptionSecretController,
-              '请填写后端传输加密密钥',
-              obscure: _backendEncryptionSecretObscured,
-              onToggleObscure: () {
-                setState(() {
-                  _backendEncryptionSecretObscured =
-                      !_backendEncryptionSecretObscured;
-                });
-              },
-            ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text(
-                '说明：服务器 Token 与加密密钥不会通过前端同步，需在后端手动配置。',
-                style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+          _Section(
+            children: [
+              _NavigationRow(
+                icon: Icons.dns_outlined,
+                title: '后端连接',
+                subtitle: settings.backendUrl.isEmpty ? '未配置' : settings.backendUrl,
+                onTap: () => _push(context, const BackendConnectionPage()),
               ),
-            ),
-            _buildDivider(),
-            _buildConnectionTestButton(),
-            _buildDivider(),
-            _buildPullBackendConfigButton(),
-          ]),
-
-          const SizedBox(height: 20),
-
-          // 主聊天 API
-          _buildSectionTitle('主聊天 API'),
-          _buildSection([
-            _buildTextField(
-              'API URL',
-              _chatUrlController,
-              'https://api.openai.com/v1',
-            ),
-            _buildDivider(),
-            _buildApiFormatSelector(
-              value: _chatApiFormat,
-              onChanged: (value) => setState(() => _chatApiFormat = value),
-            ),
-            _buildDivider(),
-            _buildTextField(
-              'API Key',
-              _chatKeyController,
-              'sk-xxx',
-              obscure: true,
-            ),
-            _buildDivider(),
-            _buildApiConnectButton(),
-            _buildDivider(),
-            _buildCurrentConfigTestButton('chat', '测试聊天配置'),
-            _buildDivider(),
-            _buildModelSelector(),
-            _buildModelProfiles(),
-          ]),
-
-          const SizedBox(height: 20),
-
-          // 模型安静时间（供应商+模型级）
-          _buildSectionTitle('模型安静时间'),
-          _buildSection([
-            ..._buildProviderQuietRows(),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 8, 16, 10),
-              child: Text(
-                '按“API 地址 + 模型”设置安静时间；对使用该供应商+模型的角色（主动消息、朋友圈互动、群聊自动回复等 AI 自主行为）生效，用户主动发起的对话不受影响。',
-                style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
-              ),
-            ),
-          ]),
-
-          const SizedBox(height: 20),
-
-          // 意图识别 API
-          _buildSectionTitle('意图识别 API'),
-          _buildSection([
-            _buildSwitchItem('启用意图识别', _intentEnabled, (v) {
-              setState(() => _intentEnabled = v);
-            }),
-            if (_intentEnabled) ...[
-              _buildDivider(),
-              _buildTextField(
-                'API URL',
-                _intentUrlController,
-                'https://api.openai.com/v1',
-              ),
-              _buildDivider(),
-              _buildApiFormatSelector(
-                value: _visionApiFormat,
-                onChanged: (value) => setState(() => _visionApiFormat = value),
-              ),
-              _buildDivider(),
-              _buildTextField(
-                'API Key',
-                _intentKeyController,
-                'sk-xxx',
-                obscure: true,
-              ),
-              _buildDivider(),
-              _buildIntentModelFetchButton(),
-              _buildDivider(),
-              _buildCurrentConfigTestButton('intent', '测试意图配置'),
-              _buildDivider(),
-              _buildIntentModelSelector(),
             ],
-          ]),
-
-          const SizedBox(height: 20),
-
-          // 图像识别 API
-          _buildSectionTitle('图像识别 API'),
-          _buildSection([
-            _buildSwitchItem('启用图像识别模型', _visionEnabled, (v) {
-              setState(() => _visionEnabled = v);
-            }),
-            if (_visionEnabled) ...[
-              _buildDivider(),
-              _buildTextField(
-                'API URL',
-                _visionUrlController,
-                'https://api.openai.com/v1',
+          ),
+          const _SectionGap(),
+          _Section(
+            children: [
+              _NavigationRow(
+                icon: Icons.chat_bubble_outline,
+                title: '默认聊天模型',
+                subtitle: _modelSummary(settings.chatModel, settings.chatApiUrl),
+                onTap: () => _push(
+                  context,
+                  const ModelSettingsPage(kind: ModelSettingsKind.chat),
+                ),
               ),
-              _buildDivider(),
-              _buildTextField(
-                'API Key',
-                _visionKeyController,
-                'sk-xxx',
-                obscure: true,
+              const Divider(height: 1, indent: 56),
+              _NavigationRow(
+                icon: Icons.psychology_outlined,
+                title: '意图识别模型',
+                subtitle: _featureSummary(
+                  settings.intentEnabled,
+                  settings.intentModel,
+                  settings.intentApiUrl,
+                ),
+                onTap: () => _push(
+                  context,
+                  const ModelSettingsPage(kind: ModelSettingsKind.intent),
+                ),
               ),
-              _buildDivider(),
-              _buildVisionModelFetchButton(),
-              _buildDivider(),
-              _buildCurrentConfigTestButton('vision', '测试视觉配置'),
-              _buildDivider(),
-              _buildVisionModelSelector(),
-              _buildDivider(),
-              _buildVisionModeSelector(),
-              _buildDivider(),
-              _buildVisionModelProfiles(),
+              const Divider(height: 1, indent: 56),
+              _NavigationRow(
+                icon: Icons.visibility_outlined,
+                title: '视觉识别模型',
+                subtitle: _featureSummary(
+                  settings.visionEnabled,
+                  settings.visionModel,
+                  settings.visionApiUrl,
+                ),
+                onTap: () => _push(
+                  context,
+                  const ModelSettingsPage(kind: ModelSettingsKind.vision),
+                ),
+              ),
+              const Divider(height: 1, indent: 56),
+              _NavigationRow(
+                icon: Icons.memory_outlined,
+                title: '向量记忆模型',
+                subtitle: _featureSummary(
+                  settings.embeddingEnabled,
+                  settings.embeddingModel,
+                  settings.embeddingApiUrl,
+                ),
+                onTap: () => _push(
+                  context,
+                  const ModelSettingsPage(kind: ModelSettingsKind.embedding),
+                ),
+              ),
             ],
-          ]),
-
-          const SizedBox(height: 20),
-
-          // 向量记忆 API
-          _buildSectionTitle('向量记忆 API (Embedding)'),
-          _buildSection([
-            _buildSwitchItem('启用向量记忆', _embeddingEnabled, (v) {
-              setState(() => _embeddingEnabled = v);
-            }),
-            if (_embeddingEnabled) ...[
-              _buildDivider(),
-              _buildTextField(
-                'API URL',
-                _embeddingUrlController,
-                'https://api.openai.com/v1',
+          ),
+          const _SectionGap(),
+          _Section(
+            children: [
+              _NavigationRow(
+                icon: Icons.bookmarks_outlined,
+                title: '模型档案管理',
+                subtitle: '${settings.modelProfilesFor(ModelProfileCapability.chat).length} 个聊天档案，${settings.modelProfilesFor(ModelProfileCapability.intent).length} 个意图档案',
+                onTap: () => _push(context, const ModelProfilesPage()),
               ),
-              _buildDivider(),
-              _buildTextField(
-                'API Key',
-                _embeddingKeyController,
-                'sk-xxx',
-                obscure: true,
+              const Divider(height: 1, indent: 56),
+              _NavigationRow(
+                icon: Icons.bedtime_outlined,
+                title: '模型安静时间',
+                subtitle: '${settings.providerQuietRules.length} 条规则',
+                onTap: () => _push(context, const ProviderQuietRulesPage()),
               ),
-              _buildDivider(),
-              _buildEmbeddingModelFetchButton(),
-              _buildDivider(),
-              _buildCurrentConfigTestButton('embedding', '测试向量配置'),
-              _buildDivider(),
-              _buildEmbeddingModelSelector(),
             ],
-          ]),
-
+          ),
           const SizedBox(height: 30),
         ],
       ),
     );
   }
+}
 
-  Widget _buildSectionTitle(String title) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Text(
-        title,
-        style: const TextStyle(fontSize: 14, color: Color(0xFF888888)),
-      ),
+String _modelSummary(String model, String url) =>
+    url.trim().isEmpty ? '未配置' : model.trim().isEmpty ? url : model;
+
+String _featureSummary(bool enabled, String model, String url) {
+  if (!enabled) return '未启用';
+  return _modelSummary(model, url);
+}
+
+void _push(BuildContext context, Widget page) {
+  Navigator.push(context, MaterialPageRoute(builder: (_) => page));
+}
+
+class BackendConnectionPage extends StatefulWidget {
+  const BackendConnectionPage({super.key});
+
+  @override
+  State<BackendConnectionPage> createState() => _BackendConnectionPageState();
+}
+
+class _BackendConnectionPageState extends State<BackendConnectionPage> {
+  late final TextEditingController _url;
+  late final TextEditingController _token;
+  late final TextEditingController _secret;
+  bool _testing = false;
+  bool _pulling = false;
+  String? _result;
+
+  @override
+  void initState() {
+    super.initState();
+    final settings = SettingsService.instance;
+    _url = TextEditingController(text: settings.backendUrl);
+    _token = TextEditingController(text: settings.backendAuthToken);
+    _secret = TextEditingController(text: settings.backendEncryptionSecret);
+  }
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _token.dispose();
+    _secret.dispose();
+    super.dispose();
+  }
+
+  Future<void> _saveLocal() async {
+    final settings = SettingsService.instance;
+    await settings.updateBackendUrl(_url.text.trim());
+    await settings.updateBackendSecurity(
+      authToken: _token.text.trim(),
+      encryptionSecret: _secret.text.trim(),
     );
   }
 
-  Widget _buildSection(List<Widget> children) {
-    return Container(
-      color: Colors.white,
-      child: Column(children: children),
-    );
-  }
-
-  Widget _buildTextField(
-    String label,
-    TextEditingController controller,
-    String hint, {
-    bool obscure = false,
-    VoidCallback? onToggleObscure,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 80,
-            child: Text(label, style: const TextStyle(fontSize: 15)),
-          ),
-          Expanded(
-            child: TextField(
-              controller: controller,
-              obscureText: obscure,
-              decoration: InputDecoration(
-                hintText: hint,
-                hintStyle: const TextStyle(color: Color(0xFFCCCCCC)),
-                border: InputBorder.none,
-                isDense: true,
-                contentPadding: EdgeInsets.zero,
-                suffixIcon: onToggleObscure == null
-                    ? null
-                    : IconButton(
-                        onPressed: onToggleObscure,
-                        icon: Icon(
-                          obscure ? Icons.visibility_off : Icons.visibility,
-                          size: 18,
-                          color: const Color(0xFF888888),
-                        ),
-                      ),
-              ),
-              style: const TextStyle(fontSize: 15),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSwitchItem(
-    String label,
-    bool value,
-    ValueChanged<bool> onChanged,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(label, style: const TextStyle(fontSize: 15)),
-          Switch(
-            value: value,
-            activeThumbColor: const Color(0xFF07C160),
-            onChanged: onChanged,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDivider() {
-    return const Divider(height: 1, indent: 16);
-  }
-
-  Widget _buildApiFormatSelector({
-    required String value,
-    required ValueChanged<String> onChanged,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('接口格式', style: TextStyle(fontSize: 15)),
-          ),
-          Expanded(
-            child: DropdownButtonFormField<String>(
-              initialValue:
-                  const {
-                    'auto',
-                    'gemini_native',
-                    'openai_compatible',
-                  }.contains(value)
-                  ? value
-                  : 'auto',
-              decoration: const InputDecoration(
-                border: InputBorder.none,
-                isDense: true,
-              ),
-              items: const [
-                DropdownMenuItem(value: 'auto', child: Text('自动识别')),
-                DropdownMenuItem(
-                  value: 'gemini_native',
-                  child: Text('Gemini 原生'),
-                ),
-                DropdownMenuItem(
-                  value: 'openai_compatible',
-                  child: Text('OpenAI 兼容'),
-                ),
-              ],
-              onChanged: (next) {
-                if (next != null) onChanged(next);
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _apiFormatLabel(String value) {
-    return switch (value) {
-      'gemini_native' => 'Gemini 原生',
-      'openai_compatible' => 'OpenAI 兼容',
-      _ => '自动识别',
-    };
-  }
-
-  Widget _buildVisionModeSelector() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('运行模式', style: TextStyle(fontSize: 15)),
-          ),
-          Expanded(
-            child: DropdownButtonFormField<String>(
-              initialValue:
-                  const {
-                    'standalone',
-                    'pre_model',
-                    'tool',
-                  }.contains(_visionMode)
-                  ? _visionMode
-                  : 'standalone',
-              decoration: const InputDecoration(
-                border: InputBorder.none,
-                isDense: true,
-              ),
-              items: const [
-                DropdownMenuItem(
-                  value: 'standalone',
-                  child: Text('单独模型（直接输出）', style: TextStyle(fontSize: 14)),
-                ),
-                DropdownMenuItem(
-                  value: 'pre_model',
-                  child: Text(
-                    '前置模型（识图后交给聊天模型）',
-                    style: TextStyle(fontSize: 14),
-                  ),
-                ),
-                DropdownMenuItem(
-                  value: 'tool',
-                  child: Text(
-                    '工具模式（AI 自主决定识图）',
-                    style: TextStyle(fontSize: 14),
-                  ),
-                ),
-              ],
-              onChanged: (value) {
-                if (value != null) {
-                  setState(() => _visionMode = value);
-                }
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildConnectionTestButton() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          Expanded(
-            child: ElevatedButton.icon(
-              onPressed: _isTestingConnection ? null : _testConnection,
-              icon: _isTestingConnection
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(
-                      _connectionSuccess == null
-                          ? Icons.wifi_find
-                          : (_connectionSuccess!
-                                ? Icons.check_circle
-                                : Icons.error),
-                      size: 18,
-                    ),
-              label: Text(_isTestingConnection ? '测试中...' : '测试连接'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _connectionSuccess == true
-                    ? const Color(0xFF07C160)
-                    : (_connectionSuccess == false ? Colors.red : null),
-                foregroundColor: _connectionSuccess != null
-                    ? Colors.white
-                    : null,
-              ),
-            ),
-          ),
-          if (_connectionError != null) ...[
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                _connectionError!,
-                style: const TextStyle(color: Colors.red, fontSize: 12),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Future<void> _testConnection() async {
-    final url = _backendUrlController.text.trim();
-    final token = _backendTokenController.text.trim();
-    final encryptionSecret = _backendEncryptionSecretController.text.trim();
-    if (url.isEmpty) {
-      setState(() {
-        _connectionSuccess = false;
-        _connectionError = '请输入服务器地址';
-      });
+  Future<void> _test() async {
+    if (_url.text.trim().isEmpty) {
+      _showMessage(context, '请输入服务器地址');
       return;
     }
-
-    // 测试连接时使用当前输入的安全配置
-    SecureBackendClient.configureSecurity(
-      authToken: token,
-      encryptionSecret: encryptionSecret,
-    );
-
-    setState(() {
-      _isTestingConnection = true;
-      _connectionSuccess = null;
-      _connectionError = null;
-    });
-
+    setState(() => _testing = true);
     try {
-      await _saveSettingsLocalOnly();
+      await _saveLocal();
       await SecureWebSocketClient.instance.close();
       final response = await SecureWebSocketClient.instance.request(
         'health',
         const <String, dynamic>{},
         timeout: const Duration(seconds: 5),
       );
-
-      if (response['status']?.toString() == 'healthy') {
-        setState(() {
-          _connectionSuccess = true;
-          _connectionError = null;
-        });
-        unawaited(_refreshRolesAfterConnection());
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✅ 连接成功（未自动同步）'),
-              backgroundColor: Color(0xFF07C160),
-            ),
-          );
-        }
-      } else {
-        setState(() {
-          _connectionSuccess = false;
-          _connectionError = '后端健康检查失败';
-        });
+      if (response['status']?.toString() != 'healthy') {
+        throw Exception('后端健康检查失败');
       }
-    } catch (e) {
-      debugPrint('Connection test failed: $e');
-      setState(() {
-        _connectionSuccess = false;
-        _connectionError = e.toString().length > 50
-            ? '${e.toString().substring(0, 50)}...'
-            : e.toString();
-      });
+      unawaited(RoleService.fetchFromBackend());
+      if (mounted) setState(() => _result = '连接成功');
+    } catch (error) {
+      if (mounted) setState(() => _result = '连接失败: $error');
     } finally {
-      setState(() {
-        _isTestingConnection = false;
-      });
+      if (mounted) setState(() => _testing = false);
     }
   }
 
-  Future<void> _refreshRolesAfterConnection() async {
+  Future<void> _pull() async {
+    setState(() => _pulling = true);
     try {
-      await RoleService.fetchFromBackend();
-      debugPrint('ApiSettingsPage: roles refreshed after connection test');
-    } catch (e) {
-      debugPrint('ApiSettingsPage: refresh roles failed: $e');
+      await _saveLocal();
+      await SecureWebSocketClient.instance.close();
+      final ok = await SettingsService.instance.syncAllSettingsFromBackend();
+      if (!ok) throw Exception('后端未返回有效配置');
+      if (mounted) _showMessage(context, '已从后端拉取配置');
+    } catch (error) {
+      if (mounted) _showMessage(context, '拉取失败: $error');
+    } finally {
+      if (mounted) setState(() => _pulling = false);
     }
   }
 
-  Widget _buildPullBackendConfigButton() {
-    final canPull = _connectionSuccess == true && !_isTestingConnection;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          Expanded(
-            child: ElevatedButton.icon(
-              onPressed: (canPull && !_isPullingBackendConfig)
-                  ? _pullConfigFromBackend
-                  : null,
-              icon: _isPullingBackendConfig
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.cloud_sync, size: 18),
-              label: Text(_isPullingBackendConfig ? '拉取中...' : '从后端读取配置（加密）'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF07C160),
-                foregroundColor: Colors.white,
-              ),
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: const Color(0xFFEDEDED),
+    appBar: AppBar(
+      backgroundColor: const Color(0xFFEDEDED),
+      elevation: 0,
+      title: const Text('后端连接'),
+      actions: [TextButton(onPressed: _saveLocal, child: const Text('保存'))],
+    ),
+    body: ListView(
+      children: [
+        const _PageHint('Token 与传输密钥仅保存在当前设备，不会覆盖服务端安全配置。'),
+        _Section(
+          children: [
+            _FieldRow(label: '服务器地址', controller: _url, hint: 'http://localhost:8000'),
+            const Divider(height: 1),
+            _FieldRow(label: 'Token', controller: _token, hint: '后端鉴权 Token', obscure: true),
+            const Divider(height: 1),
+            _FieldRow(label: '传输密钥', controller: _secret, hint: '后端传输加密密钥', obscure: true),
+          ],
+        ),
+        const _SectionGap(),
+        _Section(
+          children: [
+            _ActionRow(
+              icon: Icons.network_check_outlined,
+              label: _testing ? '测试中...' : '测试连接',
+              busy: _testing,
+              onTap: _testing ? null : _test,
             ),
+            const Divider(height: 1),
+            _ActionRow(
+              icon: Icons.cloud_sync_outlined,
+              label: _pulling ? '拉取中...' : '从后端拉取全部配置',
+              busy: _pulling,
+              onTap: _pulling ? null : _pull,
+            ),
+          ],
+        ),
+        if (_result != null)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(_result!, style: const TextStyle(color: Color(0xFF666666))),
+          ),
+      ],
+    ),
+  );
+}
+
+enum ModelSettingsKind { chat, intent, vision, embedding }
+
+extension on ModelSettingsKind {
+  String get title => switch (this) {
+    ModelSettingsKind.chat => '默认聊天模型',
+    ModelSettingsKind.intent => '意图识别模型',
+    ModelSettingsKind.vision => '视觉识别模型',
+    ModelSettingsKind.embedding => '向量记忆模型',
+  };
+
+  ModelProfileCapability get capability => switch (this) {
+    ModelSettingsKind.chat => ModelProfileCapability.chat,
+    ModelSettingsKind.intent => ModelProfileCapability.intent,
+    ModelSettingsKind.vision => ModelProfileCapability.vision,
+    ModelSettingsKind.embedding => ModelProfileCapability.embedding,
+  };
+
+  bool get hasToggle => this != ModelSettingsKind.chat;
+  bool get hasFormat => this != ModelSettingsKind.embedding;
+  bool get hasVisionMode => this == ModelSettingsKind.vision;
+}
+
+class ModelSettingsPage extends StatefulWidget {
+  final ModelSettingsKind kind;
+  const ModelSettingsPage({super.key, required this.kind});
+
+  @override
+  State<ModelSettingsPage> createState() => _ModelSettingsPageState();
+}
+
+class ModelProfilesPage extends StatefulWidget {
+  const ModelProfilesPage({super.key});
+
+  @override
+  State<ModelProfilesPage> createState() => _ModelProfilesPageState();
+}
+
+class _ModelProfilesPageState extends State<ModelProfilesPage> {
+  ModelProfileCapability? _filter;
+
+  Future<void> _edit([ModelApiProfile? existing]) async {
+    final result = await _showProfileEditor(context, existing: existing);
+    if (result == null) return;
+    await SettingsService.instance.saveApiProfile(result);
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final all = SettingsService.instance.modelProfilesFor;
+    final profiles = _filter == null
+        ? ModelProfileCapability.values.expand(all).toSet().toList()
+        : all(_filter!);
+    return Scaffold(
+      backgroundColor: const Color(0xFFEDEDED),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFEDEDED),
+        elevation: 0,
+        title: const Text('模型档案管理'),
+        actions: [
+          IconButton(tooltip: '新建档案', onPressed: () => _edit(), icon: const Icon(Icons.add)),
+        ],
+      ),
+      body: Column(
+        children: [
+          SizedBox(
+            height: 54,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              children: [
+                ChoiceChip(label: const Text('全部'), selected: _filter == null, onSelected: (_) => setState(() => _filter = null)),
+                for (final capability in ModelProfileCapability.values)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 8),
+                    child: ChoiceChip(
+                      label: Text(_capabilityLabel(capability)),
+                      selected: _filter == capability,
+                      onSelected: (_) => setState(() => _filter = capability),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: profiles.isEmpty
+                ? const Center(child: Text('暂无模型档案'))
+                : ListView.separated(
+                    itemCount: profiles.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final profile = profiles[index];
+                      return Material(
+                        color: Colors.white,
+                        child: ListTile(
+                          title: Text(profile.name),
+                          subtitle: Text(
+                            '${profile.model} | ${profile.capabilities.map(_capabilityLabel).join('、')}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(tooltip: '编辑档案', onPressed: () => _edit(profile), icon: const Icon(Icons.edit_outlined)),
+                              IconButton(
+                                tooltip: '删除档案',
+                                onPressed: () async {
+                                  await SettingsService.instance.deleteModelProfile(profile.id);
+                                  if (mounted) setState(() {});
+                                },
+                                icon: const Icon(Icons.delete_outline),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
     );
   }
+}
 
-  Future<void> _pullConfigFromBackend() async {
-    setState(() => _isPullingBackendConfig = true);
-    try {
-      // 确保使用当前页面输入的后端安全参数
-      await _saveSettingsLocalOnly();
-      await SecureWebSocketClient.instance.close();
+class ProviderQuietRulesPage extends StatefulWidget {
+  const ProviderQuietRulesPage({super.key});
 
-      final ok = await SettingsService.instance.syncAllSettingsFromBackend();
-      if (!ok) {
-        throw Exception('后端未返回有效配置');
-      }
+  @override
+  State<ProviderQuietRulesPage> createState() => _ProviderQuietRulesPageState();
+}
 
-      _reloadControllersFromSettings();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('已从后端加密拉取配置并应用'),
-            backgroundColor: Color(0xFF07C160),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('拉取后端配置失败: $e')));
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isPullingBackendConfig = false);
-      }
-    }
-  }
-
-  void _reloadControllersFromSettings() {
+class _ProviderQuietRulesPageState extends State<ProviderQuietRulesPage> {
+  List<({String name, String url, String model})> _targets() {
     final settings = SettingsService.instance;
-    setState(() {
-      _chatUrlController.text = settings.chatApiUrl;
-      _chatKeyController.text = settings.chatApiKey;
-      _chatModelController.text = settings.chatModel;
-      _chatApiFormat = settings.chatApiFormat;
-
-      _intentEnabled = settings.intentEnabled;
-      _intentUrlController.text = settings.intentApiUrl;
-      _intentKeyController.text = settings.intentApiKey;
-      _intentModelController.text = settings.intentModel;
-
-      _visionEnabled = settings.visionEnabled;
-      _visionUrlController.text = settings.visionApiUrl;
-      _visionKeyController.text = settings.visionApiKey;
-      _visionModelController.text = settings.visionModel;
-      _visionMode = settings.visionMode;
-      _visionApiFormat = settings.visionApiFormat;
-
-      _embeddingEnabled = settings.embeddingEnabled;
-      _embeddingUrlController.text = settings.embeddingApiUrl;
-      _embeddingKeyController.text = settings.embeddingApiKey;
-      _embeddingModelController.text = settings.embeddingModel;
-    });
+    final targets = <({String name, String url, String model})>[
+      (name: '当前聊天模型', url: settings.chatApiUrl, model: settings.chatModel),
+    ];
+    final seen = <String>{'${settings.chatApiUrl}|${settings.chatModel}'};
+    for (final profile in ModelProfileCapability.values.expand(settings.modelProfilesFor)) {
+      final key = '${profile.apiUrl}|${profile.model}';
+      if (profile.apiUrl.isNotEmpty && profile.model.isNotEmpty && seen.add(key)) {
+        targets.add((name: profile.name, url: profile.apiUrl, model: profile.model));
+      }
+    }
+    return targets;
   }
 
-  /// 获取可用模型列表
-  (String, Map<String, String>, bool) _buildModelsRequest(
-    String apiUrl,
-    String apiKey, {
-    String apiFormat = 'auto',
-  }) {
-    final uri = Uri.parse(apiUrl.trim());
-    final isGoogleGemini =
-        uri.host.toLowerCase() == 'generativelanguage.googleapis.com';
-    final isNativeGemini =
-        apiFormat == 'gemini_native' ||
-        (apiFormat != 'openai_compatible' &&
-            isGoogleGemini &&
-            !uri.path.toLowerCase().contains('/openai'));
-    var path = uri.path.replaceAll(RegExp(r'/+$'), '');
+  Future<void> _editTarget(String url, String model) async {
+    if (url.isEmpty || model.isEmpty) {
+      _showMessage(context, '请先配置 API 地址和模型');
+      return;
+    }
+    final all = SettingsService.instance.providerQuietRules;
+    final existing = all.where((rule) => ProviderQuietRule.matches(rule, url, model)).toList();
+    final edited = await showQuietRuleEditor(
+      context,
+      initialRules: existing.map((rule) => rule.toRule()).toList(),
+    );
+    if (edited == null) return;
+    final updated = edited
+        .map((rule) => ProviderQuietRule.fromRuleAndTarget(rule: rule, apiUrl: url, model: model))
+        .toList();
+    await SettingsService.instance.updateProviderQuietRules([
+      ...all.where((rule) => !ProviderQuietRule.matches(rule, url, model)),
+      ...updated,
+    ]);
+    final synced = await SettingsService.instance.syncApiSettingsToBackend();
+    if (mounted) {
+      setState(() {});
+      _showMessage(context, synced ? '规则已保存' : '规则已本地保存，后端同步失败');
+    }
+  }
 
-    if (isNativeGemini) {
-      path = _nativeGeminiBasePath(path);
-      if (!path.toLowerCase().endsWith('/v1') &&
-          !path.toLowerCase().endsWith('/v1beta')) {
-        path = '$path/v1beta';
-      }
-      return (
-        uri.replace(path: '$path/models', queryParameters: {'key': apiKey}).toString(),
-        <String, String>{},
-        true,
-      );
+  Future<void> _addCustom() async {
+    final url = TextEditingController();
+    final model = TextEditingController();
+    final target = await showDialog<({String url, String model})>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('自定义模型'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: url, decoration: const InputDecoration(labelText: 'API 地址')),
+            TextField(controller: model, decoration: const InputDecoration(labelText: '模型')),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, (url: url.text.trim(), model: model.text.trim())),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    url.dispose();
+    model.dispose();
+    if (target != null && target.url.isNotEmpty && target.model.isNotEmpty && mounted) {
+      await _editTarget(target.url, target.model);
     }
+  }
 
-    if (isGoogleGemini &&
-        apiFormat == 'openai_compatible' &&
-        !path.toLowerCase().contains('/openai')) {
-      path = '$path/openai';
-    }
-    path = path.replaceFirst(RegExp(r'/chat/completions$'), '');
-    if (!path.endsWith('/models')) {
-      if (uri.host.toLowerCase() == 'generativelanguage.googleapis.com' &&
-          path.toLowerCase().endsWith('/openai')) {
-        path = '$path/models';
-      } else {
-        path = path.endsWith('/v1') ? '$path/models' : '$path/v1/models';
-      }
-    }
-    return (
-      uri.replace(path: path, query: null).toString(),
-      {'Authorization': 'Bearer $apiKey', 'Content-Type': 'application/json'},
-      false,
+  @override
+  Widget build(BuildContext context) {
+    final rules = SettingsService.instance.providerQuietRules;
+    return Scaffold(
+      backgroundColor: const Color(0xFFEDEDED),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFEDEDED),
+        elevation: 0,
+        title: const Text('模型安静时间'),
+        actions: [IconButton(tooltip: '添加自定义模型', onPressed: _addCustom, icon: const Icon(Icons.add))],
+      ),
+      body: ListView(
+        children: [
+          const _PageHint('规则按 API 地址和模型生效，仅限制角色的自主消息、互动和自动回复。'),
+          _Section(
+            children: [
+              for (final target in _targets()) ...[
+                ListTile(
+                  title: Text(target.name),
+                  subtitle: Text(
+                    rules
+                            .where((rule) => ProviderQuietRule.matches(rule, target.url, target.model))
+                            .map((rule) => rule.label)
+                            .join('；')
+                            .isEmpty
+                        ? '未设置'
+                        : rules.where((rule) => ProviderQuietRule.matches(rule, target.url, target.model)).map((rule) => rule.label).join('；'),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  onTap: () => _editTarget(target.url, target.model),
+                ),
+                const Divider(height: 1),
+              ],
+            ],
+          ),
+        ],
+      ),
     );
   }
+}
 
-  List<String> _readModelIds(dynamic decoded, bool isNativeGemini) {
-    if (decoded is! Map<String, dynamic>) return [];
-    final records = decoded[isNativeGemini ? 'models' : 'data'];
-    if (records is! List) return [];
-    final modelIds = <String>{};
-    for (final record in records) {
-      if (record is! Map) continue;
-      if (isNativeGemini) {
-        final methods = record['supportedGenerationMethods'];
-        if (methods is List && !methods.contains('generateContent')) continue;
-        final name = record['name']?.toString() ?? '';
-        final modelId = name.replaceFirst(RegExp(r'^models/'), '');
-        if (modelId.isNotEmpty) modelIds.add(modelId);
-      } else {
-        final modelId = record['id']?.toString() ?? '';
-        if (modelId.isNotEmpty) modelIds.add(modelId);
-      }
+Future<ModelApiProfile?> _showProfileEditor(
+  BuildContext context, {
+  ModelApiProfile? existing,
+}) async {
+  final name = TextEditingController(text: existing?.name ?? '');
+  final url = TextEditingController(text: existing?.apiUrl ?? '');
+  final key = TextEditingController(text: existing?.apiKey ?? '');
+  final model = TextEditingController(text: existing?.model ?? '');
+  var format = existing?.apiFormat ?? 'auto';
+  var visionMode = existing?.visionMode ?? 'standalone';
+  var capabilities = {...?existing?.capabilities};
+  final result = await showDialog<ModelApiProfile>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: Text(existing == null ? '新建模型档案' : '编辑模型档案'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: name, decoration: const InputDecoration(labelText: '档案名称')),
+              TextField(controller: url, decoration: const InputDecoration(labelText: 'API 地址')),
+              TextField(controller: key, obscureText: true, decoration: const InputDecoration(labelText: 'API Key')),
+              TextField(controller: model, decoration: const InputDecoration(labelText: '模型')),
+              DropdownButtonFormField<String>(
+                value: format,
+                decoration: const InputDecoration(labelText: '协议格式'),
+                items: const [
+                  DropdownMenuItem(value: 'auto', child: Text('自动识别')),
+                  DropdownMenuItem(value: 'openai_compatible', child: Text('OpenAI 兼容')),
+                  DropdownMenuItem(value: 'gemini_native', child: Text('Gemini 原生')),
+                ],
+                onChanged: (value) => setState(() => format = value ?? 'auto'),
+              ),
+              const SizedBox(height: 8),
+              for (final capability in ModelProfileCapability.values)
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(_capabilityLabel(capability)),
+                  value: capabilities.contains(capability),
+                  onChanged: (selected) => setState(() {
+                    if (selected == true) {
+                      capabilities.add(capability);
+                    } else {
+                      capabilities.remove(capability);
+                    }
+                  }),
+                ),
+              if (capabilities.contains(ModelProfileCapability.vision))
+                DropdownButtonFormField<String>(
+                  value: visionMode,
+                  decoration: const InputDecoration(labelText: '视觉运行模式'),
+                  items: const [
+                    DropdownMenuItem(value: 'standalone', child: Text('独立识图')),
+                    DropdownMenuItem(value: 'pre_model', child: Text('预处理模型')),
+                    DropdownMenuItem(value: 'tool', child: Text('工具调用')),
+                  ],
+                  onChanged: (value) => setState(() => visionMode = value ?? 'standalone'),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(
+            onPressed: () {
+              if (name.text.trim().isEmpty || url.text.trim().isEmpty || model.text.trim().isEmpty || capabilities.isEmpty) return;
+              Navigator.pop(context, ModelApiProfile(
+                id: existing?.id ?? 'model_profile_${DateTime.now().microsecondsSinceEpoch}',
+                name: name.text.trim(),
+                apiUrl: url.text.trim(),
+                apiKey: key.text.trim(),
+                model: model.text.trim(),
+                apiFormat: format,
+                capabilities: capabilities,
+                visionMode: capabilities.contains(ModelProfileCapability.vision) ? visionMode : null,
+              ));
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    ),
+  );
+  name.dispose();
+  url.dispose();
+  key.dispose();
+  model.dispose();
+  return result;
+}
+
+Future<String?> _askProfileName(BuildContext context, String initial) async {
+  final controller = TextEditingController(text: initial);
+  final result = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('保存模型档案'),
+      content: TextField(controller: controller, autofocus: true, decoration: const InputDecoration(labelText: '档案名称')),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        FilledButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text('保存')),
+      ],
+    ),
+  );
+  controller.dispose();
+  return result;
+}
+
+class _Section extends StatelessWidget {
+  final List<Widget> children;
+  const _Section({required this.children});
+
+  @override
+  Widget build(BuildContext context) => Container(color: Colors.white, child: Column(children: children));
+}
+
+class _SectionGap extends StatelessWidget {
+  const _SectionGap();
+  @override
+  Widget build(BuildContext context) => const SizedBox(height: 12);
+}
+
+class _PageHint extends StatelessWidget {
+  final String text;
+  const _PageHint(this.text);
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+    child: Text(text, style: const TextStyle(fontSize: 12, color: Color(0xFF777777))),
+  );
+}
+
+class _NavigationRow extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+  const _NavigationRow({required this.icon, required this.title, required this.subtitle, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+    leading: Icon(icon, color: const Color(0xFF07C160)),
+    title: Text(title),
+    subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+    trailing: const Icon(Icons.arrow_forward_ios, size: 16, color: Color(0xFFBBBBBB)),
+    onTap: onTap,
+  );
+}
+
+class _FieldRow extends StatefulWidget {
+  final String label;
+  final TextEditingController controller;
+  final String hint;
+  final bool obscure;
+  const _FieldRow({required this.label, required this.controller, required this.hint, this.obscure = false});
+
+  @override
+  State<_FieldRow> createState() => _FieldRowState();
+}
+
+class _FieldRowState extends State<_FieldRow> {
+  late bool _obscured = widget.obscure;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+    child: Row(
+      children: [
+        SizedBox(width: 82, child: Text(widget.label)),
+        Expanded(
+          child: TextField(
+            controller: widget.controller,
+            obscureText: _obscured,
+            decoration: InputDecoration(
+              border: InputBorder.none,
+              isDense: true,
+              hintText: widget.hint,
+              suffixIcon: widget.obscure
+                  ? IconButton(
+                      tooltip: _obscured ? '显示' : '隐藏',
+                      onPressed: () => setState(() => _obscured = !_obscured),
+                      icon: Icon(_obscured ? Icons.visibility_off_outlined : Icons.visibility_outlined),
+                    )
+                  : null,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _ActionRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool busy;
+  final VoidCallback? onTap;
+  const _ActionRow({required this.icon, required this.label, this.busy = false, this.onTap});
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+    leading: busy ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)) : Icon(icon),
+    title: Text(label),
+    trailing: const Icon(Icons.arrow_forward_ios, size: 16, color: Color(0xFFBBBBBB)),
+    onTap: onTap,
+  );
+}
+
+class _FormatSelector extends StatelessWidget {
+  final String value;
+  final ValueChanged<String> onChanged;
+  const _FormatSelector({required this.value, required this.onChanged});
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+    child: Row(children: [
+      const SizedBox(width: 82, child: Text('协议格式')),
+      Expanded(child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          isExpanded: true,
+          items: const [
+            DropdownMenuItem(value: 'auto', child: Text('自动识别')),
+            DropdownMenuItem(value: 'openai_compatible', child: Text('OpenAI 兼容')),
+            DropdownMenuItem(value: 'gemini_native', child: Text('Gemini 原生')),
+          ],
+          onChanged: (next) { if (next != null) onChanged(next); },
+        ),
+      )),
+    ]),
+  );
+}
+
+class _VisionModeSelector extends StatelessWidget {
+  final String value;
+  final ValueChanged<String> onChanged;
+  const _VisionModeSelector({required this.value, required this.onChanged});
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+    child: Row(children: [
+      const SizedBox(width: 82, child: Text('运行模式')),
+      Expanded(child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          isExpanded: true,
+          items: const [
+            DropdownMenuItem(value: 'standalone', child: Text('独立识图')),
+            DropdownMenuItem(value: 'pre_model', child: Text('预处理模型')),
+            DropdownMenuItem(value: 'tool', child: Text('工具调用')),
+          ],
+          onChanged: (next) { if (next != null) onChanged(next); },
+        ),
+      )),
+    ]),
+  );
+}
+
+class _ModelRow extends StatelessWidget {
+  final TextEditingController controller;
+  final List<String> models;
+  const _ModelRow({required this.controller, required this.models});
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+    child: Row(children: [
+      const SizedBox(width: 82, child: Text('模型')),
+      Expanded(
+        child: models.isEmpty
+            ? TextField(controller: controller, decoration: const InputDecoration(border: InputBorder.none, hintText: '输入模型名称'))
+            : DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: models.contains(controller.text) ? controller.text : null,
+                  hint: const Text('选择模型'),
+                  isExpanded: true,
+                  items: models.map((item) => DropdownMenuItem(value: item, child: Text(item, overflow: TextOverflow.ellipsis))).toList(),
+                  onChanged: (value) { if (value != null) controller.text = value; },
+                ),
+              ),
+      ),
+    ]),
+  );
+}
+
+class _ProfileSelector extends StatelessWidget {
+  final String? value;
+  final List<ModelApiProfile> profiles;
+  final ValueChanged<String?> onChanged;
+  const _ProfileSelector({required this.value, required this.profiles, required this.onChanged});
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+    child: Row(children: [
+      const SizedBox(width: 82, child: Text('模型档案')),
+      Expanded(child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: profiles.any((item) => item.id == value) ? value : null,
+          hint: const Text('选择并应用档案'),
+          isExpanded: true,
+          items: profiles.map((item) => DropdownMenuItem(value: item.id, child: Text(item.name, overflow: TextOverflow.ellipsis))).toList(),
+          onChanged: onChanged,
+        ),
+      )),
+    ]),
+  );
+}
+
+String _capabilityLabel(ModelProfileCapability capability) => switch (capability) {
+  ModelProfileCapability.chat => '聊天',
+  ModelProfileCapability.intent => '意图识别',
+  ModelProfileCapability.vision => '视觉识别',
+  ModelProfileCapability.embedding => '向量记忆',
+};
+
+void _showMessage(BuildContext context, String text) {
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+}
+
+({String url, Map<String, String> headers, bool nativeGemini}) _buildModelsRequest(
+  String apiUrl,
+  String apiKey,
+  String apiFormat,
+) {
+  final uri = Uri.parse(apiUrl.trim());
+  final google = uri.host.toLowerCase() == 'generativelanguage.googleapis.com';
+  final native = apiFormat == 'gemini_native' || (apiFormat != 'openai_compatible' && google && !uri.path.toLowerCase().contains('/openai'));
+  var path = uri.path.replaceAll(RegExp(r'/+$'), '');
+  if (native) {
+    path = _nativeGeminiBasePath(path);
+    if (!path.toLowerCase().endsWith('/v1') && !path.toLowerCase().endsWith('/v1beta')) path = '$path/v1beta';
+    return (url: uri.replace(path: '$path/models', queryParameters: {'key': apiKey}).toString(), headers: const {}, nativeGemini: true);
+  }
+  if (google && apiFormat == 'openai_compatible' && !path.toLowerCase().contains('/openai')) path = '$path/openai';
+  path = path.replaceFirst(RegExp(r'/chat/completions$'), '');
+  if (!path.endsWith('/models')) path = path.endsWith('/v1') ? '$path/models' : '$path/v1/models';
+  return (url: uri.replace(path: path, query: null).toString(), headers: {'Authorization': 'Bearer $apiKey'}, nativeGemini: false);
+}
+
+List<String> _readModelIds(dynamic decoded, bool nativeGemini) {
+  if (decoded is! Map<String, dynamic>) return [];
+  final records = decoded[nativeGemini ? 'models' : 'data'];
+  if (records is! List) return [];
+  final result = <String>{};
+  for (final item in records) {
+    if (item is! Map) continue;
+    if (nativeGemini) {
+      final methods = item['supportedGenerationMethods'];
+      if (methods is List && !methods.contains('generateContent')) continue;
+      final id = '${item['name'] ?? ''}'.replaceFirst(RegExp(r'^models/'), '');
+      if (id.isNotEmpty) result.add(id);
+    } else {
+      final id = '${item['id'] ?? ''}';
+      if (id.isNotEmpty) result.add(id);
     }
-    return modelIds.toList()..sort();
+  }
+  return result.toList()..sort();
+}
+
+bool _usesNativeGemini(String value, String apiFormat) {
+  final uri = Uri.parse(value.trim());
+  if (apiFormat == 'gemini_native') return true;
+  return uri.host.toLowerCase() == 'generativelanguage.googleapis.com' &&
+      apiFormat != 'openai_compatible' &&
+      !uri.path.toLowerCase().contains('/openai');
+}
+
+String _nativeGeminiBasePath(String path) {
+  var result = path.replaceFirst(RegExp(r'/openai(?:/|$)', caseSensitive: false), '/');
+  result = result.replaceFirst(RegExp(r'/models(?:/.*)?$', caseSensitive: false), '');
+  result = result.replaceFirst(RegExp(r'/chat/completions$', caseSensitive: false), '');
+  return result.replaceAll(RegExp(r'/+$'), '');
+}
+
+String _nativeGeminiEndpoint(String value, String model, String apiKey) {
+  final uri = Uri.parse(value.trim());
+  var path = _nativeGeminiBasePath(uri.path);
+  if (!path.toLowerCase().endsWith('/v1') && !path.toLowerCase().endsWith('/v1beta')) path = '$path/v1beta';
+  return uri.replace(
+    path: '$path/models/${model.replaceFirst(RegExp(r'^models/'), '')}:generateContent',
+    queryParameters: {'key': apiKey.trim()},
+    fragment: '',
+  ).toString();
+}
+
+Map<String, dynamic> _nativeGeminiTestBody(ModelSettingsKind kind) {
+  final parts = <Map<String, dynamic>>[
+    {'text': 'Reply with OK.'},
+  ];
+  if (kind == ModelSettingsKind.vision) {
+    parts.add({
+      'inlineData': {
+        'mimeType': 'image/png',
+        'data': 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
+      },
+    });
+  }
+  return {'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': {'maxOutputTokens': 8}};
+}
+
+Map<String, dynamic> _chatTestBody(ModelSettingsKind kind, String model) {
+  if (kind == ModelSettingsKind.vision) {
+    return {
+      'model': model,
+      'max_tokens': 8,
+      'messages': [
+        {
+          'role': 'user',
+          'content': [
+            {'type': 'text', 'text': 'Reply with OK.'},
+            {
+              'type': 'image_url',
+              'image_url': {
+                'url': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
+              },
+            },
+          ],
+        },
+      ],
+    };
+  }
+  return {
+    'model': model,
+    'max_tokens': 8,
+    'messages': [
+      {'role': 'user', 'content': 'Reply with OK.'},
+    ],
+  };
+}
+
+String _chatEndpoint(String value) {
+  final uri = Uri.parse(value.trim());
+  var path = uri.path.replaceAll(RegExp(r'/+$'), '');
+  if (!path.endsWith('/chat/completions')) path = path.endsWith('/v1') ? '$path/chat/completions' : '$path/v1/chat/completions';
+  return uri.replace(path: path, query: '', fragment: '').toString();
+}
+
+String _embeddingEndpoint(String value) {
+  final uri = Uri.parse(value.trim());
+  var path = uri.path.replaceAll(RegExp(r'/+$'), '');
+  if (path.endsWith('/chat/completions')) {
+    path = '${path.substring(0, path.length - '/chat/completions'.length)}/embeddings';
+  } else if (!path.endsWith('/embeddings')) {
+    path = path.endsWith('/v1') ? '$path/embeddings' : '$path/v1/embeddings';
+  }
+  return uri.replace(path: path, query: '', fragment: '').toString();
+}
+
+String _responseSummary(String value) {
+  final normalized = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+  return normalized.length > 120 ? '${normalized.substring(0, 120)}...' : normalized;
+}
+
+class _ModelSettingsPageState extends State<ModelSettingsPage> {
+  late final TextEditingController _url;
+  late final TextEditingController _key;
+  late final TextEditingController _model;
+  bool _enabled = true;
+  String _format = 'auto';
+  String _visionMode = 'standalone';
+  List<String> _models = [];
+  bool _fetching = false;
+  bool _testing = false;
+  bool _saving = false;
+  String? _profileId;
+
+  @override
+  void initState() {
+    super.initState();
+    final settings = SettingsService.instance;
+    switch (widget.kind) {
+      case ModelSettingsKind.chat:
+        _url = TextEditingController(text: settings.chatApiUrl);
+        _key = TextEditingController(text: settings.chatApiKey);
+        _model = TextEditingController(text: settings.chatModel);
+        _format = settings.chatApiFormat;
+      case ModelSettingsKind.intent:
+        _url = TextEditingController(text: settings.intentApiUrl);
+        _key = TextEditingController(text: settings.intentApiKey);
+        _model = TextEditingController(text: settings.intentModel);
+        _enabled = settings.intentEnabled;
+        _format = settings.intentApiFormat;
+      case ModelSettingsKind.vision:
+        _url = TextEditingController(text: settings.visionApiUrl);
+        _key = TextEditingController(text: settings.visionApiKey);
+        _model = TextEditingController(text: settings.visionModel);
+        _enabled = settings.visionEnabled;
+        _format = settings.visionApiFormat;
+        _visionMode = settings.visionMode;
+      case ModelSettingsKind.embedding:
+        _url = TextEditingController(text: settings.embeddingApiUrl);
+        _key = TextEditingController(text: settings.embeddingApiKey);
+        _model = TextEditingController(text: settings.embeddingModel);
+        _enabled = settings.embeddingEnabled;
+    }
+    _profileId = _matchingProfile()?.id;
+  }
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _key.dispose();
+    _model.dispose();
+    super.dispose();
+  }
+
+  ModelApiProfile? _matchingProfile() {
+    for (final profile in SettingsService.instance.modelProfilesFor(widget.kind.capability)) {
+      if (profile.apiUrl == _url.text && profile.model == _model.text) return profile;
+    }
+    return null;
   }
 
   Future<void> _fetchModels() async {
-    final url = _chatUrlController.text.trim();
-    final key = _chatKeyController.text.trim();
-
-    if (url.isEmpty || key.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL 和 API Key')));
+    if (_url.text.trim().isEmpty || _key.text.trim().isEmpty) {
+      _showMessage(context, '请先填写 API 地址和 API Key');
       return;
     }
-
-    setState(() => _isLoadingModels = true);
-
+    setState(() => _fetching = true);
     try {
-      final request = _buildModelsRequest(url, key, apiFormat: _chatApiFormat);
-
+      final request = _buildModelsRequest(_url.text, _key.text, _format);
       final response = await SecureBackendClient.getRaw(
-        request.$1,
-        headers: request.$2,
+        request.url,
+        headers: request.headers,
         includeAuth: false,
       ).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final models = _readModelIds(jsonDecode(response.body), request.$3);
-
-        setState(() {
-          _availableModels = models;
-          if (models.isNotEmpty &&
-              !_availableModels.contains(_chatModelController.text)) {
-            _chatModelController.text = models.first;
-          }
-        });
-
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
-        }
-      } else {
-        throw Exception('HTTP ${response.statusCode}');
-      }
-    } catch (e) {
-      debugPrint('Failed to fetch chat models: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
-      }
+      if (response.statusCode != 200) throw Exception('HTTP ${response.statusCode}');
+      final models = _readModelIds(jsonDecode(response.body), request.nativeGemini);
+      if (!mounted) return;
+      setState(() {
+        _models = models;
+        if (models.isNotEmpty && !models.contains(_model.text)) _model.text = models.first;
+      });
+      _showMessage(context, '获取到 ${models.length} 个模型');
+    } catch (error) {
+      if (mounted) _showMessage(context, '获取模型失败: $error');
     } finally {
-      setState(() => _isLoadingModels = false);
+      if (mounted) setState(() => _fetching = false);
     }
   }
 
-  Widget _buildApiConnectButton() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          Expanded(
-            child: ElevatedButton.icon(
-              onPressed: _isLoadingModels ? null : _fetchModels,
-              icon: _isLoadingModels
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.cloud_download),
-              label: Text(_isLoadingModels ? '获取中...' : '获取模型列表'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF07C160),
-                foregroundColor: Colors.white,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildCurrentConfigTestButton(String kind, String label) {
-    final testing = _testingApi == kind;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: SizedBox(
-        width: double.infinity,
-        child: OutlinedButton.icon(
-          onPressed: _testingApi == null ? () => _testApiConfig(kind) : null,
-          icon: testing
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.play_circle_outline, size: 18),
-          label: Text(testing ? '测试中...' : label),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: const Color(0xFF1677FF),
-            side: const BorderSide(color: Color(0xFF1677FF)),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _testApiConfig(String kind) async {
-    late final String url;
-    late final String key;
-    late final String model;
-    switch (kind) {
-      case 'chat':
-        url = _chatUrlController.text.trim();
-        key = _chatKeyController.text.trim();
-        model = _chatModelController.text.trim();
-        break;
-      case 'intent':
-        url = _intentUrlController.text.trim();
-        key = _intentKeyController.text.trim();
-        model = _intentModelController.text.trim();
-        break;
-      case 'vision':
-        url = _visionUrlController.text.trim();
-        key = _visionKeyController.text.trim();
-        model = _visionModelController.text.trim();
-        break;
-      case 'embedding':
-        url = _embeddingUrlController.text.trim();
-        key = _embeddingKeyController.text.trim();
-        model = _embeddingModelController.text.trim();
-        break;
-      default:
-        return;
-    }
-
-    if (url.isEmpty || key.isEmpty || model.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL、API Key 和模型')));
+  Future<void> _test() async {
+    if (_url.text.trim().isEmpty || _key.text.trim().isEmpty || _model.text.trim().isEmpty) {
+      _showMessage(context, '请先填写 API 地址、API Key 和模型');
       return;
     }
-
-    setState(() => _testingApi = kind);
+    setState(() => _testing = true);
     try {
-      final apiFormat = switch (kind) {
-        'chat' => _chatApiFormat,
-        'vision' => _visionApiFormat,
-        _ => 'auto',
-      };
-      final nativeGemini = _usesNativeGemini(url, apiFormat);
-      final response = kind == 'embedding'
+      final nativeGemini = _usesNativeGemini(_url.text, _format);
+      final response = widget.kind == ModelSettingsKind.embedding
           ? await SecureBackendClient.postRawJson(
-              _embeddingEndpoint(url),
-              body: {'model': model, 'input': 'ZeroChat configuration test'},
-              headers: {'Authorization': 'Bearer $key'},
+              _embeddingEndpoint(_url.text),
+              body: {'model': _model.text.trim(), 'input': 'ZeroChat configuration test'},
+              headers: {'Authorization': 'Bearer ${_key.text.trim()}'},
               includeAuth: false,
               timeout: const Duration(seconds: 20),
             )
           : await SecureBackendClient.postRawJson(
               nativeGemini
-                  ? _nativeGeminiEndpoint(url, model, key)
-                  : _chatEndpoint(url),
+                  ? _nativeGeminiEndpoint(_url.text, _model.text, _key.text)
+                  : _chatEndpoint(_url.text),
               body: nativeGemini
-                  ? _nativeGeminiTestBody(kind)
-                  : _chatTestBody(kind, model),
+                  ? _nativeGeminiTestBody(widget.kind)
+                  : _chatTestBody(widget.kind, _model.text.trim()),
               headers: nativeGemini
-                  ? {'Content-Type': 'application/json'}
-                  : {'Authorization': 'Bearer $key'},
+                  ? const {'Content-Type': 'application/json'}
+                  : {'Authorization': 'Bearer ${_key.text.trim()}'},
               includeAuth: false,
               timeout: const Duration(seconds: 30),
             );
-
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception(
-          'HTTP ${response.statusCode}: ${_responseSummary(response.body)}',
-        );
+        throw Exception('HTTP ${response.statusCode}: ${_responseSummary(response.body)}');
       }
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('${_apiLabel(kind)} 配置可用')));
+      if (mounted) _showMessage(context, '当前配置可用');
     } catch (error) {
+      if (mounted) _showMessage(context, '测试失败: ${_responseSummary(error.toString())}');
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      final settings = SettingsService.instance;
+      switch (widget.kind) {
+        case ModelSettingsKind.chat:
+          await settings.updateChatApi(url: _url.text.trim(), key: _key.text.trim(), model: _model.text.trim(), apiFormat: _format);
+        case ModelSettingsKind.intent:
+          await settings.updateIntentApi(enabled: _enabled, url: _url.text.trim(), key: _key.text.trim(), model: _model.text.trim(), apiFormat: _format);
+        case ModelSettingsKind.vision:
+          await settings.updateVisionApi(enabled: _enabled, url: _url.text.trim(), key: _key.text.trim(), model: _model.text.trim(), mode: _visionMode, apiFormat: _format);
+        case ModelSettingsKind.embedding:
+          await settings.updateEmbeddingApi(enabled: _enabled, url: _url.text.trim(), key: _key.text.trim(), model: _model.text.trim());
+      }
+      final synced = await settings.syncApiSettingsToBackend();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            '${_apiLabel(kind)} 测试失败: ${_responseSummary(error.toString())}',
-          ),
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _testingApi = null);
-    }
-  }
-
-  Map<String, dynamic> _chatTestBody(String kind, String model) {
-    if (kind == 'vision') {
-      return {
-        'model': model,
-        'max_tokens': 8,
-        'messages': [
-          {
-            'role': 'user',
-            'content': [
-              {'type': 'text', 'text': 'Reply with OK.'},
-              {
-                'type': 'image_url',
-                'image_url': {
-                  'url':
-                      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
-                },
-              },
-            ],
-          },
-        ],
-      };
-    }
-    return {
-      'model': model,
-      'max_tokens': 8,
-      'messages': [
-        {'role': 'user', 'content': 'Reply with OK.'},
-      ],
-    };
-  }
-
-  bool _usesNativeGemini(String value, String apiFormat) {
-    final uri = Uri.parse(value.trim());
-    if (apiFormat == 'gemini_native') return true;
-    if (uri.host.toLowerCase() != 'generativelanguage.googleapis.com' ||
-        apiFormat == 'openai_compatible') {
-      return false;
-    }
-    return !uri.path.toLowerCase().contains('/openai');
-  }
-
-  String _nativeGeminiEndpoint(String value, String model, String apiKey) {
-    final uri = Uri.parse(value.trim());
-    var path = _nativeGeminiBasePath(uri.path.replaceFirst(RegExp(r'/+$'), ''));
-    if (!path.toLowerCase().endsWith('/v1') &&
-        !path.toLowerCase().endsWith('/v1beta')) {
-      path = '$path/v1beta';
-    }
-    final normalizedModel = model.replaceFirst(RegExp(r'^models/'), '');
-    return uri
-        .replace(
-          path: '$path/models/$normalizedModel:generateContent',
-          queryParameters: {'key': apiKey},
-          fragment: '',
-        )
-        .toString();
-  }
-
-  String _nativeGeminiBasePath(String path) {
-    var result = path.replaceFirst(
-      RegExp(r'/openai(?:/|$)', caseSensitive: false),
-      '/',
-    );
-    result = result.replaceFirst(RegExp(r'/models(?:/.*)?$', caseSensitive: false), '');
-    result = result.replaceFirst(
-      RegExp(r'/chat/completions$', caseSensitive: false),
-      '',
-    );
-    return result.replaceAll(RegExp(r'/+$'), '');
-  }
-
-  Map<String, dynamic> _nativeGeminiTestBody(String kind) {
-    const imageData =
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=';
-    final parts = <Map<String, dynamic>>[
-      {'text': 'Reply with OK.'},
-    ];
-    if (kind == 'vision') {
-      parts.add({
-        'inlineData': {'mimeType': 'image/png', 'data': imageData},
-      });
-    }
-    return {
-      'contents': [
-        {'role': 'user', 'parts': parts},
-      ],
-      'generationConfig': {'maxOutputTokens': 8},
-    };
-  }
-
-  String _chatEndpoint(String value) {
-    final uri = Uri.parse(value.trim());
-    var path = uri.path.replaceFirst(RegExp(r'/+$'), '');
-    if (!path.endsWith('/chat/completions')) {
-      path = path.endsWith('/v1')
-          ? '$path/chat/completions'
-          : '$path/v1/chat/completions';
-    }
-    return uri.replace(path: path, query: '', fragment: '').toString();
-  }
-
-  String _embeddingEndpoint(String value) {
-    final uri = Uri.parse(value.trim());
-    var path = uri.path.replaceFirst(RegExp(r'/+$'), '');
-    if (path.endsWith('/chat/completions')) {
-      path =
-          '${path.substring(0, path.length - '/chat/completions'.length)}/embeddings';
-    } else if (!path.endsWith('/embeddings')) {
-      path = path.endsWith('/v1') ? '$path/embeddings' : '$path/v1/embeddings';
-    }
-    return uri.replace(path: path, query: '', fragment: '').toString();
-  }
-
-  String _apiLabel(String kind) {
-    return switch (kind) {
-      'chat' => '聊天 API',
-      'intent' => '意图 API',
-      'vision' => '视觉 API',
-      'embedding' => '向量 API',
-      _ => 'API',
-    };
-  }
-
-  String _responseSummary(String value) {
-    final normalized = value.replaceAll(RegExp(r'\s+'), ' ').trim();
-    return normalized.length > 120
-        ? '${normalized.substring(0, 120)}...'
-        : normalized;
-  }
-
-  Widget _buildModelSelector() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('模型', style: TextStyle(fontSize: 16)),
-          ),
-          Expanded(
-            child: _availableModels.isEmpty
-                ? TextField(
-                    controller: _chatModelController,
-                    decoration: const InputDecoration(
-                      hintText: 'gpt-3.5-turbo',
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    style: const TextStyle(fontSize: 16),
-                  )
-                : DropdownButtonFormField<String>(
-                    initialValue:
-                        _availableModels.contains(_chatModelController.text)
-                        ? _chatModelController.text
-                        : null,
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    hint: const Text('选择模型'),
-                    items: _availableModels.map((model) {
-                      return DropdownMenuItem(
-                        value: model,
-                        child: Text(
-                          model,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                      );
-                    }).toList(),
-                    onChanged: (value) {
-                      if (value != null) {
-                        _chatModelController.text = value;
-                      }
-                    },
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  List<ProviderQuietRule> _rulesForTarget(String apiUrl, String model) {
-    if (apiUrl.isEmpty || model.isEmpty) return const [];
-    return SettingsService.instance.providerQuietRules
-        .where((rule) => ProviderQuietRule.matches(rule, apiUrl, model))
-        .toList();
-  }
-
-  List<Widget> _buildProviderQuietRows() {
-    final settings = SettingsService.instance;
-    final rows = <Widget>[];
-
-    void addRow({
-      required String name,
-      required String apiUrl,
-      required String model,
-      bool custom = false,
-    }) {
-      final rules = _rulesForTarget(apiUrl, model);
-      rows.add(
-        ListTile(
-          dense: true,
-          title: Text(name),
-          subtitle: Text(
-            rules.isEmpty
-                ? '未设置'
-                : rules.map((rule) => rule.label).join('、'),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          trailing: const Icon(
-            Icons.arrow_forward_ios,
-            size: 16,
-            color: Color(0xFFCCCCCC),
-          ),
-          onTap: () => _editProviderQuiet(
-            apiUrl: apiUrl,
-            model: model,
-            custom: custom,
-          ),
-        ),
-      );
-      rows.add(_buildDivider());
-    }
-
-    addRow(
-      name: '当前聊天',
-      apiUrl: settings.chatApiUrl,
-      model: settings.chatModel,
-    );
-    for (final profile in settings.modelProfiles) {
-      addRow(name: profile.name, apiUrl: profile.apiUrl, model: profile.model);
-    }
-    addRow(name: '自定义…', apiUrl: '', model: '', custom: true);
-    return rows;
-  }
-
-  Future<void> _editProviderQuiet({
-    required String apiUrl,
-    required String model,
-    bool custom = false,
-  }) async {
-    var targetUrl = apiUrl;
-    var targetModel = model;
-    if (custom) {
-      final result = await showDialog<({String url, String model})>(
-        context: context,
-        builder: (dialogContext) {
-          final urlController = TextEditingController(text: apiUrl);
-          final modelController = TextEditingController(text: model);
-          return AlertDialog(
-            title: const Text('自定义安静时间目标'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: urlController,
-                  decoration: const InputDecoration(labelText: 'API 地址'),
-                ),
-                TextField(
-                  controller: modelController,
-                  decoration: const InputDecoration(labelText: '模型'),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  final url = urlController.text.trim();
-                  final modelName = modelController.text.trim();
-                  if (url.isEmpty || modelName.isEmpty) return;
-                  Navigator.pop(dialogContext, (url: url, model: modelName));
-                },
-                child: const Text('确定'),
-              ),
-            ],
-          );
-        },
-      );
-      if (result == null) return;
-      targetUrl = result.url;
-      targetModel = result.model;
-    }
-    if (!mounted) return;
-
-    final all = SettingsService.instance.providerQuietRules;
-    final targetRules = _rulesForTarget(targetUrl, targetModel);
-    final initial = targetRules.map((rule) => rule.toRule()).toList();
-    final edited = await showQuietRuleEditor(context, initialRules: initial);
-    if (edited == null) return;
-
-    // 保留原规则的 enabled 状态（以相同时间规则为键）
-    String ruleKey(QuietRule rule) =>
-        '${rule.startMinute}:${rule.endMinute}:${rule.repeatType}:'
-        '${([...rule.weekdays]..sort()).join(',')}:${rule.date}';
-    final previousByKey = {
-      for (final rule in targetRules) ruleKey(rule.toRule()): rule,
-    };
-    final updatedTarget = edited.map((rule) {
-      final previous = previousByKey[ruleKey(rule)];
-      return ProviderQuietRule.fromRuleAndTarget(
-        rule: rule,
-        apiUrl: targetUrl,
-        model: targetModel,
-        enabled: previous?.enabled ?? true,
-      );
-    }).toList();
-
-    final kept = all
-        .where(
-          (rule) => !ProviderQuietRule.matches(rule, targetUrl, targetModel),
-        )
-        .toList();
-
-    await SettingsService.instance.updateProviderQuietRules([
-      ...kept,
-      ...updatedTarget,
-    ]);
-    await SettingsService.instance.syncApiSettingsToBackend();
-    if (mounted) setState(() {});
-  }
-
-  Widget _buildModelProfiles() {
-    final profiles = SettingsService.instance.modelProfiles;
-    return RadioGroup<String>(
-      groupValue: _selectedProfileId,
-      onChanged: (profileId) {
-        if (profileId == null) {
-          return;
-        }
-        final profile = profiles.firstWhere(
-          (candidate) => candidate.id == profileId,
-        );
-        _applyModelProfile(profile);
-      },
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text('本地配置档案', style: TextStyle(fontSize: 15)),
-                ),
-                TextButton.icon(
-                  onPressed: _saveCurrentModelProfile,
-                  icon: const Icon(Icons.bookmark_add_outlined, size: 18),
-                  label: const Text('保存当前'),
-                ),
-              ],
-            ),
-          ),
-          if (profiles.isEmpty)
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  '可保存多组模型、API 地址和密钥，随时切换。',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
-                ),
-              ),
-            )
-          else
-            ...profiles.map(
-              (profile) => ListTile(
-                dense: true,
-                leading: Radio<String>(value: profile.id),
-                title: Text(profile.name),
-                subtitle: Text(
-                  '${profile.model}  ·  ${_apiFormatLabel(profile.apiFormat)}  ·  ${profile.apiUrl}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                trailing: IconButton(
-                  tooltip: '删除配置档案',
-                  icon: const Icon(Icons.delete_outline, size: 20),
-                  onPressed: () async {
-                    await SettingsService.instance.deleteModelProfile(
-                      profile.id,
-                    );
-                    if (mounted) setState(() {});
-                  },
-                ),
-                onTap: () => _applyModelProfile(profile),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _applyModelProfile(AiModelProfile profile) async {
-    setState(() {
-      _selectedProfileId = profile.id;
-      _chatUrlController.text = profile.apiUrl;
-      _chatModelController.text = profile.model;
-      _chatKeyController.text = profile.apiKey;
-      _chatApiFormat = profile.apiFormat;
-    });
-    await SettingsService.instance.updateChatApi(
-      url: profile.apiUrl,
-      key: profile.apiKey,
-      model: profile.model,
-      apiFormat: profile.apiFormat,
-    );
-  }
-
-  Future<void> _saveCurrentModelProfile() async {
-    final nameController = TextEditingController(
-      text: _chatModelController.text.trim(),
-    );
-    final name = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('保存模型配置档案'),
-        content: TextField(
-          controller: nameController,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: '档案名称'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, nameController.text.trim()),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    nameController.dispose();
-    if (name == null || name.isEmpty) return;
-    final id = 'profile_${DateTime.now().microsecondsSinceEpoch}';
-    await SettingsService.instance.saveModelProfile(
-      id: id,
-      name: name,
-      url: _chatUrlController.text.trim(),
-      model: _chatModelController.text.trim(),
-      key: _chatKeyController.text.trim(),
-      apiFormat: _chatApiFormat,
-    );
-    if (mounted) setState(() => _selectedProfileId = id);
-  }
-
-  /// 意图识别模型获取按钮
-  Widget _buildVisionModelProfiles() {
-    final profiles = SettingsService.instance.visionModelProfiles;
-    return RadioGroup<String>(
-      groupValue: _selectedVisionProfileId,
-      onChanged: (profileId) {
-        if (profileId == null) return;
-        _applyVisionModelProfile(
-          profiles.firstWhere((candidate) => candidate.id == profileId),
-        );
-      },
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text('识图配置档案', style: TextStyle(fontSize: 15)),
-                ),
-                TextButton.icon(
-                  onPressed: _saveCurrentVisionModelProfile,
-                  icon: const Icon(Icons.bookmark_add_outlined, size: 18),
-                  label: const Text('保存当前'),
-                ),
-              ],
-            ),
-          ),
-          if (profiles.isEmpty)
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 0, 16, 10),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  '可保存多组识图模型、运行模式和接口格式，随时切换。',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
-                ),
-              ),
-            )
-          else
-            ...profiles.map(
-              (profile) => ListTile(
-                dense: true,
-                leading: Radio<String>(value: profile.id),
-                title: Text(profile.name),
-                subtitle: Text(
-                  '${profile.model}  ·  ${_apiFormatLabel(profile.apiFormat)}  ·  ${profile.mode}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                trailing: IconButton(
-                  tooltip: '删除识图配置档案',
-                  icon: const Icon(Icons.delete_outline, size: 20),
-                  onPressed: () async {
-                    await SettingsService.instance.deleteVisionModelProfile(
-                      profile.id,
-                    );
-                    if (mounted) setState(() {});
-                  },
-                ),
-                onTap: () => _applyVisionModelProfile(profile),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _applyVisionModelProfile(VisionModelProfile profile) async {
-    setState(() {
-      _selectedVisionProfileId = profile.id;
-      _visionEnabled = profile.enabled;
-      _visionUrlController.text = profile.apiUrl;
-      _visionKeyController.text = profile.apiKey;
-      _visionModelController.text = profile.model;
-      _visionMode = profile.mode;
-      _visionApiFormat = profile.apiFormat;
-    });
-    await SettingsService.instance.updateVisionApi(
-      enabled: profile.enabled,
-      url: profile.apiUrl,
-      key: profile.apiKey,
-      model: profile.model,
-      mode: profile.mode,
-      apiFormat: profile.apiFormat,
-    );
-  }
-
-  Future<void> _saveCurrentVisionModelProfile() async {
-    final nameController = TextEditingController(
-      text: _visionModelController.text.trim(),
-    );
-    final name = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('保存识图配置档案'),
-        content: TextField(
-          controller: nameController,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: '档案名称'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, nameController.text.trim()),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    nameController.dispose();
-    if (name == null || name.isEmpty) return;
-    final id = 'vision_profile_${DateTime.now().microsecondsSinceEpoch}';
-    await SettingsService.instance.saveVisionModelProfile(
-      id: id,
-      name: name,
-      url: _visionUrlController.text.trim(),
-      key: _visionKeyController.text.trim(),
-      model: _visionModelController.text.trim(),
-      enabled: _visionEnabled,
-      mode: _visionMode,
-      apiFormat: _visionApiFormat,
-    );
-    if (mounted) setState(() => _selectedVisionProfileId = id);
-  }
-
-  Widget _buildIntentModelFetchButton() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('模型列表', style: TextStyle(fontSize: 16)),
-          ),
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: _isLoadingIntentModels ? null : _fetchIntentModels,
-              icon: _isLoadingIntentModels
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.download, size: 18),
-              label: Text(_isLoadingIntentModels ? '获取中...' : '获取模型列表'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFF07C160),
-                side: const BorderSide(color: Color(0xFF07C160)),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 图像识别模型获取按钮
-  Widget _buildVisionModelFetchButton() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('模型列表', style: TextStyle(fontSize: 16)),
-          ),
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: _isLoadingVisionModels ? null : _fetchVisionModels,
-              icon: _isLoadingVisionModels
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.download, size: 18),
-              label: Text(_isLoadingVisionModels ? '获取中...' : '获取模型列表'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFF07C160),
-                side: const BorderSide(color: Color(0xFF07C160)),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 图像识别模型选择器
-  Widget _buildVisionModelSelector() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('模型', style: TextStyle(fontSize: 16)),
-          ),
-          Expanded(
-            child: _visionModels.isEmpty
-                ? TextField(
-                    controller: _visionModelController,
-                    decoration: const InputDecoration(
-                      hintText: 'gpt-4o',
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    style: const TextStyle(fontSize: 16),
-                  )
-                : DropdownButtonFormField<String>(
-                    initialValue:
-                        _visionModels.contains(_visionModelController.text)
-                        ? _visionModelController.text
-                        : null,
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    hint: const Text('选择模型'),
-                    items: _visionModels.map((model) {
-                      return DropdownMenuItem(
-                        value: model,
-                        child: Text(
-                          model,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                      );
-                    }).toList(),
-                    onChanged: (value) {
-                      if (value != null) {
-                        _visionModelController.text = value;
-                      }
-                    },
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 意图识别模型选择器
-  /// 向量记忆模型获取按钮
-  Widget _buildEmbeddingModelFetchButton() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('模型列表', style: TextStyle(fontSize: 16)),
-          ),
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: _isLoadingEmbeddingModels
-                  ? null
-                  : _fetchEmbeddingModels,
-              icon: _isLoadingEmbeddingModels
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.download, size: 18),
-              label: Text(_isLoadingEmbeddingModels ? '获取中...' : '获取模型列表'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFF07C160),
-                side: const BorderSide(color: Color(0xFF07C160)),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 向量记忆模型选择器
-  Widget _buildEmbeddingModelSelector() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('模型', style: TextStyle(fontSize: 16)),
-          ),
-          Expanded(
-            child: _embeddingModels.isEmpty
-                ? TextField(
-                    controller: _embeddingModelController,
-                    decoration: const InputDecoration(
-                      hintText: 'text-embedding-3-small',
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    style: const TextStyle(fontSize: 16),
-                  )
-                : DropdownButtonFormField<String>(
-                    initialValue:
-                        _embeddingModels.contains(
-                          _embeddingModelController.text,
-                        )
-                        ? _embeddingModelController.text
-                        : null,
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    hint: const Text('选择模型'),
-                    items: _embeddingModels.map((model) {
-                      return DropdownMenuItem(
-                        value: model,
-                        child: Text(
-                          model,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                      );
-                    }).toList(),
-                    onChanged: (value) {
-                      if (value != null) {
-                        _embeddingModelController.text = value;
-                      }
-                    },
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildIntentModelSelector() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          const SizedBox(
-            width: 80,
-            child: Text('模型', style: TextStyle(fontSize: 16)),
-          ),
-          Expanded(
-            child: _intentModels.isEmpty
-                ? TextField(
-                    controller: _intentModelController,
-                    decoration: const InputDecoration(
-                      hintText: 'gpt-3.5-turbo',
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    style: const TextStyle(fontSize: 16),
-                  )
-                : DropdownButtonFormField<String>(
-                    initialValue:
-                        _intentModels.contains(_intentModelController.text)
-                        ? _intentModelController.text
-                        : null,
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                    hint: const Text('选择模型'),
-                    items: _intentModels.map((model) {
-                      return DropdownMenuItem(
-                        value: model,
-                        child: Text(
-                          model,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                      );
-                    }).toList(),
-                    onChanged: (value) {
-                      if (value != null) {
-                        _intentModelController.text = value;
-                      }
-                    },
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 获取意图识别模型列表
-  Future<void> _fetchIntentModels() async {
-    final url = _intentUrlController.text.trim();
-    final key = _intentKeyController.text.trim();
-
-    if (url.isEmpty || key.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL 和 API Key')));
-      return;
-    }
-
-    setState(() => _isLoadingIntentModels = true);
-
-    try {
-      // 构建模型列表请求 URL
-      final request = _buildModelsRequest(url, key);
-
-      final response = await SecureBackendClient.getRaw(
-        request.$1,
-        headers: request.$2,
-        includeAuth: false,
-      ).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final models = _readModelIds(jsonDecode(response.body), request.$3);
-
-        setState(() {
-          _intentModels = models;
-          _isLoadingIntentModels = false;
-        });
-
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
-        }
-      } else {
-        throw Exception('HTTP ${response.statusCode}');
+      if (!synced) {
+        _showMessage(context, '已保存到本地，后端同步失败，可稍后重试');
+        return;
       }
-    } catch (e) {
-      debugPrint('Fetch intent models error: $e');
-      if (mounted) {
-        setState(() => _isLoadingIntentModels = false);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
-      }
-    }
-  }
-
-  /// 获取图像识别模型列表
-  Future<void> _fetchVisionModels() async {
-    final url = _visionUrlController.text.trim();
-    final key = _visionKeyController.text.trim();
-
-    if (url.isEmpty || key.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL 和 API Key')));
-      return;
-    }
-
-    setState(() => _isLoadingVisionModels = true);
-
-    try {
-      final request = _buildModelsRequest(
-        url,
-        key,
-        apiFormat: _visionApiFormat,
-      );
-
-      final response = await SecureBackendClient.getRaw(
-        request.$1,
-        headers: request.$2,
-        includeAuth: false,
-      ).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final models = _readModelIds(jsonDecode(response.body), request.$3);
-
-        setState(() {
-          _visionModels = models;
-          if (models.isNotEmpty &&
-              !_visionModels.contains(_visionModelController.text)) {
-            _visionModelController.text = models.first;
-          }
-        });
-
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
-        }
-      } else {
-        throw Exception('HTTP ${response.statusCode}');
-      }
-    } catch (e) {
-      debugPrint('Fetch vision models error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
-      }
-    } finally {
-      setState(() => _isLoadingVisionModels = false);
-    }
-  }
-
-  /// 获取向量记忆模型列表
-  Future<void> _fetchEmbeddingModels() async {
-    final url = _embeddingUrlController.text.trim();
-    final key = _embeddingKeyController.text.trim();
-
-    if (url.isEmpty || key.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请先填写 API URL 和 API Key')));
-      return;
-    }
-
-    setState(() => _isLoadingEmbeddingModels = true);
-
-    try {
-      final request = _buildModelsRequest(url, key);
-
-      final response = await SecureBackendClient.getRaw(
-        request.$1,
-        headers: request.$2,
-        includeAuth: false,
-      ).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final models = _readModelIds(jsonDecode(response.body), request.$3);
-
-        setState(() {
-          _embeddingModels = models;
-          if (models.isNotEmpty &&
-              !_embeddingModels.contains(_embeddingModelController.text)) {
-            _embeddingModelController.text = models.first;
-          }
-        });
-
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('获取到 ${models.length} 个模型')));
-        }
-      } else {
-        throw Exception('HTTP ${response.statusCode}');
-      }
-    } catch (e) {
-      debugPrint('Fetch embedding models error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('获取模型列表失败: $e')));
-      }
-    } finally {
-      setState(() => _isLoadingEmbeddingModels = false);
-    }
-  }
-
-  Future<void> _saveSettings() async {
-    await _saveSettingsLocalOnly();
-
-    final synced = await SettingsService.instance.syncApiSettingsToBackend();
-    if (synced) {
-      if (mounted) {
-        setState(() {
-          _connectionSuccess = true;
-          _connectionError = null;
-        });
-      }
-    }
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(synced ? '设置已保存并同步' : '设置已保存（后端同步失败）'),
-          duration: const Duration(seconds: 1),
-        ),
-      );
       Navigator.pop(context);
+    } catch (error) {
+      if (mounted) _showMessage(context, '保存失败: $error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
-  Future<void> _saveSettingsLocalOnly() async {
-    final settings = SettingsService.instance;
+  Future<void> _saveAsProfile() async {
+    final name = await _askProfileName(context, _model.text.trim());
+    if (name == null || name.isEmpty) return;
+    final id = 'model_profile_${DateTime.now().microsecondsSinceEpoch}';
+    await SettingsService.instance.saveApiProfile(ModelApiProfile(
+      id: id,
+      name: name,
+      apiUrl: _url.text.trim(),
+      model: _model.text.trim(),
+      apiKey: _key.text.trim(),
+      apiFormat: _format,
+      capabilities: {widget.kind.capability},
+      visionMode: widget.kind == ModelSettingsKind.vision ? _visionMode : null,
+    ));
+    if (mounted) setState(() => _profileId = id);
+  }
 
-    // 保存后端服务器地址
-    await settings.updateBackendUrl(_backendUrlController.text.trim());
+  void _applyProfile(String? id) {
+    if (id == null || id.isEmpty) return;
+    final profile = SettingsService.instance
+        .modelProfilesFor(widget.kind.capability)
+        .firstWhere((item) => item.id == id);
+    setState(() {
+      _profileId = profile.id;
+      _url.text = profile.apiUrl;
+      _key.text = profile.apiKey;
+      _model.text = profile.model;
+      _format = profile.apiFormat;
+      if (profile.visionMode != null) _visionMode = profile.visionMode!;
+    });
+  }
 
-    // 保存主聊天 API
-    await settings.updateChatApi(
-      url: _chatUrlController.text.trim(),
-      key: _chatKeyController.text.trim(),
-      model: _chatModelController.text.trim(),
-      apiFormat: _chatApiFormat,
-    );
-
-    // 保存后端鉴权与加密配置
-    await settings.updateBackendSecurity(
-      authToken: _backendTokenController.text.trim(),
-      encryptionSecret: _backendEncryptionSecretController.text.trim(),
-    );
-
-    // 保存意图识别 API
-    await settings.updateIntentApi(
-      enabled: _intentEnabled,
-      url: _intentUrlController.text.trim(),
-      key: _intentKeyController.text.trim(),
-      model: _intentModelController.text.trim(),
-    );
-
-    // 保存图像识别 API
-    await settings.updateVisionApi(
-      enabled: _visionEnabled,
-      url: _visionUrlController.text.trim(),
-      key: _visionKeyController.text.trim(),
-      model: _visionModelController.text.trim(),
-      mode: _visionMode,
-      apiFormat: _visionApiFormat,
-    );
-
-    // 保存向量记忆 API
-    await settings.updateEmbeddingApi(
-      enabled: _embeddingEnabled,
-      url: _embeddingUrlController.text.trim(),
-      key: _embeddingKeyController.text.trim(),
-      model: _embeddingModelController.text.trim(),
+  @override
+  Widget build(BuildContext context) {
+    final profiles = SettingsService.instance.modelProfilesFor(widget.kind.capability);
+    return Scaffold(
+      backgroundColor: const Color(0xFFEDEDED),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFEDEDED),
+        elevation: 0,
+        title: Text(widget.kind.title),
+        actions: [
+          TextButton(onPressed: _saving ? null : _save, child: Text(_saving ? '保存中...' : '保存')),
+        ],
+      ),
+      body: ListView(
+        children: [
+          if (widget.kind.hasToggle) ...[
+            _Section(children: [
+              SwitchListTile(
+                title: Text('启用${widget.kind.title}'),
+                value: _enabled,
+                onChanged: (value) => setState(() => _enabled = value),
+              ),
+            ]),
+            const _SectionGap(),
+          ],
+          _Section(
+            children: [
+              _FieldRow(label: 'API 地址', controller: _url, hint: 'https://api.example.com/v1'),
+              if (widget.kind.hasFormat) ...[
+                const Divider(height: 1),
+                _FormatSelector(value: _format, onChanged: (value) => setState(() => _format = value)),
+              ],
+              const Divider(height: 1),
+              _FieldRow(label: 'API Key', controller: _key, hint: 'sk-xxx', obscure: true),
+              const Divider(height: 1),
+              _ModelRow(controller: _model, models: _models),
+              const Divider(height: 1),
+              _ActionRow(icon: Icons.cloud_download_outlined, label: _fetching ? '获取中...' : '获取模型列表', busy: _fetching, onTap: _fetching ? null : _fetchModels),
+              const Divider(height: 1),
+              _ActionRow(icon: Icons.play_circle_outline, label: _testing ? '测试中...' : '测试当前配置', busy: _testing, onTap: _testing ? null : _test),
+              if (widget.kind.hasVisionMode) ...[
+                const Divider(height: 1),
+                _VisionModeSelector(value: _visionMode, onChanged: (value) => setState(() => _visionMode = value)),
+              ],
+            ],
+          ),
+          const _SectionGap(),
+          _Section(
+            children: [
+              _ProfileSelector(value: _profileId, profiles: profiles, onChanged: _applyProfile),
+              const Divider(height: 1),
+              _ActionRow(icon: Icons.bookmark_add_outlined, label: '保存为模型档案', onTap: _saveAsProfile),
+            ],
+          ),
+          const SizedBox(height: 30),
+        ],
+      ),
     );
   }
 }

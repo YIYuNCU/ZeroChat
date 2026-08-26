@@ -86,6 +86,7 @@ async def call_ai_json(
     max_retries: int = 2,
     require_object: bool = True,
     direct: bool = False,
+    api_format: Optional[str] = None,
 ) -> Dict[str, Any]:
     """调用 AI 并解析其输出为 JSON，解析失败时自动重新请求。
 
@@ -117,6 +118,7 @@ async def call_ai_json(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                api_format=api_format,
             )
         else:
             result = await call_ai(
@@ -126,6 +128,7 @@ async def call_ai_json(
                 api_key=api_key,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                api_format=api_format,
             )
 
         if not result.get("success"):

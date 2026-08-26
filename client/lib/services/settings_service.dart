@@ -46,8 +46,7 @@ class SettingsService extends ChangeNotifier {
   String _chatApiKey = '';
   String _chatModel = 'gpt-3.5-turbo';
   String _chatApiFormat = 'auto';
-  List<AiModelProfile> _modelProfiles = [];
-  List<VisionModelProfile> _visionModelProfiles = [];
+  List<ModelApiProfile> _modelProfiles = [];
   Map<String, String> _roleModelProfileSelections = {};
 
   // 供应商+模型级安静规则（以服务端 settings.json `quiet_rules` 为准）
@@ -58,6 +57,7 @@ class SettingsService extends ChangeNotifier {
   String _intentApiUrl = '';
   String _intentApiKey = '';
   String _intentModel = 'gpt-3.5-turbo';
+  String _intentApiFormat = 'auto';
 
   // 图像识别 API
   bool _visionEnabled = false;
@@ -96,9 +96,13 @@ class SettingsService extends ChangeNotifier {
   String get chatApiKey => _chatApiKey;
   String get chatModel => _chatModel;
   String get chatApiFormat => _chatApiFormat;
-  List<AiModelProfile> get modelProfiles => List.unmodifiable(_modelProfiles);
-  List<VisionModelProfile> get visionModelProfiles =>
-      List.unmodifiable(_visionModelProfiles);
+  List<AiModelProfile> get modelProfiles => List.unmodifiable(
+    _modelProfiles.where((profile) => profile.supports(ModelProfileCapability.chat)),
+  );
+  List<ModelApiProfile> modelProfilesFor(ModelProfileCapability capability) =>
+      List.unmodifiable(
+        _modelProfiles.where((profile) => profile.supports(capability)),
+      );
   List<ProviderQuietRule> get providerQuietRules =>
       List.unmodifiable(_providerQuietRules);
 
@@ -111,6 +115,7 @@ class SettingsService extends ChangeNotifier {
   String get intentApiUrl => _intentApiUrl;
   String get intentApiKey => _intentApiKey;
   String get intentModel => _intentModel;
+  String get intentApiFormat => _intentApiFormat;
 
   bool get visionEnabled => _visionEnabled;
   String get visionApiUrl => _visionApiUrl;
@@ -174,7 +179,6 @@ class SettingsService extends ChangeNotifier {
       StorageService.getString('chat_api_format'),
     );
     await _loadModelProfiles();
-    await _loadVisionModelProfiles();
     _loadRoleModelProfileSelections();
     _loadProviderQuietRules();
 
@@ -183,6 +187,9 @@ class SettingsService extends ChangeNotifier {
     _intentApiUrl = StorageService.getString('intent_api_url') ?? '';
     _intentApiKey = SecureStorageService.getString('intent_api_key');
     _intentModel = StorageService.getString('intent_model') ?? 'gpt-3.5-turbo';
+    _intentApiFormat = normalizeApiFormat(
+      StorageService.getString('intent_api_format'),
+    );
 
     // 图像识别 API
     _visionEnabled = StorageService.getBool('vision_enabled') ?? false;
@@ -370,33 +377,73 @@ class SettingsService extends ChangeNotifier {
   }
 
   Future<void> _loadModelProfiles() async {
-    final raw = StorageService.getJsonList('ai_model_profiles') ?? [];
-    _modelProfiles = raw
-        .map((json) {
-          final id = '${json['id'] ?? ''}';
-          return AiModelProfile.fromJson(
-            json,
-            apiKey: SecureStorageService.getString('ai_model_profile_key_$id'),
-          );
-        })
-        .where((profile) => profile.id.isNotEmpty)
-        .toList();
-  }
+    const storageKey = 'model_api_profiles_v2';
+    final raw = StorageService.getJsonList(storageKey);
+    if (raw != null) {
+      _modelProfiles = raw
+          .map((json) {
+            final id = '${json['id'] ?? ''}';
+            return ModelApiProfile.fromJson(
+              json,
+              apiKey: SecureStorageService.getString('model_api_profile_key_$id'),
+            );
+          })
+          .where((profile) => profile.id.isNotEmpty && profile.capabilities.isNotEmpty)
+          .toList();
+      return;
+    }
 
-  Future<void> _loadVisionModelProfiles() async {
-    final raw = StorageService.getJsonList('vision_model_profiles') ?? [];
-    _visionModelProfiles = raw
-        .map((json) {
-          final id = '${json['id'] ?? ''}';
-          return VisionModelProfile.fromJson(
-            json,
-            apiKey: SecureStorageService.getString(
-              'vision_model_profile_key_$id',
-            ),
-          );
-        })
-        .where((profile) => profile.id.isNotEmpty)
-        .toList();
+    final migrated = <ModelApiProfile>[];
+    final legacyChat = StorageService.getJsonList('ai_model_profiles') ?? [];
+    for (final json in legacyChat) {
+      final id = '${json['id'] ?? ''}';
+      if (id.isEmpty) continue;
+      final profile = ModelApiProfile(
+        id: id,
+        name: '${json['name'] ?? json['model'] ?? ''}',
+        apiUrl: '${json['api_url'] ?? ''}',
+        model: '${json['model'] ?? ''}',
+        apiKey: SecureStorageService.getString('ai_model_profile_key_$id'),
+        apiFormat: normalizeApiFormat(json['api_format']),
+        capabilities: const {ModelProfileCapability.chat},
+      );
+      migrated.add(profile);
+    }
+    final legacyVision = StorageService.getJsonList('vision_model_profiles') ?? [];
+    for (final json in legacyVision) {
+      final legacy = VisionModelProfile.fromJson(
+        json,
+        apiKey: SecureStorageService.getString(
+          'vision_model_profile_key_${json['id'] ?? ''}',
+        ),
+      );
+      if (legacy.id.isEmpty) continue;
+      final id = migrated.any((item) => item.id == legacy.id)
+          ? 'vision_${legacy.id}'
+          : legacy.id;
+      migrated.add(ModelApiProfile(
+        id: id,
+        name: legacy.name,
+        apiUrl: legacy.apiUrl,
+        model: legacy.model,
+        apiKey: legacy.apiKey,
+        apiFormat: legacy.apiFormat,
+        capabilities: const {ModelProfileCapability.vision},
+        visionMode: legacy.mode,
+      ));
+      await SecureStorageService.setString(
+        'model_api_profile_key_$id',
+        legacy.apiKey,
+      );
+    }
+    for (final profile in migrated) {
+      await SecureStorageService.setString(
+        'model_api_profile_key_${profile.id}',
+        profile.apiKey,
+      );
+    }
+    _modelProfiles = migrated;
+    await _persistModelProfiles();
   }
 
   void _loadRoleModelProfileSelections() {
@@ -434,33 +481,34 @@ class SettingsService extends ChangeNotifier {
     required String key,
     String apiFormat = 'auto',
   }) async {
-    final profile = AiModelProfile(
+    await saveApiProfile(ModelApiProfile(
       id: id,
       name: name,
       apiUrl: url,
       model: model,
       apiKey: key,
       apiFormat: apiFormat,
-    );
+      capabilities: const {ModelProfileCapability.chat},
+    ));
+  }
+
+  Future<void> saveApiProfile(ModelApiProfile profile) async {
     _modelProfiles = [
-      ..._modelProfiles.where((item) => item.id != id),
+      ..._modelProfiles.where((item) => item.id != profile.id),
       profile,
     ];
-    await StorageService.setJsonList(
-      'ai_model_profiles',
-      _modelProfiles.map((item) => item.toJson()).toList(),
+    await _persistModelProfiles();
+    await SecureStorageService.setString(
+      'model_api_profile_key_${profile.id}',
+      profile.apiKey,
     );
-    await SecureStorageService.setString('ai_model_profile_key_$id', key);
     notifyListeners();
   }
 
   Future<void> deleteModelProfile(String id) async {
     _modelProfiles = _modelProfiles.where((item) => item.id != id).toList();
-    await StorageService.setJsonList(
-      'ai_model_profiles',
-      _modelProfiles.map((item) => item.toJson()).toList(),
-    );
-    await SecureStorageService.remove('ai_model_profile_key_$id');
+    await _persistModelProfiles();
+    await SecureStorageService.remove('model_api_profile_key_$id');
     _roleModelProfileSelections.removeWhere((_, profileId) => profileId == id);
     await StorageService.setJson(
       'role_model_profile_selections',
@@ -469,48 +517,11 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> saveVisionModelProfile({
-    required String id,
-    required String name,
-    required String url,
-    required String model,
-    required String key,
-    required bool enabled,
-    required String mode,
-    String apiFormat = 'auto',
-  }) async {
-    final profile = VisionModelProfile(
-      id: id,
-      name: name,
-      apiUrl: url,
-      model: model,
-      apiKey: key,
-      enabled: enabled,
-      mode: mode,
-      apiFormat: apiFormat,
-    );
-    _visionModelProfiles = [
-      ..._visionModelProfiles.where((item) => item.id != id),
-      profile,
-    ];
+  Future<void> _persistModelProfiles() async {
     await StorageService.setJsonList(
-      'vision_model_profiles',
-      _visionModelProfiles.map((item) => item.toJson()).toList(),
+      'model_api_profiles_v2',
+      _modelProfiles.map((item) => item.toJson()).toList(),
     );
-    await SecureStorageService.setString('vision_model_profile_key_$id', key);
-    notifyListeners();
-  }
-
-  Future<void> deleteVisionModelProfile(String id) async {
-    _visionModelProfiles = _visionModelProfiles
-        .where((item) => item.id != id)
-        .toList();
-    await StorageService.setJsonList(
-      'vision_model_profiles',
-      _visionModelProfiles.map((item) => item.toJson()).toList(),
-    );
-    await SecureStorageService.remove('vision_model_profile_key_$id');
-    notifyListeners();
   }
 
   /// 更新意图识别 API
@@ -519,21 +530,25 @@ class SettingsService extends ChangeNotifier {
     required String url,
     required String key,
     required String model,
+    String? apiFormat,
   }) async {
     _intentEnabled = enabled;
     _intentApiUrl = url;
     _intentApiKey = key;
     _intentModel = model;
+    if (apiFormat != null) _intentApiFormat = normalizeApiFormat(apiFormat);
     await StorageService.setBool('intent_enabled', enabled);
     await StorageService.setString('intent_api_url', url);
     await SecureStorageService.setString('intent_api_key', key);
     await StorageService.setString('intent_model', model);
+    await StorageService.setString('intent_api_format', _intentApiFormat);
 
     // 实时更新 IntentService 配置
     IntentService.configure(
       apiUrl: url,
       apiKey: key,
       model: model,
+      apiFormat: _intentApiFormat,
       useAi: enabled,
     );
 
@@ -635,6 +650,7 @@ class SettingsService extends ChangeNotifier {
             'intent_api_url': _intentApiUrl,
             'intent_api_key': _intentApiKey,
             'intent_model': _intentModel,
+            'intent_api_format': _intentApiFormat,
             'vision_enabled': _visionEnabled,
             'vision_api_url': _visionApiUrl,
             'vision_api_key': _visionApiKey,
@@ -690,8 +706,9 @@ class SettingsService extends ChangeNotifier {
       final intentKey = (server['intent_api_key']?.toString() ?? '').trim();
       final intentModel =
           (server['intent_model']?.toString() ?? _intentModel).trim().isEmpty
-          ? _intentModel
-          : (server['intent_model']?.toString() ?? _intentModel).trim();
+           ? _intentModel
+           : (server['intent_model']?.toString() ?? _intentModel).trim();
+      final intentApiFormat = normalizeApiFormat(server['intent_api_format']);
 
       final visionEnabled = server['vision_enabled'] == true;
       final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
@@ -745,6 +762,7 @@ class SettingsService extends ChangeNotifier {
         url: intentUrl,
         key: intentKey,
         model: intentModel,
+        apiFormat: intentApiFormat,
       );
       await updateVisionApi(
         enabled: visionEnabled,
@@ -794,8 +812,9 @@ class SettingsService extends ChangeNotifier {
       final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
       final intentModel =
           (server['intent_model']?.toString() ?? _intentModel).trim().isEmpty
-          ? _intentModel
-          : (server['intent_model']?.toString() ?? _intentModel).trim();
+           ? _intentModel
+           : (server['intent_model']?.toString() ?? _intentModel).trim();
+      final intentApiFormat = normalizeApiFormat(server['intent_api_format']);
 
       final visionEnabled = server['vision_enabled'] == true;
       final visionUrl = (server['vision_api_url']?.toString() ?? '').trim();
@@ -846,6 +865,7 @@ class SettingsService extends ChangeNotifier {
         url: intentUrl,
         key: _intentApiKey,
         model: intentModel,
+        apiFormat: intentApiFormat,
       );
       await updateVisionApi(
         enabled: visionEnabled,

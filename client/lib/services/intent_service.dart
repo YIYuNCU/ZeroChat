@@ -39,6 +39,7 @@ class IntentService {
   static String _intentApiUrl = '';
   static String _intentApiKey = '';
   static String _intentModel = 'gpt-3.5-turbo';
+  static String _intentApiFormat = 'auto';
 
   static bool useAiIntent = false;
 
@@ -46,11 +47,13 @@ class IntentService {
     required String apiUrl,
     required String apiKey,
     String model = 'gpt-3.5-turbo',
+    String apiFormat = 'auto',
     bool useAi = false,
   }) {
     _intentApiUrl = apiUrl;
     _intentApiKey = apiKey;
     _intentModel = model;
+    _intentApiFormat = apiFormat;
     useAiIntent = useAi;
     debugPrint('IntentService configured: useAI=$useAiIntent');
   }
@@ -85,6 +88,7 @@ class IntentService {
       'api_url': _intentApiUrl,
       'api_key': _intentApiKey,
       'model': _intentModel,
+      'api_format': _intentApiFormat,
     });
 
     if (data['success'] != true) {

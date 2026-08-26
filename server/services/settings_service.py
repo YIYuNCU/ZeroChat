@@ -39,6 +39,7 @@ def get_default_settings() -> Dict[str, Any]:
         "intent_api_url": "",
         "intent_api_key": "",
         "intent_model": "gpt-3.5-turbo",
+        "intent_api_format": "auto",
         "vision_enabled": False,
         "vision_api_url": "",
         "vision_api_key": "",
@@ -122,6 +123,7 @@ def get_intent_config() -> Dict[str, Any]:
         "api_url": settings.get("intent_api_url", ""),
         "api_key": settings.get("intent_api_key", ""),
         "model": settings.get("intent_model", "gpt-3.5-turbo"),
+        "api_format": _normalize_api_format(settings.get("intent_api_format")),
     }
 
 

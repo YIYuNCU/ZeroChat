@@ -115,6 +115,7 @@ class SettingsUpdate(BaseModel):
     intent_api_url: Optional[str] = None
     intent_api_key: Optional[str] = None
     intent_model: Optional[str] = None
+    intent_api_format: Optional[str] = None
     vision_enabled: Optional[bool] = None
     vision_api_url: Optional[str] = None
     vision_api_key: Optional[str] = None
@@ -165,6 +166,9 @@ async def update_settings(update: SettingsUpdate):
         updates["intent_api_key"] = update.intent_api_key
     if update.intent_model is not None:
         updates["intent_model"] = update.intent_model
+    if update.intent_api_format is not None:
+        value = update.intent_api_format.strip().lower()
+        updates["intent_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
     if update.vision_enabled is not None:
         updates["vision_enabled"] = update.vision_enabled
     if update.vision_api_url is not None:
@@ -318,4 +322,3 @@ async def get_avatar(filename: str):
     if filepath.exists():
         return FileResponse(filepath)
     return {"error": "not found"}
-

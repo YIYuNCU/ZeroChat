@@ -69,6 +69,7 @@ Future<void> _initServicesInBackground() async {
     apiUrl: SettingsService.instance.intentApiUrl,
     apiKey: SettingsService.instance.intentApiKey,
     model: SettingsService.instance.intentModel,
+    apiFormat: SettingsService.instance.intentApiFormat,
     useAi: SettingsService.instance.intentEnabled,
   );
 
