@@ -427,6 +427,73 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
                 roles_router.ROLES_DIR = old_roles_dir
                 memory_service.ROLES_DIR = old_memory_roles_dir
 
+    def test_role_list_uses_runtime_period_start_for_women(self):
+        with TemporaryDirectory() as temp_dir:
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                women_role_id = "role-cycle-women"
+                women_role_dir = roles_router.get_role_dir(women_role_id)
+                women_role_dir.joinpath("profile.json").write_text(
+                    json.dumps(
+                        {
+                            "id": women_role_id,
+                            "gender": "women",
+                            "menstruation_cycle": {
+                                "cycle_length": 30,
+                                "period_length": 6,
+                                "last_period_start": "2026-02-23",
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with memory_service._get_connection(women_role_id) as conn:
+                    memory_service._set_meta(
+                        conn,
+                        "last_period_start",
+                        (date.today()).isoformat(),
+                    )
+
+                men_role_id = "role-cycle-men"
+                men_role_dir = roles_router.get_role_dir(men_role_id)
+                men_role_dir.joinpath("profile.json").write_text(
+                    json.dumps(
+                        {
+                            "id": men_role_id,
+                            "gender": "men",
+                            "menstruation_cycle": {
+                                "cycle_length": 30,
+                                "period_length": 6,
+                                "last_period_start": "2026-02-23",
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                role_items = {
+                    role["id"]: role
+                    for role in roles_router.build_role_items("http://example.test")
+                }
+
+                self.assertEqual(
+                    role_items[women_role_id]["menstruation_cycle"]["last_period_start"],
+                    date.today().isoformat(),
+                )
+                self.assertEqual(
+                    role_items[men_role_id]["menstruation_cycle"]["last_period_start"],
+                    "2026-02-23",
+                )
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
     def test_all_function_tools_use_strict_closed_schemas(self):
         tool_groups = (
             _SCHEDULE_TASK_TOOL,

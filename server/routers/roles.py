@@ -1423,6 +1423,28 @@ def build_role_items(backend_base_url: str) -> List[Dict[str, Any]]:
                 continue
 
             role_copy = dict(role)
+            cycle_data = role_copy.get("menstruation_cycle")
+            if isinstance(cycle_data, dict):
+                try:
+                    from services.memory_service import _get_menstruation_status
+
+                    menstruation_status = _get_menstruation_status(role_dir.name)
+                    period_start = (
+                        menstruation_status.get("period_start")
+                        if menstruation_status
+                        else None
+                    )
+                    if period_start:
+                        # The profile value is the editable cycle anchor. The
+                        # client should display the runtime cycle's latest start.
+                        role_copy["menstruation_cycle"] = {
+                            **cycle_data,
+                            "last_period_start": period_start,
+                        }
+                except Exception:
+                    # Role synchronization must remain available if optional
+                    # runtime cycle state cannot be read.
+                    pass
             role_id = str(role_copy.get("id", "")).strip()
             if role_id and role_copy.get("avatar_url"):
                 role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
