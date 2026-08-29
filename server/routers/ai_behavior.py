@@ -17,7 +17,14 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 
-from core.utils import is_tool_role_id, atomic_write_json, load_moments_posts
+from core.utils import (
+    atomic_write_json,
+    ensure_direct_child_path,
+    ensure_path_within_root,
+    ensure_simple_path_segment,
+    is_tool_role_id,
+    load_moments_posts,
+)
 from services.memory_service import trigger_memory_summary
 
 logger = logging.getLogger(__name__)
@@ -28,6 +35,24 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 MOMENTS_FILE = DATA_DIR / "moments" / "posts.json"
 VISION_UPLOADS_DIR = DATA_DIR / "vision"
+
+
+def _role_dir(role_id: str) -> Path:
+    try:
+        return ensure_direct_child_path(ROLES_DIR, role_id, "role_id")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid role_id") from exc
+
+
+def _emoji_root(role_id: str) -> Path:
+    return ensure_direct_child_path(_role_dir(role_id), "emojis", "emoji root")
+
+
+def _vision_upload_dir(upload_id: str) -> Path:
+    safe_id = ensure_simple_path_segment(upload_id, "upload_id")
+    if len(safe_id) > 80 or not re.fullmatch(r"[A-Za-z0-9_-]+", safe_id):
+        raise ValueError("invalid upload_id")
+    return ensure_direct_child_path(VISION_UPLOADS_DIR, safe_id, "upload_id")
 
 # ========== 数据模型 ==========
 
@@ -95,7 +120,7 @@ def load_role(role_id: str) -> Optional[Dict]:
         if (time() - ts) < _ROLE_CACHE_TTL:
             return data
 
-    profile_file = ROLES_DIR / role_id / "profile.json"
+    profile_file = _role_dir(role_id) / "profile.json"
     if profile_file.exists():
         with open(profile_file, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -107,7 +132,7 @@ def load_role(role_id: str) -> Optional[Dict]:
 
 def _load_role_no_cache(role_id: str) -> Optional[Dict]:
     """强制从磁盘读取（绕过缓存）"""
-    profile_file = ROLES_DIR / role_id / "profile.json"
+    profile_file = _role_dir(role_id) / "profile.json"
     if profile_file.exists():
         with open(profile_file, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -210,7 +235,7 @@ def _load_moments_hint_state(role_id: str) -> Dict[str, Any]:
         "hinted_user_post_ids": [...]       # 用户帖子已注入过的帖子ID
     }
     """
-    state_file = ROLES_DIR / role_id / "moments" / "moments_hint_state.json"
+    state_file = _role_dir(role_id) / "moments" / "moments_hint_state.json"
     if state_file.exists():
         try:
             logger.debug("加载朋友圈提示状态：角色 %s 的状态文件已找到，正在加载...", role_id)
@@ -224,7 +249,7 @@ def _load_moments_hint_state(role_id: str) -> Dict[str, Any]:
 
 
 def _save_moments_hint_state(role_id: str, state: Dict[str, Any]) -> None:
-    state_file = ROLES_DIR / role_id / "moments" / "moments_hint_state.json"
+    state_file = _role_dir(role_id) / "moments" / "moments_hint_state.json"
     try:
         logger.debug(
             "保存朋友圈提示状态：角色 %s 的状态已更新，no_reply=%s user=%s",
@@ -325,14 +350,20 @@ def _build_moments_chat_context(role_id: str, max_items: int = 4) -> str:
 
 def _get_available_emoji_categories(role_id: str) -> List[str]:
     """Scan role emoji folders and return categories that contain at least one image."""
-    emoji_root = ROLES_DIR / role_id / "emojis"
+    emoji_root = _emoji_root(role_id)
     if not emoji_root.exists() or not emoji_root.is_dir():
         return []
 
     image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
     categories: List[str] = []
 
-    for category_dir in emoji_root.iterdir():
+    for entry in emoji_root.iterdir():
+        try:
+            category_dir = ensure_direct_child_path(
+                emoji_root, entry.name, "category"
+            )
+        except ValueError:
+            continue
         if not category_dir.is_dir():
             continue
         has_image = any(
@@ -401,7 +432,9 @@ async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) ->
     selected_category = category_map[detected_emotion]
 
     # 检查对应表情包目录
-    emoji_dir = ROLES_DIR / role_id / "emojis" / selected_category
+    safe_category = ensure_simple_path_segment(selected_category, "category")
+    emoji_root = _emoji_root(role_id)
+    emoji_dir = ensure_direct_child_path(emoji_root, safe_category, "category")
     if not emoji_dir.exists():
         return None
     
@@ -752,7 +785,11 @@ def _resolve_vision_uploads(upload_ids: List[str]) -> tuple[List[str], List[Path
         upload_id = str(raw_id or "").strip()
         if not upload_id:
             continue
-        upload_dir = VISION_UPLOADS_DIR / upload_id
+        try:
+            upload_dir = _vision_upload_dir(upload_id)
+        except ValueError:
+            logger.warning("忽略非法识图上传 ID")
+            continue
         merged_file = upload_dir / "merged.bin"
         if not merged_file.exists():
             continue
@@ -1377,7 +1414,10 @@ async def chat_with_vision(request: VisionRequest):
         image_base64_value = str(request.image_base64 or "").strip()
 
         if upload_id:
-            upload_dir = VISION_UPLOADS_DIR / upload_id
+            try:
+                upload_dir = _vision_upload_dir(upload_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid upload_id") from exc
             merged_file = upload_dir / "merged.bin"
             if not merged_file.exists():
                 raise HTTPException(status_code=400, detail="上传文件不存在或未完成")

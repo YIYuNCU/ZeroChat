@@ -22,6 +22,9 @@ class BackgroundRuntimeService {
   static bool _desiredEnabled = false;
   static bool _watchdogRecovering = false;
   static Timer? _serviceWatchdogTimer;
+  // Background isolate keeps the last server snapshot version so polling
+  // requests transfer metadata only when no messages changed.
+  static String _backgroundChatMd5 = '';
 
   static const String _eventAppForeground = 'appForeground';
   static const String _eventAppBackground = 'appBackground';
@@ -120,9 +123,7 @@ class BackgroundRuntimeService {
     }
 
     final watchdogInterval = _resolveServiceWatchdogInterval();
-    _serviceWatchdogTimer = Timer.periodic(watchdogInterval, (
-      timer,
-    ) async {
+    _serviceWatchdogTimer = Timer.periodic(watchdogInterval, (timer) async {
       if (!_desiredEnabled || !_initialized) {
         return;
       }
@@ -137,7 +138,9 @@ class BackgroundRuntimeService {
         }
 
         _watchdogRecovering = true;
-        debugPrint('BackgroundRuntimeService: watchdog detected stopped service, recovering...');
+        debugPrint(
+          'BackgroundRuntimeService: watchdog detected stopped service, recovering...',
+        );
         await applyEnabled(true);
       } catch (e) {
         debugPrint('BackgroundRuntimeService: watchdog recovery failed: $e');
@@ -172,7 +175,9 @@ class BackgroundRuntimeService {
   static Future<void> _verifyForegroundConnection() async {
     try {
       if (!SecureWebSocketClient.instance.isConnected) {
-        debugPrint('BackgroundRuntimeService: foreground check - reconnecting WebSocket');
+        debugPrint(
+          'BackgroundRuntimeService: foreground check - reconnecting WebSocket',
+        );
         await SecureWebSocketClient.instance.ensureConnected();
       } else {
         // 快速健康检查确认连接有效
@@ -183,7 +188,9 @@ class BackgroundRuntimeService {
         );
       }
     } catch (e) {
-      debugPrint('BackgroundRuntimeService: foreground connection verify failed: $e');
+      debugPrint(
+        'BackgroundRuntimeService: foreground connection verify failed: $e',
+      );
     }
   }
 
@@ -218,7 +225,9 @@ class BackgroundRuntimeService {
     try {
       return await Permission.ignoreBatteryOptimizations.isGranted;
     } catch (e) {
-      debugPrint('BackgroundRuntimeService: check battery exemption failed: $e');
+      debugPrint(
+        'BackgroundRuntimeService: check battery exemption failed: $e',
+      );
       return false;
     }
   }
@@ -236,7 +245,9 @@ class BackgroundRuntimeService {
       final status = await Permission.ignoreBatteryOptimizations.request();
       return status.isGranted;
     } catch (e) {
-      debugPrint('BackgroundRuntimeService: request battery exemption failed: $e');
+      debugPrint(
+        'BackgroundRuntimeService: request battery exemption failed: $e',
+      );
       return false;
     }
   }
@@ -268,8 +279,9 @@ class BackgroundRuntimeService {
       if (appInForeground || !bootstrapReady) {
         return;
       }
-      final type =
-          (event['event_type'] ?? event['type'] ?? '').toString().trim();
+      final type = (event['event_type'] ?? event['type'] ?? '')
+          .toString()
+          .trim();
       if (type != 'task_message' && type != 'proactive_message') {
         return;
       }
@@ -311,13 +323,13 @@ class BackgroundRuntimeService {
         await NotificationService.instance.init();
         bootstrapReady = true;
 
-        serverPushSubscription =
-            SecureWebSocketClient.instance.serverPushStream.listen(
-          (event) => unawaited(handleServerPush(event)),
-          onError: (Object e, StackTrace st) {
-            debugPrint('BackgroundRuntimeService: server push error: $e');
-          },
-        );
+        serverPushSubscription = SecureWebSocketClient.instance.serverPushStream
+            .listen(
+              (event) => unawaited(handleServerPush(event)),
+              onError: (Object e, StackTrace st) {
+                debugPrint('BackgroundRuntimeService: server push error: $e');
+              },
+            );
       } catch (e, st) {
         debugPrint('BackgroundRuntimeService: bootstrap failed: $e');
         debugPrint('$st');
@@ -366,9 +378,7 @@ class BackgroundRuntimeService {
         return;
       }
       final pollInterval = _resolveBackgroundTaskPollInterval();
-      backgroundTaskPollTimer = Timer.periodic(pollInterval, (
-        timer,
-      ) async {
+      backgroundTaskPollTimer = Timer.periodic(pollInterval, (timer) async {
         if (appInForeground || !bootstrapReady) {
           return;
         }
@@ -404,7 +414,9 @@ class BackgroundRuntimeService {
         try {
           await SecureWebSocketClient.instance.ensureConnected();
         } catch (e) {
-          debugPrint('BackgroundRuntimeService: immediate reconnect failed: $e');
+          debugPrint(
+            'BackgroundRuntimeService: immediate reconnect failed: $e',
+          );
         }
       }());
     });
@@ -449,7 +461,9 @@ class BackgroundRuntimeService {
       service.stopSelf();
     });
 
-    foregroundNotificationTimer = Timer.periodic(const Duration(minutes: 5), (timer) async {
+    foregroundNotificationTimer = Timer.periodic(const Duration(minutes: 5), (
+      timer,
+    ) async {
       if (service is AndroidServiceInstance) {
         await service.setForegroundNotificationInfo(
           title: 'ZeroChat 正在后台运行',
@@ -469,9 +483,12 @@ class BackgroundRuntimeService {
     var latestSeen = baseline;
 
     try {
-      final data = await SecureWebSocketClient.instance.request('chat_snapshot', {
-        'client_md5': 'bg_task_poll',
-      });
+      final data = await SecureWebSocketClient.instance.request(
+        'chat_snapshot',
+        {'client_md5': _backgroundChatMd5},
+      );
+      final responseMd5 = data['md5']?.toString() ?? '';
+      if (responseMd5.isNotEmpty) _backgroundChatMd5 = responseMd5;
       if (data['need_sync'] != true) {
         return latestSeen;
       }
@@ -505,14 +522,17 @@ class BackgroundRuntimeService {
           }
 
           // 只处理后端任务/主动触发写入的消息，避免与正常聊天通知重复
-          final isBackgroundMessage = messageId.contains('_task_') || messageId.contains('_proactive');
+          final isBackgroundMessage =
+              messageId.contains('_task_') || messageId.contains('_proactive');
           if (!isBackgroundMessage) {
             continue;
           }
           if (senderId == 'me' || content.isEmpty) {
             continue;
           }
-          if (timestamp.isBefore(baseline.subtract(const Duration(seconds: 1)))) {
+          if (timestamp.isBefore(
+            baseline.subtract(const Duration(seconds: 1)),
+          )) {
             continue;
           }
           if (notifiedTaskMessageIds.contains(messageId)) {
@@ -557,9 +577,12 @@ class BackgroundRuntimeService {
     required Map<String, _PendingRequestState> pendingRequests,
   }) async {
     try {
-      final data = await SecureWebSocketClient.instance.request('chat_snapshot', {
-        'client_md5': 'bg_poll',
-      });
+      final data = await SecureWebSocketClient.instance.request(
+        'chat_snapshot',
+        {'client_md5': _backgroundChatMd5},
+      );
+      final responseMd5 = data['md5']?.toString() ?? '';
+      if (responseMd5.isNotEmpty) _backgroundChatMd5 = responseMd5;
       if (data['need_sync'] != true) {
         return;
       }

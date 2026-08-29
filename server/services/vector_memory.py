@@ -12,6 +12,8 @@ from typing import Optional, List, Dict, Any
 
 import numpy as np
 
+from core.utils import ensure_direct_child_path
+
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -55,7 +57,8 @@ class VectorMemoryStore:
     """
 
     def __init__(self, role_id: str):
-        self.role_id = role_id
+        self.role_dir = ensure_direct_child_path(ROLES_DIR, role_id, "role_id")
+        self.role_id = self.role_dir.name
 
     def _get_conn(self) -> sqlite3.Connection:
         """获取按 (线程, 角色) 复用的连接。
@@ -75,7 +78,7 @@ class VectorMemoryStore:
                 with _VEC_POOL_LOCK:
                     _VEC_CONNECTION_POOL.pop(pool_key, None)
 
-        db_path = ROLES_DIR / self.role_id / "memory.sqlite"
+        db_path = self.role_dir / "memory.sqlite"
         conn = sqlite3.connect(str(db_path), check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")

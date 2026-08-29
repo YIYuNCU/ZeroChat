@@ -33,6 +33,22 @@ SKIP_TYPES = {"sticker", "emoji", "emotion"}
 USER_FORMAT_PATTERN = re.compile(r"^message:.*\ntime:.*$", re.DOTALL)
 
 
+def _role_dir(role_id: str) -> Path:
+    safe_id = str(role_id or "").strip()
+    if (
+        not safe_id
+        or safe_id in {".", ".."}
+        or any(ch in safe_id for ch in ("/", "\\", "\x00"))
+    ):
+        raise ValueError("invalid role_id")
+    roles_root = ROLES_DIR.resolve()
+    expected = roles_root / safe_id
+    resolved = expected.resolve()
+    if resolved != expected:
+        raise ValueError("role_id resolves through a symbolic link")
+    return resolved
+
+
 @dataclass
 class MessageRow:
     role: str
@@ -179,7 +195,7 @@ def _set_meta(conn: sqlite3.Connection, key: str, value: Optional[str]) -> None:
 
 
 def check_id_integrity(role_id: str) -> int:
-    role_dir = ROLES_DIR / role_id
+    role_dir = _role_dir(role_id)
     db_path = role_dir / "memory.sqlite"
     if not db_path.exists():
         print(f"[CHECK-ID] 数据库不存在: {db_path}")
@@ -217,7 +233,7 @@ def check_id_integrity(role_id: str) -> int:
 
 
 def check_user_format(role_id: str) -> int:
-    role_dir = ROLES_DIR / role_id
+    role_dir = _role_dir(role_id)
     db_path = role_dir / "memory.sqlite"
     if not db_path.exists():
         print(f"[CHECK-FORMAT] 数据库不存在: {db_path}")
@@ -259,7 +275,7 @@ def check_user_format(role_id: str) -> int:
 
 
 def migrate(role_id: str, dry_run: bool = False) -> None:
-    role_dir = ROLES_DIR / role_id
+    role_dir = _role_dir(role_id)
     messages_path = role_dir / "chats" / "messages.json"
     db_path = role_dir / "memory.sqlite"
 

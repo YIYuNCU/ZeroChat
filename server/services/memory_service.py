@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import uuid
 
-from core.utils import is_tool_role_id
+from core.utils import ensure_direct_child_path, is_tool_role_id
 from services.vector_memory import VectorMemoryStore, embed_and_store, _extract_semantic_text
 
 logger = logging.getLogger(__name__)
@@ -20,15 +20,19 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 DEFAULT_MEMORY_ORIGIN = "zerochat"
 
+
+def _role_dir(role_id: str) -> Path:
+    return ensure_direct_child_path(ROLES_DIR, role_id, "role_id")
+
 def get_memory_db(role_id: str) -> Path:
-    role_dir = ROLES_DIR / role_id
+    role_dir = _role_dir(role_id)
     role_dir.mkdir(parents=True, exist_ok=True)
-    return role_dir / "memory.sqlite"
+    return ensure_direct_child_path(role_dir, "memory.sqlite", "memory database")
 
 def get_memory_json(role_id: str) -> Path:
-    role_dir = ROLES_DIR / role_id
+    role_dir = _role_dir(role_id)
     role_dir.mkdir(parents=True, exist_ok=True)
-    return role_dir / "memory.json"
+    return ensure_direct_child_path(role_dir, "memory.json", "memory file")
 
 # 连接池缓存 + WAL 模式
 # 键为 (thread_id, role_id)：sqlite3 连接对象不可跨线程并发使用，事件循环线程与线程池
@@ -424,7 +428,7 @@ def _advance_period_cycles(last_start: datetime.date, cycle_length: int, today: 
 
 def _get_menstruation_status(role_id: str) -> Optional[Dict[str, Any]]:
     """Build one consistent, date-specific cycle status for prompt injection."""
-    profile_path = ROLES_DIR / role_id / "profile.json"
+    profile_path = _role_dir(role_id) / "profile.json"
     if not profile_path.exists():
         return None
 
@@ -528,7 +532,7 @@ def _get_menstruation_cycle_info(role_id: str) -> Optional[Dict[str, Any]]:
     }
 
 def _get_role_core_memory(role_id: str) -> str:
-    profile_path = ROLES_DIR / role_id / "profile.json"
+    profile_path = _role_dir(role_id) / "profile.json"
     if not profile_path.exists():
         return ""
 

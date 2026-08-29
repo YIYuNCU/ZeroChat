@@ -11,7 +11,13 @@ from urllib.parse import quote, unquote, urlparse
 
 from fastapi import WebSocket
 
-from core.utils import ensure_path_within_root, ensure_simple_path_segment, is_tool_role_id, mask_api_key
+from core.utils import (
+    ensure_direct_child_path,
+    ensure_path_within_root,
+    ensure_simple_path_segment,
+    is_tool_role_id,
+    mask_api_key,
+)
 from routers import roles, settings
 from services import settings_service
 
@@ -21,6 +27,10 @@ VISION_UPLOADS_DIR = DATA_DIR / "vision"
 EMOJI_TRANSFER_CHUNK_SIZE = 48 * 1024
 EMOJI_TRANSFER_MAX_SIZE = 12 * 1024 * 1024
 EMOJI_TRANSFER_TTL = timedelta(minutes=2)
+WS_IMAGE_UPLOAD_MAX_SIZE = 12 * 1024 * 1024
+VISION_UPLOAD_MAX_SIZE = 20 * 1024 * 1024
+VISION_UPLOAD_MAX_CHUNK_SIZE = 128 * 1024
+VISION_UPLOAD_MAX_CHUNKS = 512
 _EMOJI_TRANSFERS: dict[str, dict] = {}
 _ACTIVE_ASYNC_CHAT_TASKS: dict[str, asyncio.Task] = {}
 
@@ -49,6 +59,22 @@ def _safe_segment(value: str, field_name: str) -> str:
         raise ValueError(f"invalid emoji {field_name}") from exc
 
 
+def _decode_base64_limited(value: str, max_size: int, field_name: str) -> bytes:
+    encoded = str(value or "").strip()
+    if not encoded:
+        raise ValueError(f"{field_name} missing")
+    max_encoded_size = 4 * ((max_size + 2) // 3)
+    if len(encoded) > max_encoded_size:
+        raise ValueError(f"{field_name} exceeds size limit")
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ValueError(f"invalid {field_name}") from exc
+    if len(decoded) > max_size:
+        raise ValueError(f"{field_name} exceeds size limit")
+    return decoded
+
+
 def _resolve_emoji_reference(reference: str) -> Path:
     parsed = urlparse(str(reference or ""))
     if parsed.scheme != "ws-emoji":
@@ -59,8 +85,9 @@ def _resolve_emoji_reference(reference: str) -> Path:
         role_id = _safe_segment(parts[0], "role_id")
         category = _safe_segment(parts[1], "category")
         filename = _safe_segment(parts[2], "filename")
-        root = roles.get_role_dir(role_id) / "emojis"
-        path = ensure_path_within_root(root / category / filename, root)
+        root = roles.get_role_emojis_dir(role_id)
+        category_dir = ensure_direct_child_path(root, category, "category")
+        path = ensure_direct_child_path(category_dir, filename, "filename")
     elif parsed.netloc == "user" and len(parts) == 1:
         emoji_id = parts[0].strip()
         with roles._get_user_emoji_connection() as conn:
@@ -69,7 +96,9 @@ def _resolve_emoji_reference(reference: str) -> Path:
             ).fetchone()
         if not row:
             raise ValueError("emoji not found")
-        path = ensure_path_within_root(Path(str(row["file_path"])), roles.USER_EMOJI_DIR)
+        path = ensure_path_within_root(
+            Path(str(row["file_path"])), roles.get_user_emoji_root()
+        )
     else:
         raise ValueError("invalid emoji reference")
 
@@ -131,7 +160,9 @@ def _safe_upload_id(raw: str) -> str:
 
 
 def _upload_dir(upload_id: str) -> Path:
-    return VISION_UPLOADS_DIR / _safe_upload_id(upload_id)
+    return ensure_direct_child_path(
+        VISION_UPLOADS_DIR, _safe_upload_id(upload_id), "upload_id"
+    )
 
 
 def _list_uploaded_chunk_indices(upload_dir: Path, total_chunks: int) -> list[int]:
@@ -151,6 +182,7 @@ def _cleanup_expired_vision_uploads(ttl_minutes: int = 120):
         if not child.is_dir():
             continue
         try:
+            child = ensure_direct_child_path(VISION_UPLOADS_DIR, child.name, "upload_id")
             mtime = datetime.fromtimestamp(child.stat().st_mtime)
             if mtime < cutoff:
                 shutil.rmtree(child, ignore_errors=True)
@@ -206,8 +238,10 @@ async def _handle_vision_upload_init(payload: dict, backend_base_url: str) -> di
     total_chunks = int(payload.get("total_chunks") or 0)
     mime_type = str(payload.get("mime_type") or "image/jpeg").strip() or "image/jpeg"
     file_size = int(payload.get("file_size") or 0)
-    if total_chunks <= 0:
-        raise ValueError("total_chunks must be > 0")
+    if total_chunks <= 0 or total_chunks > VISION_UPLOAD_MAX_CHUNKS:
+        raise ValueError("invalid total_chunks")
+    if file_size <= 0 or file_size > VISION_UPLOAD_MAX_SIZE:
+        raise ValueError("invalid file_size")
 
     preferred_upload_id = str(payload.get("upload_id") or "").strip()
     upload_id = _safe_upload_id(preferred_upload_id) if preferred_upload_id else uuid.uuid4().hex
@@ -286,10 +320,20 @@ async def _handle_vision_upload_chunk(payload: dict, backend_base_url: str) -> d
     if not chunk_base64:
         raise ValueError("chunk_base64 missing")
 
-    try:
-        chunk_bytes = base64.b64decode(chunk_base64, validate=True)
-    except Exception as exc:
-        raise ValueError("invalid chunk base64") from exc
+    chunk_bytes = _decode_base64_limited(
+        chunk_base64, VISION_UPLOAD_MAX_CHUNK_SIZE, "chunk_base64"
+    )
+
+    declared_size = int(metadata.get("file_size") or 0)
+    if declared_size <= 0 or declared_size > VISION_UPLOAD_MAX_SIZE:
+        raise ValueError("invalid upload metadata")
+    existing_size = sum(
+        path.stat().st_size
+        for path in upload_dir.glob("chunk_*.part")
+        if path.name != f"chunk_{chunk_index:06d}.part" and path.is_file()
+    )
+    if existing_size + len(chunk_bytes) > declared_size:
+        raise ValueError("uploaded data exceeds declared file_size")
 
     chunk_file = upload_dir / f"chunk_{chunk_index:06d}.part"
     with open(chunk_file, "wb") as f:
@@ -319,19 +363,36 @@ async def _handle_vision_upload_commit(payload: dict, backend_base_url: str) -> 
         metadata = json.load(f)
 
     total_chunks = int(metadata.get("total_chunks") or 0)
-    if total_chunks <= 0:
+    declared_size = int(metadata.get("file_size") or 0)
+    if (
+        total_chunks <= 0
+        or total_chunks > VISION_UPLOAD_MAX_CHUNKS
+        or declared_size <= 0
+        or declared_size > VISION_UPLOAD_MAX_SIZE
+    ):
         raise ValueError("invalid upload metadata")
 
     merged_file = upload_dir / "merged.bin"
     total_size = 0
-    with open(merged_file, "wb") as out:
-        for index in range(total_chunks):
-            chunk_file = upload_dir / f"chunk_{index:06d}.part"
-            if not chunk_file.exists():
-                raise ValueError(f"missing chunk: {index}")
-            data = chunk_file.read_bytes()
-            total_size += len(data)
-            out.write(data)
+    try:
+        with open(merged_file, "wb") as out:
+            for index in range(total_chunks):
+                chunk_file = upload_dir / f"chunk_{index:06d}.part"
+                if not chunk_file.exists():
+                    raise ValueError(f"missing chunk: {index}")
+                chunk_size = chunk_file.stat().st_size
+                if chunk_size <= 0 or chunk_size > VISION_UPLOAD_MAX_CHUNK_SIZE:
+                    raise ValueError(f"invalid chunk size: {index}")
+                total_size += chunk_size
+                if total_size > declared_size or total_size > VISION_UPLOAD_MAX_SIZE:
+                    raise ValueError("merged file exceeds size limit")
+                with open(chunk_file, "rb") as source:
+                    shutil.copyfileobj(source, out, length=64 * 1024)
+        if total_size != declared_size:
+            raise ValueError("merged size does not match declared file_size")
+    except Exception:
+        merged_file.unlink(missing_ok=True)
+        raise
 
     metadata["completed"] = True
     metadata["committed_at"] = datetime.now().isoformat()
@@ -440,14 +501,13 @@ async def _handle_settings_avatar_upload(payload: dict, backend_base_url: str) -
     if ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
         ext = "jpg"
 
-    try:
-        file_bytes = base64.b64decode(content_base64, validate=True)
-    except Exception as exc:
-        raise ValueError("invalid base64 content") from exc
+    file_bytes = _decode_base64_limited(
+        content_base64, WS_IMAGE_UPLOAD_MAX_SIZE, "content_base64"
+    )
 
     settings.AVATARS_DIR.mkdir(parents=True, exist_ok=True)
     stored_name = f"user_avatar_{uuid.uuid4().hex[:8]}.{ext}"
-    filepath = settings.AVATARS_DIR / stored_name
+    filepath = ensure_direct_child_path(settings.AVATARS_DIR, stored_name, "filename")
     with open(filepath, "wb") as f:
         f.write(file_bytes)
 
@@ -634,13 +694,12 @@ async def _handle_roles_avatar_upload(payload: dict, backend_base_url: str) -> d
     if ext not in {"jpg", "jpeg", "png", "gif", "webp"}:
         ext = "jpg"
 
-    try:
-        file_bytes = base64.b64decode(content_base64, validate=True)
-    except Exception as exc:
-        raise ValueError("invalid base64 content") from exc
+    file_bytes = _decode_base64_limited(
+        content_base64, WS_IMAGE_UPLOAD_MAX_SIZE, "content_base64"
+    )
 
-    role_dir = roles.get_role_dir(role_id)
-    avatar_path = role_dir / "assets" / f"avatar.{ext}"
+    assets_dir = roles.get_assets_dir(role_id)
+    avatar_path = ensure_direct_child_path(assets_dir, f"avatar.{ext}", "filename")
     with open(avatar_path, "wb") as f:
         f.write(file_bytes)
 
@@ -665,10 +724,9 @@ async def _handle_user_emoji_upload(payload: dict, backend_base_url: str) -> dic
     if not content_base64:
         raise ValueError("content_base64 missing")
 
-    try:
-        file_bytes = base64.b64decode(content_base64, validate=True)
-    except Exception as exc:
-        raise ValueError("invalid base64 content") from exc
+    file_bytes = _decode_base64_limited(
+        content_base64, WS_IMAGE_UPLOAD_MAX_SIZE, "content_base64"
+    )
 
     with roles._get_user_emoji_connection() as conn:
         conn.execute(
@@ -679,9 +737,9 @@ async def _handle_user_emoji_upload(payload: dict, backend_base_url: str) -> dic
         ext = roles._guess_ext(filename)
         emoji_id = f"u_{uuid.uuid4().hex[:12]}"
         saved_filename = f"{emoji_id}.{ext}"
-        category_dir = roles.USER_EMOJI_DIR / category
+        category_dir = roles.get_user_emoji_category_dir(category)
         category_dir.mkdir(parents=True, exist_ok=True)
-        file_path = category_dir / saved_filename
+        file_path = ensure_direct_child_path(category_dir, saved_filename, "filename")
 
         with open(file_path, "wb") as f:
             f.write(file_bytes)
@@ -735,7 +793,10 @@ async def _handle_user_emojis_list(payload: dict, backend_base_url: str) -> dict
         }
         for r in rows
     ]
-    return {"emojis": emojis}
+    digest = hashlib.sha256(json.dumps(emojis, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    if str(payload.get("client_hash") or "").strip() == digest:
+        return {"emojis": [], "hash": digest, "not_modified": True}
+    return {"emojis": emojis, "hash": digest, "not_modified": False}
 
 
 async def _handle_user_emoji_category_delete(payload: dict, backend_base_url: str) -> dict:
@@ -748,13 +809,15 @@ async def _handle_user_emoji_category_delete(payload: dict, backend_base_url: st
             (category,),
         ).fetchall()
         for row in rows:
-            path = Path(str(row["file_path"]))
+            path = ensure_path_within_root(
+                Path(str(row["file_path"])), roles.get_user_emoji_root()
+            )
             if path.exists():
                 path.unlink()
         conn.execute("DELETE FROM user_emojis WHERE category = ?", (category,))
         conn.execute("DELETE FROM user_emoji_categories WHERE name = ?", (category,))
 
-    category_dir = roles.USER_EMOJI_DIR / category
+    category_dir = roles.get_user_emoji_category_dir(category)
     if category_dir.exists():
         shutil.rmtree(category_dir)
     return {"success": True, "category": category}
@@ -931,7 +994,9 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
 
     # --- Inline short delegation handlers ---
     if action == "chat_snapshot":
-        client_md5 = str(payload.get("client_md5") or "").strip()
+        client_md5 = str(
+            payload.get("client_md5") or payload.get("client_hash") or ""
+        ).strip()
         snapshot = roles._build_chats_snapshot(backend_base_url)
         if client_md5 and client_md5 == snapshot["md5"]:
             return {
@@ -947,6 +1012,15 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             "total_chats": snapshot["total_chats"],
             "total_messages": snapshot["total_messages"],
             "chats": snapshot["chats"],
+        }
+
+    if action == "chat_hash":
+        snapshot = roles._build_chats_snapshot(backend_base_url)
+        return {
+            "md5": snapshot["md5"],
+            "hash": snapshot["md5"],
+            "total_chats": snapshot["total_chats"],
+            "total_messages": snapshot["total_messages"],
         }
 
     if action == "save_chat_message":
@@ -1030,7 +1104,10 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         from routers import moments
 
         limit = int(payload.get("limit") or 50)
-        return await moments.list_moments(limit=limit)
+        return await moments.list_moments(
+            limit=limit,
+            client_hash=str(payload.get("client_hash") or "").strip() or None,
+        )
 
     if action == "moments_hash":
         from routers import moments
@@ -1108,7 +1185,18 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
     if action == "tasks_list":
         from routers import tasks
 
-        return await tasks.list_tasks()
+        return await tasks.list_tasks(
+            client_hash=str(payload.get("client_hash") or "").strip() or None
+        )
+
+    if action == "tasks_hash":
+        from routers import tasks
+
+        current = tasks.load_tasks()
+        return {
+            "hash": tasks.compute_tasks_hash(current),
+            "count": len(current),
+        }
 
     if action == "tasks_list_by_role":
         from routers import tasks
@@ -1151,7 +1239,11 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
 
     if action == "roles_list":
         role_items = roles.build_role_items(backend_base_url)
-        return {"roles": role_items, "hash": roles.compute_roles_hash(role_items)}
+        current_hash = roles.compute_roles_hash(role_items)
+        client_hash = str(payload.get("client_hash") or "").strip()
+        if client_hash and client_hash == current_hash:
+            return {"roles": [], "hash": current_hash, "not_modified": True, "count": len(role_items)}
+        return {"roles": role_items, "hash": current_hash, "not_modified": False}
 
     if action == "roles_hash":
         role_items = roles.build_role_items(backend_base_url)
@@ -1160,11 +1252,8 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
     if action == "roles_delete":
         import shutil
 
-        role_id = str(payload.get("role_id") or "").strip()
-        if not role_id:
-            raise ValueError("role_id missing")
-
-        role_dir = roles.ROLES_DIR / role_id
+        role_id = _safe_segment(str(payload.get("role_id") or ""), "role_id")
+        role_dir = ensure_direct_child_path(roles.ROLES_DIR, role_id, "role_id")
         if role_dir.exists():
             shutil.rmtree(role_dir)
         return {"success": True}
@@ -1301,15 +1390,16 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
     if action == "emoji_random":
         import random
 
-        role_id = str(payload.get("role_id") or "").strip()
-        emotion = str(payload.get("emotion") or "").strip().lower()
-        if not role_id or not emotion:
-            raise ValueError("role_id or emotion missing")
+        role_id = _safe_segment(str(payload.get("role_id") or ""), "role_id")
+        emotion = _safe_segment(
+            str(payload.get("emotion") or "").strip().lower(), "emotion"
+        )
         # 云端表情分类不参与随机抽取（仅按精确文件名投递）
         if emotion == "__cloud__":
             return {"found": False, "emotion": emotion}
 
-        emoji_dir = roles.ROLES_DIR / role_id / "emojis" / emotion
+        emoji_root = roles.get_role_emojis_dir(role_id)
+        emoji_dir = ensure_direct_child_path(emoji_root, emotion, "emotion")
         if not emoji_dir.exists():
             return {"found": False, "emotion": emotion}
 
@@ -1328,17 +1418,20 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
 
     if action == "role_emoji_categories_list":
         role_id = str(payload.get("role_id") or "").strip()
-        emojis_dir = roles.get_role_dir(role_id) / "emojis"
+        emojis_dir = roles.get_role_emojis_dir(role_id)
         categories = sorted([
             d.name for d in emojis_dir.iterdir()
             if d.is_dir() and d.name != "__cloud__"
         ]) if emojis_dir.exists() else []
-        return {"role_id": role_id, "categories": categories}
+        digest = hashlib.sha256(json.dumps(categories, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if str(payload.get("client_hash") or "").strip() == digest:
+            return {"role_id": role_id, "categories": [], "hash": digest, "not_modified": True}
+        return {"role_id": role_id, "categories": categories, "hash": digest, "not_modified": False}
 
     if action == "role_emoji_category_create":
         role_id = str(payload.get("role_id") or "").strip()
         category = roles._normalize_category_name(str(payload.get("category") or ""))
-        category_dir = roles.get_role_dir(role_id) / "emojis" / category
+        category_dir = roles.get_role_emoji_category_dir(role_id, category)
         category_dir.mkdir(parents=True, exist_ok=True)
         return {"success": True, "role_id": role_id, "category": category}
 
@@ -1347,7 +1440,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
 
         role_id = str(payload.get("role_id") or "").strip()
         category = roles._normalize_category_name(str(payload.get("category") or ""))
-        category_dir = roles.get_role_dir(role_id) / "emojis" / category
+        category_dir = roles.get_role_emoji_category_dir(role_id, category)
         if not category_dir.exists():
             raise ValueError("分类不存在")
         shutil.rmtree(category_dir)
@@ -1358,10 +1451,10 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         category = roles._normalize_category_name(str(payload.get("category") or ""))
         # 云端表情分类不在表情管理 UI 中列举
         if category == "__cloud__":
-            return {"role_id": role_id, "category": category, "emojis": []}
-        emoji_dir = roles.get_role_dir(role_id) / "emojis" / category
+            return {"role_id": role_id, "category": category, "emojis": [], "hash": hashlib.sha256(b"[]").hexdigest()}
+        emoji_dir = roles.get_role_emoji_category_dir(role_id, category)
         if not emoji_dir.exists():
-            return {"role_id": role_id, "category": category, "emojis": []}
+            return {"role_id": role_id, "category": category, "emojis": [], "hash": hashlib.sha256(b"[]").hexdigest()}
 
         supported_ext = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
         files = sorted(
@@ -1377,7 +1470,10 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             }
             for f in files
         ]
-        return {"role_id": role_id, "category": category, "emojis": emojis}
+        digest = hashlib.sha256(json.dumps(emojis, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if str(payload.get("client_hash") or "").strip() == digest:
+            return {"role_id": role_id, "category": category, "emojis": [], "hash": digest, "not_modified": True}
+        return {"role_id": role_id, "category": category, "emojis": emojis, "hash": digest, "not_modified": False}
 
     if action == "role_emoji_upload":
         role_id = str(payload.get("role_id") or "").strip()
@@ -1387,16 +1483,15 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         if not content_base64:
             raise ValueError("content_base64 missing")
 
-        try:
-            file_bytes = base64.b64decode(content_base64, validate=True)
-        except Exception as exc:
-            raise ValueError("invalid base64 content") from exc
+        file_bytes = _decode_base64_limited(
+            content_base64, WS_IMAGE_UPLOAD_MAX_SIZE, "content_base64"
+        )
 
-        emoji_dir = roles.get_role_dir(role_id) / "emojis" / category
+        emoji_dir = roles.get_role_emoji_category_dir(role_id, category)
         emoji_dir.mkdir(parents=True, exist_ok=True)
         ext = roles._guess_ext(filename)
         saved_filename = f"emoji_{uuid.uuid4().hex[:10]}.{ext}"
-        file_path = emoji_dir / saved_filename
+        file_path = ensure_direct_child_path(emoji_dir, saved_filename, "filename")
         with open(file_path, "wb") as f:
             f.write(file_bytes)
 
@@ -1417,7 +1512,8 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         filename = str(payload.get("filename") or "").strip()
         if "/" in filename or "\\" in filename or ".." in filename:
             raise ValueError("文件名不合法")
-        file_path = roles.get_role_dir(role_id) / "emojis" / category / filename
+        emoji_dir = roles.get_role_emoji_category_dir(role_id, category)
+        file_path = ensure_direct_child_path(emoji_dir, filename, "filename")
         if not file_path.exists():
             raise ValueError("表情不存在")
         file_path.unlink()
@@ -1428,7 +1524,11 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             rows = conn.execute(
                 "SELECT name FROM user_emoji_categories ORDER BY created_at ASC"
             ).fetchall()
-        return {"categories": [str(r["name"]) for r in rows]}
+        categories = [str(r["name"]) for r in rows]
+        digest = hashlib.sha256(json.dumps(categories, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if str(payload.get("client_hash") or "").strip() == digest:
+            return {"categories": [], "hash": digest, "not_modified": True}
+        return {"categories": categories, "hash": digest, "not_modified": False}
 
     if action == "user_emoji_category_create":
         category = roles._normalize_category_name(str(payload.get("category") or ""))
@@ -1437,7 +1537,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
                 "INSERT OR IGNORE INTO user_emoji_categories(name, created_at) VALUES(?, ?)",
                 (category, datetime.now().isoformat()),
             )
-        (roles.USER_EMOJI_DIR / category).mkdir(parents=True, exist_ok=True)
+        roles.get_user_emoji_category_dir(category).mkdir(parents=True, exist_ok=True)
         return {"success": True, "category": category}
 
     if action == "user_emoji_delete":
@@ -1450,7 +1550,9 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
             if not row:
                 raise ValueError("表情不存在")
 
-            file_path = Path(str(row["file_path"]))
+            file_path = ensure_path_within_root(
+                Path(str(row["file_path"])), roles.get_user_emoji_root()
+            )
             if file_path.exists():
                 file_path.unlink()
 

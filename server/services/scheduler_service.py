@@ -17,7 +17,14 @@ from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
 
-from core.utils import is_tool_role_id, load_moments_posts, atomic_write_json
+from core.utils import (
+    atomic_write_json,
+    ensure_direct_child_path,
+    ensure_path_within_root,
+    ensure_simple_path_segment,
+    is_tool_role_id,
+    load_moments_posts,
+)
 from core.quiet_rules import (
     normalize_quiet_rule_dict,
     provider_rule_matches,
@@ -35,6 +42,10 @@ FOLLOWUPS_FILE = TASKS_DIR / "followups.json"
 # 全局调度器实例
 _scheduler: Optional[AsyncIOScheduler] = None
 _event_callback: Optional[Callable] = None
+
+
+def _role_dir(role_id: str) -> Path:
+    return ensure_direct_child_path(ROLES_DIR, role_id, "role_id")
 
 def get_scheduler() -> AsyncIOScheduler:
     global _scheduler
@@ -74,7 +85,11 @@ def _init_proactive_jobs():
     if not ROLES_DIR.exists():
         return
     
-    for role_dir in ROLES_DIR.iterdir():
+    for entry in ROLES_DIR.iterdir():
+        try:
+            role_dir = ensure_direct_child_path(ROLES_DIR, entry.name, "role_id")
+        except ValueError:
+            continue
         if role_dir.is_dir():
             schedule_proactive_for_role(role_dir.name)
 
@@ -118,7 +133,7 @@ def _get_quiet_rules(proactive_config: Dict) -> List[Dict]:
 
 def _load_role_profile(role_id: str) -> Optional[Dict]:
     """Load a role profile from disk."""
-    profile_file = ROLES_DIR / role_id / "profile.json"
+    profile_file = _role_dir(role_id) / "profile.json"
     if not profile_file.exists():
         return None
     try:
@@ -215,7 +230,7 @@ def schedule_proactive_for_role(role_id: str, *, reset: bool = False):
         scheduler.remove_job(job_id)
     
     # 加载角色配置
-    profile_file = ROLES_DIR / role_id / "profile.json"
+    profile_file = _role_dir(role_id) / "profile.json"
     if not profile_file.exists():
         return
     
@@ -692,10 +707,14 @@ def _load_non_tool_roles() -> List[Dict]:
         return []
 
     roles: List[Dict] = []
-    for role_dir in ROLES_DIR.iterdir():
+    for entry in ROLES_DIR.iterdir():
+        try:
+            role_dir = ensure_direct_child_path(ROLES_DIR, entry.name, "role_id")
+        except ValueError:
+            continue
         if not role_dir.is_dir():
             continue
-        profile_file = role_dir / "profile.json"
+        profile_file = ensure_direct_child_path(role_dir, "profile.json", "profile file")
         if not profile_file.exists():
             continue
         try:

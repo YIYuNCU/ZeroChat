@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from core.utils import ensure_direct_child_path
+
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 
@@ -16,7 +18,8 @@ STATS_BLOCK_RE = re.compile(r"<数值>(.*?)</数值>", re.DOTALL)
 
 
 def _state_file(role_id: str) -> Path:
-    return ROLES_DIR / role_id / "stats_state.json"
+    role_dir = ensure_direct_child_path(ROLES_DIR, role_id, "role_id")
+    return ensure_direct_child_path(role_dir, "stats_state.json", "stats file")
 
 
 def _stats_config(role_data: Dict[str, Any]) -> Dict[str, Any]:

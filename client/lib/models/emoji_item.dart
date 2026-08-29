@@ -35,4 +35,12 @@ class EmojiItem {
       isAi: false,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'category': category,
+    'url': url,
+    if (tag != null) 'tag': tag,
+    if (filename != null) 'filename': filename,
+  };
 }

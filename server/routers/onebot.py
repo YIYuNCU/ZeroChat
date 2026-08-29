@@ -21,13 +21,26 @@ from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSoc
 from pydantic import BaseModel
 
 from transport.onebot_ws import manager as ws_manager
-from core.utils import is_safe_external_url
+from core.utils import (
+    ensure_direct_child_path,
+    ensure_path_within_root,
+    ensure_simple_path_segment,
+    is_safe_external_url,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
+
+
+def _role_dir(role_id: str) -> Path:
+    return ensure_direct_child_path(ROLES_DIR, role_id, "role_id")
+
+
+def _emoji_root(role_id: str) -> Path:
+    return ensure_direct_child_path(_role_dir(role_id), "emojis", "emoji root")
 
 AGG_WINDOW = 15.0  # 消息聚合窗口（秒）
 SERVER_URL_FALLBACK = "http://127.0.0.1:8000"
@@ -384,6 +397,7 @@ async def _describe_onebot_images(image_urls: List[str]) -> List[str]:
 
     descriptions: List[str] = []
     max_images = 3  # 限制处理数量避免过长延迟
+    max_image_bytes = 12 * 1024 * 1024
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for url in image_urls[:max_images]:
@@ -393,12 +407,26 @@ async def _describe_onebot_images(image_urls: List[str]) -> List[str]:
                 continue
             try:
                 # 从 QQ CDN 下载图片
-                resp = await client.get(url, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": "https://qq.com",
-                })
-                resp.raise_for_status()
-                image_bytes = resp.content
+                async with client.stream(
+                    "GET",
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": "https://qq.com",
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    content_length = int(resp.headers.get("content-length") or 0)
+                    if content_length > max_image_bytes:
+                        raise ValueError("OneBot image exceeds size limit")
+                    chunks = []
+                    downloaded = 0
+                    async for chunk in resp.aiter_bytes(64 * 1024):
+                        downloaded += len(chunk)
+                        if downloaded > max_image_bytes:
+                            raise ValueError("OneBot image exceeds size limit")
+                        chunks.append(chunk)
+                    image_bytes = b"".join(chunks)
                 if not image_bytes:
                     continue
 
@@ -453,8 +481,9 @@ def _resolve_emojis(emotions: List[Any], role_id: str) -> List[Path]:
             try:
                 safe_cat = ensure_simple_path_segment(category, "category")
                 safe_name = ensure_simple_path_segment(filename, "filename")
-                root = ROLES_DIR / role_id / "emojis"
-                path = ensure_path_within_root(root / safe_cat / safe_name, root)
+                root = _emoji_root(role_id)
+                category_dir = ensure_direct_child_path(root, safe_cat, "category")
+                path = ensure_direct_child_path(category_dir, safe_name, "filename")
             except ValueError:
                 continue
             if path.exists() and path.is_file():
@@ -597,7 +626,7 @@ def _build_conversation_key(transformed: Dict[str, Any]) -> str:
 
 def _persist_onebot_config(role_id: str, onebot_config: Dict):
     """将 onebot_config 变更写回 profile.json"""
-    profile_file = ROLES_DIR / role_id / "profile.json"
+    profile_file = _role_dir(role_id) / "profile.json"
     try:
         with open(profile_file, "r", encoding="utf-8") as f:
             role_data = json.load(f)
@@ -1132,7 +1161,13 @@ async def onebot_ws_endpoint(websocket: WebSocket, role_id: str):
         return
 
     # 加载角色配置
-    profile_file = ROLES_DIR / role_id / "profile.json"
+    try:
+        role_dir = _role_dir(role_id)
+    except ValueError:
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Invalid role_id")
+        return
+    profile_file = role_dir / "profile.json"
     if not profile_file.exists():
         logger.warning(f"OneBot WS 拒绝: 角色 {role_id} 不存在")
         await websocket.accept()
@@ -1347,7 +1382,11 @@ async def handle_onebot_event(
     if not CONFIG.get("onebot_enabled", True):
         raise HTTPException(status_code=403, detail="OneBot interface disabled")
 
-    profile_file = ROLES_DIR / role_id / "profile.json"
+    try:
+        role_dir = _role_dir(role_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid role_id") from exc
+    profile_file = role_dir / "profile.json"
     if not profile_file.exists():
         raise HTTPException(status_code=404, detail=f"角色 {role_id} 不存在")
 

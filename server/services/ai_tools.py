@@ -10,12 +10,26 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from core.utils import ensure_direct_child_path
 from services import scheduler_service
 
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 TASKS_FILE = DATA_DIR / "tasks" / "scheduled.json"
+ROLES_DIR = DATA_DIR / "roles"
+
+
+def _role_dir(role_id: str) -> Path:
+    return ensure_direct_child_path(ROLES_DIR, role_id, "role_id")
+
+
+def _emoji_root(role_id: str) -> Path:
+    return ensure_direct_child_path(_role_dir(role_id), "emojis", "emoji root")
+
+
+def _emoji_dir(role_id: str, emotion: str) -> Path:
+    return ensure_direct_child_path(_emoji_root(role_id), emotion, "emotion")
 
 # ========== 工具定义 ==========
 
@@ -284,7 +298,7 @@ async def execute_continue_if_no_reply(
         return "设置失败：prompt 不能为空，请说明续写时想继续说什么"
 
     # 读取角色续写配置
-    profile_file = DATA_DIR / "roles" / role_id / "profile.json"
+    profile_file = _role_dir(role_id) / "profile.json"
     followup_config = {}
     try:
         if profile_file.exists():
@@ -335,7 +349,7 @@ async def execute_continue_if_no_reply(
 async def execute_block_user(role_data: Dict, user_id: str, reason: str) -> str:
     """屏蔽用户，返回结果描述"""
     role_id = role_data.get("id", "")
-    profile_file = DATA_DIR / "roles" / role_id / "profile.json"
+    profile_file = _role_dir(role_id) / "profile.json"
 
     try:
         with open(profile_file, "r", encoding="utf-8") as f:
@@ -701,7 +715,7 @@ def _pick_emoji_file(role_id: str, emotion: str) -> Optional[Path]:
     """从角色的表情目录中随机选取一个表情文件，目录不存在或为空时返回 None"""
     if emotion == CLOUD_EMOJI_CATEGORY:
         return None
-    emoji_dir = DATA_DIR / "roles" / role_id / "emojis" / emotion
+    emoji_dir = _emoji_dir(role_id, emotion)
     if not emoji_dir.exists() or not emoji_dir.is_dir():
         return None
     files = [f for f in emoji_dir.iterdir() if f.is_file() and f.suffix.lower() in _IMAGE_EXTS]
@@ -710,15 +724,27 @@ def _pick_emoji_file(role_id: str, emotion: str) -> Optional[Path]:
 
 def _get_available_emotions(role_id: str) -> List[str]:
     """扫描角色可用的情绪类别（有图片文件的目录）"""
-    emoji_root = DATA_DIR / "roles" / role_id / "emojis"
+    emoji_root = _emoji_root(role_id)
     if not emoji_root.exists():
         return []
-    return [
-        d.name for d in emoji_root.iterdir()
-        if d.is_dir() and d.name != CLOUD_EMOJI_CATEGORY and any(
-            f.is_file() and f.suffix.lower() in _IMAGE_EXTS for f in d.iterdir()
-        )
-    ]
+    available = []
+    for entry in emoji_root.iterdir():
+        try:
+            category_dir = ensure_direct_child_path(
+                emoji_root, entry.name, "emotion"
+            )
+        except ValueError:
+            continue
+        if (
+            category_dir.is_dir()
+            and category_dir.name != CLOUD_EMOJI_CATEGORY
+            and any(
+                f.is_file() and f.suffix.lower() in _IMAGE_EXTS
+                for f in category_dir.iterdir()
+            )
+        ):
+            available.append(category_dir.name)
+    return available
 
 
 async def execute_send_emotion_emoji(role_data: Dict, emotion: str) -> str:
@@ -732,7 +758,7 @@ async def execute_send_emotion_emoji(role_data: Dict, emotion: str) -> str:
         return f"[{emotion}]"
 
     # 目录不存在或为空时，提示可用情绪
-    emoji_dir = DATA_DIR / "roles" / role_id / "emojis" / emotion
+    emoji_dir = _emoji_dir(role_id, emotion)
     available = _get_available_emotions(role_id)
     hint = f"，可用情绪: {', '.join(available)}" if available else ""
     if emoji_dir.exists() and emoji_dir.is_dir():

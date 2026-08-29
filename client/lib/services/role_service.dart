@@ -26,6 +26,7 @@ class RoleService {
 
   /// 本地角色列表 hash（与后端 roles_hash 比对，避免无变化时全量拉取）
   static String _localRolesHash = '';
+  static bool _hasValidLocalCache = false;
 
   /// 进行中的角色同步（in-flight 去重）
   static Future<bool>? _inFlightSync;
@@ -58,6 +59,7 @@ class RoleService {
   /// 加载角色列表
   static Future<void> _loadRoles() async {
     final jsonList = StorageService.getJsonList(StorageService.keyRoles);
+    _hasValidLocalCache = jsonList != null;
     if (jsonList != null) {
       _roles.clear();
       for (final json in jsonList) {
@@ -67,6 +69,7 @@ class RoleService {
             role.copyWith(avatarUrl: _normalizeAvatarUrl(role.avatarUrl ?? '')),
           );
         } catch (e) {
+          _hasValidLocalCache = false;
           debugPrint('Error loading role: $e');
         }
       }
@@ -78,6 +81,10 @@ class RoleService {
     }
     _localRolesHash =
         StorageService.getString(StorageService.keyRolesHash) ?? '';
+    if (!_hasValidLocalCache) {
+      _localRolesHash = '';
+      await StorageService.remove(StorageService.keyRolesHash);
+    }
   }
 
   /// 保存角色列表
@@ -314,8 +321,21 @@ class RoleService {
     try {
       final response = await SecureWebSocketClient.instance.request(
         'roles_list',
-        const <String, dynamic>{},
+        _localRolesHash.isEmpty || !_hasValidLocalCache
+            ? const <String, dynamic>{}
+            : {'client_hash': _localRolesHash},
       );
+      if (response['not_modified'] == true) {
+        final responseHash = response['hash']?.toString() ?? '';
+        if (responseHash.isNotEmpty && responseHash != _localRolesHash) {
+          _localRolesHash = responseHash;
+          await StorageService.setString(
+            StorageService.keyRolesHash,
+            _localRolesHash,
+          );
+        }
+        return false;
+      }
       if (response['roles'] != null) {
         final List<dynamic> rolesJson = response['roles'];
         for (final json in rolesJson) {
@@ -384,9 +404,7 @@ class RoleService {
                   : const ProactiveConfig(),
               followupConfig: json['followup_config'] is Map
                   ? FollowupConfig.fromJson(
-                      Map<String, dynamic>.from(
-                        json['followup_config'] as Map,
-                      ),
+                      Map<String, dynamic>.from(json['followup_config'] as Map),
                     )
                   : const FollowupConfig(),
             );
@@ -436,6 +454,7 @@ class RoleService {
         // 采用后端下发的 hash（若有），保证与后端 roles_hash 一致
         final backendHash = response['hash']?.toString();
         await _saveRoles(backendHash: backendHash);
+        _hasValidLocalCache = true;
         debugPrint(
           'RoleService: Synced ${rolesJson.length} roles from backend',
         );
@@ -507,13 +526,13 @@ class RoleService {
           'persona': role.description,
           'core_memory': role.coreMemory,
           'ai_model': role.aiModel,
-           'ai_api_url': role.aiApiUrl,
-           'ai_api_key': role.aiApiKey,
-           'ai_temperature': role.aiTemperature,
-           'ai_timeout_seconds': role.aiTimeoutSeconds,
-           'ai_reasoning_effort': role.aiReasoningEffort,
-           'ai_stream': role.aiStream,
-           'gender': role.gender,
+          'ai_api_url': role.aiApiUrl,
+          'ai_api_key': role.aiApiKey,
+          'ai_temperature': role.aiTemperature,
+          'ai_timeout_seconds': role.aiTimeoutSeconds,
+          'ai_reasoning_effort': role.aiReasoningEffort,
+          'ai_stream': role.aiStream,
+          'gender': role.gender,
           'menstruation_cycle': role.menstruationCycle,
           'temperature': role.temperature,
           'onebot_config': role.onebotConfig.toJson(),

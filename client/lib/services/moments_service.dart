@@ -20,6 +20,7 @@ class MomentsService extends ChangeNotifier {
 
   List<MomentPost> _posts = [];
   String _localHash = '';
+  bool _hasValidLocalCache = false;
 
   /// 同类请求去重：全量拉取优先于 hash 校验，保证推送不会被校验请求吞掉。
   Future<bool>? _inFlightHashSync;
@@ -134,12 +135,22 @@ class MomentsService extends ChangeNotifier {
   Future<void> _loadPosts() async {
     final jsonList = StorageService.getJsonList(_storageKey);
     _localHash = StorageService.getString(_hashStorageKey) ?? '';
+    _hasValidLocalCache = jsonList != null;
     if (jsonList != null) {
-      _posts = jsonList.map((json) => MomentPost.fromJson(json)).toList();
-      _dedupePostsInMemory();
-      if (_localHash.isEmpty) {
-        _localHash = _computePostsHashFromJson(jsonList);
+      try {
+        _posts = jsonList.map((json) => MomentPost.fromJson(json)).toList();
+        _dedupePostsInMemory();
+        if (_localHash.isEmpty) {
+          _localHash = _computePostsHashFromJson(jsonList);
+        }
+      } catch (e) {
+        _hasValidLocalCache = false;
+        debugPrint('MomentsService: Invalid local cache: $e');
       }
+    }
+    if (!_hasValidLocalCache) {
+      _localHash = '';
+      await StorageService.remove(_hashStorageKey);
     }
   }
 
@@ -345,10 +356,7 @@ class MomentsService extends ChangeNotifier {
   // ========== 后端同步 ==========
 
   /// 从后端获取朋友圈列表
-  Future<bool> fetchFromBackend({
-    int limit = 50,
-    String? expectedHash,
-  }) async {
+  Future<bool> fetchFromBackend({int limit = 50, String? expectedHash}) async {
     final inFlight = _inFlightFullFetch;
     if (inFlight != null) {
       return inFlight;
@@ -370,13 +378,24 @@ class MomentsService extends ChangeNotifier {
     String? expectedHash,
   }) async {
     try {
-      final response = await SecureWebSocketClient.instance.request(
-        'moments_list',
-        {'limit': limit},
-      );
+      final response = await SecureWebSocketClient.instance
+          .request('moments_list', {
+            'limit': limit,
+            if (_localHash.isNotEmpty && _hasValidLocalCache)
+              'client_hash': _localHash,
+          });
+      final responseHash = response['hash']?.toString();
+      if (response['not_modified'] == true) {
+        if (responseHash != null &&
+            responseHash.isNotEmpty &&
+            responseHash != _localHash) {
+          _localHash = responseHash;
+          await StorageService.setString(_hashStorageKey, _localHash);
+        }
+        return false;
+      }
       if (response['moments'] != null) {
         final List<dynamic> momentsJson = response['moments'];
-        final responseHash = response['hash']?.toString();
         final backendPosts = <MomentPost>[];
 
         for (final json in momentsJson) {
@@ -392,6 +411,7 @@ class MomentsService extends ChangeNotifier {
         _posts = backendPosts;
         _dedupePostsInMemory();
         await _savePosts(hash: expectedHash ?? responseHash);
+        _hasValidLocalCache = true;
         notifyListeners();
         debugPrint(
           'MomentsService: Synced ${momentsJson.length} moments from backend',
@@ -407,15 +427,13 @@ class MomentsService extends ChangeNotifier {
   /// 发布动态到后端
   Future<MomentPost?> publishToBackend(MomentPost post) async {
     try {
-      final payload = await SecureWebSocketClient.instance.request(
-        'moments_create',
-        {
-          'author_id': post.authorId,
-          'author_name': post.authorName,
-          'content': post.content,
-          'image_urls': post.imageUrls,
-        },
-      );
+      final payload = await SecureWebSocketClient.instance
+          .request('moments_create', {
+            'author_id': post.authorId,
+            'author_name': post.authorName,
+            'content': post.content,
+            'image_urls': post.imageUrls,
+          });
       final serverPost = _parseBackendMoment(payload);
       await fetchFromBackend();
       return serverPost;

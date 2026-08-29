@@ -74,6 +74,9 @@ class ScheduledTask {
 /// 管理定时提醒，支持 AI 风格消息发送
 class TaskService {
   static final List<ScheduledTask> _tasks = [];
+  static const String _hashStorageKey = 'scheduled_tasks_hash';
+  static String _localHash = '';
+  static bool _hasValidLocalCache = false;
 
   /// in-flight 去重与 TTL 节流：启动路径两处拉取不会重复往返。
   static Future<bool>? _inFlightFetch;
@@ -96,9 +99,11 @@ class TaskService {
   // ========== 任务管理 ==========
 
   static Future<void> _loadTasks() async {
+    _localHash = StorageService.getString(_hashStorageKey) ?? '';
     final jsonList = StorageService.getJsonList(
       StorageService.keyScheduledTasks,
     );
+    _hasValidLocalCache = jsonList != null;
     if (jsonList != null) {
       _tasks.clear();
       for (final json in jsonList) {
@@ -108,9 +113,13 @@ class TaskService {
             _tasks.add(task);
           }
         } catch (e) {
+          _hasValidLocalCache = false;
           debugPrint('Error loading task: $e');
         }
       }
+    }
+    if (!_hasValidLocalCache) {
+      await _clearHash();
     }
   }
 
@@ -120,6 +129,11 @@ class TaskService {
       StorageService.keyScheduledTasks,
       jsonList,
     );
+  }
+
+  static Future<void> _clearHash() async {
+    _localHash = '';
+    await StorageService.remove(_hashStorageKey);
   }
 
   // ========== 公开 API ==========
@@ -162,6 +176,7 @@ class TaskService {
 
     _tasks.removeWhere((t) => t.id == task.id);
     _tasks.add(task);
+    await _clearHash();
     await _saveTasks();
 
     await BackgroundRuntimeService.applyEnabled(
@@ -216,6 +231,7 @@ class TaskService {
       debugPrint('TaskService: Delete backend task failed: $e');
     }
     _tasks.removeWhere((t) => t.id == taskId);
+    await _clearHash();
     await _saveTasks();
   }
 
@@ -230,6 +246,7 @@ class TaskService {
       } catch (_) {}
     }
     _tasks.clear();
+    await _clearHash();
     await _saveTasks();
   }
 
@@ -269,8 +286,18 @@ class TaskService {
     try {
       final data = await SecureWebSocketClient.instance.request(
         'tasks_list',
-        {},
+        _localHash.isEmpty || !_hasValidLocalCache
+            ? const <String, dynamic>{}
+            : {'client_hash': _localHash},
       );
+      final responseHash = data['hash']?.toString() ?? '';
+      if (data['not_modified'] == true) {
+        if (responseHash.isNotEmpty && responseHash != _localHash) {
+          _localHash = responseHash;
+          await StorageService.setString(_hashStorageKey, _localHash);
+        }
+        return false;
+      }
       if (data['tasks'] is List) {
         final remoteTasks = <ScheduledTask>[];
         for (final raw in data['tasks'] as List) {
@@ -302,6 +329,11 @@ class TaskService {
           ..clear()
           ..addAll(remoteTasks);
         await _saveTasks();
+        _hasValidLocalCache = true;
+        _localHash = responseHash;
+        if (_localHash.isNotEmpty) {
+          await StorageService.setString(_hashStorageKey, _localHash);
+        }
         debugPrint(
           'TaskService: Synced ${remoteTasks.length} tasks from backend',
         );

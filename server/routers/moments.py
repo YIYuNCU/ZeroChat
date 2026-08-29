@@ -105,7 +105,17 @@ def _read_cached_moments_hash() -> Optional[str]:
     if not MOMENTS_HASH_FILE.exists():
         return None
     try:
-        value = MOMENTS_HASH_FILE.read_text(encoding="utf-8").strip()
+        payload = json.loads(MOMENTS_HASH_FILE.read_text(encoding="utf-8"))
+        source_stat = MOMENTS_FILE.stat() if MOMENTS_FILE.exists() else None
+        expected_mtime = source_stat.st_mtime_ns if source_stat else 0
+        expected_size = source_stat.st_size if source_stat else 0
+        if (
+            not isinstance(payload, dict)
+            or int(payload.get("source_mtime_ns") or -1) != expected_mtime
+            or int(payload.get("source_size") or -1) != expected_size
+        ):
+            return None
+        value = str(payload.get("hash") or "").strip()
         return value or None
     except Exception:
         return None
@@ -114,7 +124,15 @@ def _read_cached_moments_hash() -> Optional[str]:
 def _write_cached_moments_hash(value: str):
     try:
         MOMENTS_HASH_FILE.parent.mkdir(parents=True, exist_ok=True)
-        MOMENTS_HASH_FILE.write_text(value, encoding="utf-8")
+        source_stat = MOMENTS_FILE.stat() if MOMENTS_FILE.exists() else None
+        atomic_write_json(
+            MOMENTS_HASH_FILE,
+            {
+                "hash": value,
+                "source_mtime_ns": source_stat.st_mtime_ns if source_stat else 0,
+                "source_size": source_stat.st_size if source_stat else 0,
+            },
+        )
     except Exception:
         pass
 
@@ -151,7 +169,7 @@ def save_moments(moments: List[dict]):
     _refresh_default_moments_hash_cache()
 
 @router.get("/moments")
-async def list_moments(limit: int = 50):
+async def list_moments(limit: int = 50, client_hash: Optional[str] = None):
     """获取朋友圈列表"""
     moments = _build_rendered_moments(limit)
     if limit == DEFAULT_HASH_LIMIT:
@@ -159,7 +177,14 @@ async def list_moments(limit: int = 50):
         _write_cached_moments_hash(moments_hash)
     else:
         moments_hash = _compute_moments_hash(moments)
-    return {"moments": moments, "hash": moments_hash}
+    if client_hash and client_hash == moments_hash:
+        return {
+            "moments": [],
+            "hash": moments_hash,
+            "not_modified": True,
+            "count": len(moments),
+        }
+    return {"moments": moments, "hash": moments_hash, "not_modified": False}
 
 
 @router.get("/moments/hash")

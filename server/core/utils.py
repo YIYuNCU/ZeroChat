@@ -70,6 +70,19 @@ def ensure_path_within_root(path: Path, root: Path) -> Path:
     return resolved_path
 
 
+def ensure_direct_child_path(
+    root: Path, value: Optional[str], field_name: str = "path"
+) -> Path:
+    """Resolve one untrusted child segment without following directory aliases."""
+    safe_value = ensure_simple_path_segment(value, field_name)
+    resolved_root = root.resolve()
+    expected_path = resolved_root / safe_value
+    resolved_path = expected_path.resolve()
+    if resolved_path != expected_path:
+        raise ValueError(f"{field_name} resolves through a symbolic link")
+    return ensure_path_within_root(resolved_path, resolved_root)
+
+
 def is_secure_secret(secret: Optional[str], legacy_default: Optional[str] = None) -> bool:
     """Check whether a configured shared secret is acceptable for production use."""
     value = str(secret or "").strip()

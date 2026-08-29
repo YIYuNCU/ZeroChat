@@ -2,6 +2,7 @@
 任务调度路由
 """
 import json
+import hashlib
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -34,18 +35,33 @@ def save_tasks(tasks: List[dict]):
     with open(TASKS_FILE, "w", encoding="utf-8") as f:
         json.dump(tasks, f, indent=2, ensure_ascii=False)
 
+
+def compute_tasks_hash(tasks: Optional[List[dict]] = None) -> str:
+    """Return a stable version for the task collection."""
+    current = load_tasks() if tasks is None else tasks
+    canonical = json.dumps(
+        current,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 @router.get("/tasks")
-async def list_tasks():
+async def list_tasks(client_hash: Optional[str] = None):
     """获取所有任务"""
     tasks = load_tasks()
-    return {"tasks": tasks}
+    current_hash = compute_tasks_hash(tasks)
+    if client_hash and client_hash == current_hash:
+        return {"tasks": [], "hash": current_hash, "not_modified": True, "count": len(tasks)}
+    return {"tasks": tasks, "hash": current_hash, "not_modified": False, "count": len(tasks)}
 
 @router.get("/tasks/{role_id}")
 async def get_role_tasks(role_id: str):
     """获取角色任务"""
     tasks = load_tasks()
     role_tasks = [t for t in tasks if t.get("role_id") == role_id]
-    return {"tasks": role_tasks}
+    return {"tasks": role_tasks, "hash": compute_tasks_hash(role_tasks)}
 
 @router.post("/tasks")
 async def create_task(task: TaskCreate):

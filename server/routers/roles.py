@@ -21,7 +21,12 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 USER_EMOJI_DIR = DATA_DIR / "user_emojis"
 USER_EMOJI_DB = DATA_DIR / "user_emojis.sqlite"
-from core.utils import ensure_path_within_root, ensure_simple_path_segment, is_tool_role_id
+from core.utils import (
+    ensure_direct_child_path,
+    ensure_path_within_root,
+    ensure_simple_path_segment,
+    is_tool_role_id,
+)
 from core.quiet_rules import QuietRule, validate_quiet_rules
 
 def _normalize_category_name(name: str) -> str:
@@ -53,6 +58,25 @@ def _resolve_path_in_root(path: Path, root: Path) -> Path:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid file path") from exc
 
+
+def _resolve_direct_child(root: Path, value: str, field_name: str) -> Path:
+    try:
+        return ensure_direct_child_path(root, value, field_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid file path") from exc
+
+
+def _iter_safe_role_dirs():
+    if not ROLES_DIR.exists():
+        return
+    for entry in ROLES_DIR.iterdir():
+        try:
+            role_dir = ensure_direct_child_path(ROLES_DIR, entry.name, "role_id")
+        except ValueError:
+            continue
+        if role_dir.is_dir():
+            yield role_dir
+
 def _init_user_emoji_db(conn: sqlite3.Connection):
     conn.execute(
         """
@@ -79,8 +103,9 @@ def _init_user_emoji_db(conn: sqlite3.Connection):
 
 def _get_user_emoji_connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    USER_EMOJI_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(USER_EMOJI_DB)
+    get_user_emoji_root().mkdir(parents=True, exist_ok=True)
+    db_path = _resolve_direct_child(DATA_DIR, USER_EMOJI_DB.name, "user emoji database")
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     _init_user_emoji_db(conn)
     return conn
@@ -296,28 +321,55 @@ def _overlay_role_core_memory_from_db(role_data: Dict[str, Any]) -> Dict[str, An
 def get_role_dir(role_id: str) -> Path:
     """获取角色目录，自动创建完整目录结构"""
     role_id = _normalize_role_id(role_id)
-    role_dir = ROLES_DIR / role_id
+    role_dir = _resolve_direct_child(ROLES_DIR, role_id, "role_id")
     role_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # 创建所有子目录
-    subdirs = ["assets", "chats", "emojis", "moments", "backgrounds"]
-    for subdir in subdirs:
-        (role_dir / subdir).mkdir(exist_ok=True)
-    
+    subdirs = {
+        name: _resolve_direct_child(role_dir, name, "role directory")
+        for name in ["assets", "chats", "emojis", "moments", "backgrounds"]
+    }
+    for subdir in subdirs.values():
+        subdir.mkdir(exist_ok=True)
+
+    _resolve_direct_child(role_dir, "profile.json", "profile file")
+    _resolve_direct_child(role_dir, "assets_meta.json", "asset metadata file")
+
     # 创建情绪表情包子目录
     emotions = ["happy", "sad", "angry", "surprised", "love", "confused", "tired"]
     for emotion in emotions:
-        (role_dir / "emojis" / emotion).mkdir(exist_ok=True)
-    
-    if not (role_dir / "chats" / "messages.json").exists():
-        with open(role_dir / "chats" / "messages.json", "w", encoding="utf-8") as f:
+        _resolve_direct_child(subdirs["emojis"], emotion, "emotion").mkdir(exist_ok=True)
+
+    messages_file = _resolve_direct_child(subdirs["chats"], "messages.json", "chat file")
+    if not messages_file.exists():
+        with open(messages_file, "w", encoding="utf-8") as f:
             json.dump({"messages": []}, f)
-    
-    if not (role_dir / "moments" / "posts.json").exists():
-        with open(role_dir / "moments" / "posts.json", "w", encoding="utf-8") as f:
+
+    posts_file = _resolve_direct_child(subdirs["moments"], "posts.json", "moments file")
+    if not posts_file.exists():
+        with open(posts_file, "w", encoding="utf-8") as f:
             json.dump({"posts": []}, f)
-    
+
     return role_dir
+
+
+def get_role_emojis_dir(role_id: str) -> Path:
+    role_dir = get_role_dir(role_id)
+    return _resolve_direct_child(role_dir, "emojis", "emoji root")
+
+
+def get_role_emoji_category_dir(role_id: str, category: str) -> Path:
+    normalized = _normalize_category_name(category)
+    return _resolve_direct_child(get_role_emojis_dir(role_id), normalized, "category")
+
+
+def get_user_emoji_root() -> Path:
+    return _resolve_direct_child(DATA_DIR, "user_emojis", "user emoji root")
+
+
+def get_user_emoji_category_dir(category: str) -> Path:
+    normalized = _normalize_category_name(category)
+    return _resolve_direct_child(get_user_emoji_root(), normalized, "category")
 
 def load_role(role_id: str) -> Optional[Dict]:
     profile_file = get_role_dir(role_id) / "profile.json"
@@ -398,6 +450,20 @@ _CLONE_EXCLUDE_NAMES = {
 }
 
 
+def _ignore_clone_links_outside_data(directory: str, names: List[str]) -> List[str]:
+    """Preserve in-data symlinks without following links outside the app data root."""
+    ignored: List[str] = []
+    for name in names:
+        path = Path(directory) / name
+        if not path.is_symlink():
+            continue
+        try:
+            ensure_path_within_root(path, DATA_DIR)
+        except ValueError:
+            ignored.append(name)
+    return ignored
+
+
 def clone_role(source_id: str, new_id: Optional[str] = None, new_name: Optional[str] = None) -> Dict[str, Any]:
     """从已有角色复制出一个新角色：继承全部设定与静态资源（头像/表情包/背景），
     但不带任何旧的记忆与历史（短期记忆、向量记忆、核心记忆、聊天记录、朋友圈、数值状态）。
@@ -419,7 +485,7 @@ def clone_role(source_id: str, new_id: Optional[str] = None, new_name: Optional[
     if is_tool_role_id(new_id):
         raise HTTPException(status_code=400, detail="不能克隆为工具角色 ID")
 
-    source_dir = ROLES_DIR / source_id
+    source_dir = get_role_dir(source_id)
     # get_role_dir 会创建完整目录结构与空的 chats/moments 占位文件
     target_dir = get_role_dir(new_id)
 
@@ -427,7 +493,13 @@ def clone_role(source_id: str, new_id: Optional[str] = None, new_name: Optional[
     for sub in ["assets", "emojis", "backgrounds"]:
         src_sub = source_dir / sub
         if src_sub.exists():
-            shutil.copytree(src_sub, target_dir / sub, dirs_exist_ok=True)
+            shutil.copytree(
+                src_sub,
+                target_dir / sub,
+                dirs_exist_ok=True,
+                symlinks=True,
+                ignore=_ignore_clone_links_outside_data,
+            )
 
     # 深拷贝设定，重置记忆/运行态相关字段
     now = datetime.now().isoformat()
@@ -483,12 +555,10 @@ def clone_role(source_id: str, new_id: Optional[str] = None, new_name: Optional[
 async def list_roles(request: Request):
     """获取所有角色"""
     roles = []
-    if ROLES_DIR.exists():
-        for role_dir in ROLES_DIR.iterdir():
-            if role_dir.is_dir():
-                role = load_role(role_dir.name)
-                if role:
-                    roles.append(normalize_role_avatar_url(_overlay_role_core_memory_from_db(role), request))
+    for role_dir in _iter_safe_role_dirs():
+        role = load_role(role_dir.name)
+        if role:
+            roles.append(normalize_role_avatar_url(_overlay_role_core_memory_from_db(role), request))
     return {"roles": roles}
 
 @router.get("/roles/{role_id}")
@@ -615,7 +685,8 @@ async def update_role(role_id: str, update: RoleUpdate, request: Request):
 @router.delete("/roles/{role_id}")
 async def delete_role(role_id: str):
     """删除角色"""
-    role_dir = ROLES_DIR / role_id
+    role_id = _normalize_role_id(role_id)
+    role_dir = _resolve_direct_child(ROLES_DIR, role_id, "role_id")
     if role_dir.exists():
         shutil.rmtree(role_dir)
     try:
@@ -717,6 +788,25 @@ async def append_memory(role_id: str, content: str):
 # ========== 素材管理 ==========
 
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _save_bounded_upload(file: UploadFile, destination: Path) -> int:
+    total = 0
+    try:
+        with open(destination, "wb") as target:
+            while True:
+                chunk = file.file.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_IMAGE_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Image upload too large")
+                target.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return total
 
 def get_assets_dir(role_id: str) -> Path:
     """获取角色素材目录"""
@@ -775,11 +865,8 @@ async def upload_asset(
     
     # 保存文件
     assets_dir = get_assets_dir(role_id)
-    file_path = assets_dir / filename
-    
-    with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    file_path = _resolve_direct_child(assets_dir, filename, "filename")
+    content_size = _save_bounded_upload(file, file_path)
     
     # 更新元数据
     metadata = load_assets_metadata(role_id)
@@ -788,7 +875,7 @@ async def upload_asset(
         "filename": filename,
         "original_name": file.filename,
         "type": asset_type,
-        "size": len(content),
+        "size": content_size,
         "created_at": datetime.now().isoformat()
     }
     metadata.append(asset_info)
@@ -844,8 +931,7 @@ async def list_assets_by_type(role_id: str, asset_type: str):
 
 @router.get("/roles/{role_id}/emoji-categories")
 async def list_role_emoji_categories(role_id: str):
-    role_dir = get_role_dir(role_id)
-    emojis_dir = role_dir / "emojis"
+    emojis_dir = get_role_emojis_dir(role_id)
     if not emojis_dir.exists():
         return {"role_id": role_id, "categories": []}
 
@@ -855,7 +941,7 @@ async def list_role_emoji_categories(role_id: str):
 @router.post("/roles/{role_id}/emoji-categories")
 async def create_role_emoji_category(role_id: str, payload: EmojiCategoryPayload):
     category = _normalize_category_name(payload.category)
-    category_dir = get_role_dir(role_id) / "emojis" / category
+    category_dir = get_role_emoji_category_dir(role_id, category)
     category_dir.mkdir(parents=True, exist_ok=True)
     return {"success": True, "role_id": role_id, "category": category}
 
@@ -863,7 +949,7 @@ async def create_role_emoji_category(role_id: str, payload: EmojiCategoryPayload
 async def delete_role_emoji_category(role_id: str, category: str):
 
     normalized = _normalize_category_name(category)
-    category_dir = get_role_dir(role_id) / "emojis" / normalized
+    category_dir = get_role_emoji_category_dir(role_id, normalized)
     if not category_dir.exists():
         raise HTTPException(status_code=404, detail="分类不存在")
     shutil.rmtree(category_dir)
@@ -872,7 +958,7 @@ async def delete_role_emoji_category(role_id: str, category: str):
 @router.get("/roles/{role_id}/emojis/{category}/list")
 async def list_role_emojis(role_id: str, category: str):
     normalized = _normalize_category_name(category)
-    emoji_dir = get_role_dir(role_id) / "emojis" / normalized
+    emoji_dir = get_role_emoji_category_dir(role_id, normalized)
     if not emoji_dir.exists():
         return {"role_id": role_id, "category": normalized, "emojis": []}
 
@@ -897,14 +983,13 @@ async def list_role_emojis(role_id: str, category: str):
 async def upload_role_emoji(role_id: str, category: str, file: UploadFile = File(...)):
 
     normalized = _normalize_category_name(category)
-    emoji_dir = get_role_dir(role_id) / "emojis" / normalized
+    emoji_dir = get_role_emoji_category_dir(role_id, normalized)
     emoji_dir.mkdir(parents=True, exist_ok=True)
 
     ext = _guess_ext(file.filename or "")
     filename = f"emoji_{uuid.uuid4().hex[:10]}.{ext}"
-    file_path = emoji_dir / filename
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    file_path = _resolve_direct_child(emoji_dir, filename, "filename")
+    _save_bounded_upload(file, file_path)
 
     return {
         "success": True,
@@ -922,8 +1007,8 @@ async def delete_role_emoji(role_id: str, category: str, filename: str):
     normalized = _normalize_category_name(category)
     filename = _normalize_filename(filename)
 
-    role_dir = get_role_dir(role_id)
-    file_path = _resolve_path_in_root(role_dir / "emojis" / normalized / filename, role_dir)
+    emoji_dir = get_role_emoji_category_dir(role_id, normalized)
+    file_path = _resolve_direct_child(emoji_dir, filename, "filename")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="表情不存在")
     file_path.unlink()
@@ -933,13 +1018,10 @@ async def delete_role_emoji(role_id: str, category: str, filename: str):
 async def get_emoji(role_id: str, emotion: str, filename: str):
     """获取角色表情包文件"""
 
-    role_dir = get_role_dir(role_id)
     normalized_emotion = _normalize_category_name(emotion)
     normalized_filename = _normalize_filename(filename)
-    emoji_path = _resolve_path_in_root(
-        role_dir / "emojis" / normalized_emotion / normalized_filename,
-        role_dir,
-    )
+    emoji_dir = get_role_emoji_category_dir(role_id, normalized_emotion)
+    emoji_path = _resolve_direct_child(emoji_dir, normalized_filename, "filename")
     if emoji_path.exists() and emoji_path.is_file():
         print(f"Serving emoji: {emoji_path}")
         return FileResponse(emoji_path)
@@ -949,9 +1031,8 @@ async def get_emoji(role_id: str, emotion: str, filename: str):
 async def get_random_emoji(role_id: str, emotion: str):
     """从后端表情包文件夹中随机选择一个表情包"""
 
-    role_dir = get_role_dir(role_id)
     normalized_emotion = _normalize_category_name(emotion)
-    emoji_dir = _resolve_path_in_root(role_dir / "emojis" / normalized_emotion, role_dir)
+    emoji_dir = get_role_emoji_category_dir(role_id, normalized_emotion)
     if not emoji_dir.exists():
         return {"found": False, "emotion": normalized_emotion}
     
@@ -990,7 +1071,7 @@ async def create_user_emoji_category(payload: EmojiCategoryPayload):
             "INSERT OR IGNORE INTO user_emoji_categories(name, created_at) VALUES(?, ?)",
             (category, datetime.now().isoformat()),
         )
-    (USER_EMOJI_DIR / category).mkdir(parents=True, exist_ok=True)
+    get_user_emoji_category_dir(category).mkdir(parents=True, exist_ok=True)
     return {"success": True, "category": category}
 
 @router.delete("/user-emojis/categories/{category}")
@@ -1003,13 +1084,15 @@ async def delete_user_emoji_category(category: str):
             (normalized,),
         ).fetchall()
         for row in rows:
-            path = Path(str(row["file_path"]))
+            path = _resolve_path_in_root(
+                Path(str(row["file_path"])), get_user_emoji_root()
+            )
             if path.exists():
                 path.unlink()
         conn.execute("DELETE FROM user_emojis WHERE category = ?", (normalized,))
         conn.execute("DELETE FROM user_emoji_categories WHERE name = ?", (normalized,))
 
-    category_dir = USER_EMOJI_DIR / normalized
+    category_dir = get_user_emoji_category_dir(normalized)
     if category_dir.exists():
         shutil.rmtree(category_dir)
 
@@ -1063,12 +1146,10 @@ async def upload_user_emoji(
         ext = _guess_ext(file.filename or "")
         emoji_id = f"u_{uuid.uuid4().hex[:12]}"
         filename = f"{emoji_id}.{ext}"
-        category_dir = USER_EMOJI_DIR / normalized
+        category_dir = get_user_emoji_category_dir(normalized)
         category_dir.mkdir(parents=True, exist_ok=True)
-        file_path = category_dir / filename
-
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        file_path = _resolve_direct_child(category_dir, filename, "filename")
+        _save_bounded_upload(file, file_path)
 
         conn.execute(
             "INSERT INTO user_emojis(id, category, tag, filename, file_path, created_at) VALUES(?, ?, ?, ?, ?, ?)",
@@ -1104,7 +1185,9 @@ async def get_user_emoji_file(emoji_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="表情不存在")
 
-    file_path = _resolve_path_in_root(Path(str(row["file_path"])), USER_EMOJI_DIR)
+    file_path = _resolve_path_in_root(
+        Path(str(row["file_path"])), get_user_emoji_root()
+    )
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="表情文件不存在")
     return FileResponse(file_path)
@@ -1119,7 +1202,9 @@ async def delete_user_emoji(emoji_id: str):
         if not row:
             raise HTTPException(status_code=404, detail="表情不存在")
 
-        file_path = _resolve_path_in_root(Path(str(row["file_path"])), USER_EMOJI_DIR)
+        file_path = _resolve_path_in_root(
+            Path(str(row["file_path"])), get_user_emoji_root()
+        )
         if file_path.exists():
             file_path.unlink()
 
@@ -1165,18 +1250,17 @@ async def upload_role_avatar_file(role_id: str, request: Request, file: UploadFi
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
     
-    role_dir = get_role_dir(role_id)
-    
     # 获取文件扩展名
     ext = f".{file.filename.split('.')[-1].lower()}" if "." in (file.filename or "") else ".jpg"
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}")
     avatar_filename = f"avatar{ext}"
-    avatar_path = _resolve_path_in_root(role_dir / "assets" / avatar_filename, role_dir)
+    avatar_path = _resolve_direct_child(
+        get_assets_dir(role_id), avatar_filename, "filename"
+    )
     
     # 保存文件
-    with open(avatar_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    _save_bounded_upload(file, avatar_path)
     
     # 更新角色 avatar_url
     avatar_url = str(request.url_for("get_role_avatar_file", role_id=role_id))
@@ -1396,17 +1480,14 @@ def _normalize_chat_message_for_sync(message: Dict[str, Any], backend_base_url: 
 
 def _build_chats_snapshot(backend_base_url: Optional[str] = None) -> Dict[str, Any]:
     chats: Dict[str, List[Dict[str, Any]]] = {}
-    if ROLES_DIR.exists():
-        for role_dir in sorted(ROLES_DIR.iterdir(), key=lambda p: p.name):
-            if not role_dir.is_dir():
-                continue
-            role_id = role_dir.name
-            messages = [
-                _normalize_chat_message_for_sync(m, backend_base_url)
-                for m in _load_role_chat_messages(role_id)
-            ]
-            messages.sort(key=lambda m: (str(m.get("timestamp", "")), str(m.get("id", ""))))
-            chats[role_id] = messages
+    for role_dir in sorted(_iter_safe_role_dirs(), key=lambda p: p.name):
+        role_id = role_dir.name
+        messages = [
+            _normalize_chat_message_for_sync(m, backend_base_url)
+            for m in _load_role_chat_messages(role_id)
+        ]
+        messages.sort(key=lambda m: (str(m.get("timestamp", "")), str(m.get("id", ""))))
+        chats[role_id] = messages
 
     canonical = json.dumps(chats, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     snapshot_md5 = hashlib.md5(canonical.encode("utf-8")).hexdigest()
@@ -1422,44 +1503,40 @@ def _build_chats_snapshot(backend_base_url: Optional[str] = None) -> Dict[str, A
 def build_role_items(backend_base_url: str) -> List[Dict[str, Any]]:
     """构建角色列表（roles_list 与 roles_hash 共用），保证两者内容一致。"""
     role_items: List[Dict[str, Any]] = []
-    if ROLES_DIR.exists():
-        for role_dir in sorted(ROLES_DIR.iterdir(), key=lambda p: p.name):
-            if not role_dir.is_dir():
-                continue
+    for role_dir in sorted(_iter_safe_role_dirs(), key=lambda p: p.name):
+        role = load_role(role_dir.name)
+        if not role:
+            continue
 
-            role = load_role(role_dir.name)
-            if not role:
-                continue
+        role_copy = dict(role)
+        cycle_data = role_copy.get("menstruation_cycle")
+        if isinstance(cycle_data, dict):
+            try:
+                from services.memory_service import _get_menstruation_status
 
-            role_copy = dict(role)
-            cycle_data = role_copy.get("menstruation_cycle")
-            if isinstance(cycle_data, dict):
-                try:
-                    from services.memory_service import _get_menstruation_status
+                menstruation_status = _get_menstruation_status(role_dir.name)
+                period_start = (
+                    menstruation_status.get("period_start")
+                    if menstruation_status
+                    else None
+                )
+                if period_start:
+                    # The profile value is the editable cycle anchor. The
+                    # client should display the runtime cycle's latest start.
+                    role_copy["menstruation_cycle"] = {
+                        **cycle_data,
+                        "last_period_start": period_start,
+                    }
+            except Exception:
+                # Role synchronization must remain available if optional
+                # runtime cycle state cannot be read.
+                pass
+        role_id = str(role_copy.get("id", "")).strip()
+        if role_id and role_copy.get("avatar_url"):
+            role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
+            role_copy["avatar_hash"] = _get_role_avatar_hash(role_id)
 
-                    menstruation_status = _get_menstruation_status(role_dir.name)
-                    period_start = (
-                        menstruation_status.get("period_start")
-                        if menstruation_status
-                        else None
-                    )
-                    if period_start:
-                        # The profile value is the editable cycle anchor. The
-                        # client should display the runtime cycle's latest start.
-                        role_copy["menstruation_cycle"] = {
-                            **cycle_data,
-                            "last_period_start": period_start,
-                        }
-                except Exception:
-                    # Role synchronization must remain available if optional
-                    # runtime cycle state cannot be read.
-                    pass
-            role_id = str(role_copy.get("id", "")).strip()
-            if role_id and role_copy.get("avatar_url"):
-                role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
-                role_copy["avatar_hash"] = _get_role_avatar_hash(role_id)
-
-            role_items.append(role_copy)
+        role_items.append(role_copy)
 
     return role_items
 
