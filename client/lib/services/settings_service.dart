@@ -13,6 +13,8 @@ class SettingsService extends ChangeNotifier {
   factory SettingsService() => _instance;
   SettingsService._internal();
 
+  int _normalizeTimeout(int? value) => (value ?? 60).clamp(1, 3600);
+
   static SettingsService get instance => _instance;
 
   String _normalizeFilePath(String value) {
@@ -46,6 +48,9 @@ class SettingsService extends ChangeNotifier {
   String _chatApiKey = '';
   String _chatModel = 'gpt-3.5-turbo';
   String _chatApiFormat = 'auto';
+  int _chatTimeoutSeconds = 60;
+  String _chatReasoningEffort = '';
+  bool _chatStream = false;
   List<ModelApiProfile> _modelProfiles = [];
   Map<String, String> _roleModelProfileSelections = {};
 
@@ -96,8 +101,13 @@ class SettingsService extends ChangeNotifier {
   String get chatApiKey => _chatApiKey;
   String get chatModel => _chatModel;
   String get chatApiFormat => _chatApiFormat;
+  int get chatTimeoutSeconds => _chatTimeoutSeconds;
+  String get chatReasoningEffort => _chatReasoningEffort;
+  bool get chatStream => _chatStream;
   List<AiModelProfile> get modelProfiles => List.unmodifiable(
-    _modelProfiles.where((profile) => profile.supports(ModelProfileCapability.chat)),
+    _modelProfiles.where(
+      (profile) => profile.supports(ModelProfileCapability.chat),
+    ),
   );
   List<ModelApiProfile> modelProfilesFor(ModelProfileCapability capability) =>
       List.unmodifiable(
@@ -178,6 +188,12 @@ class SettingsService extends ChangeNotifier {
     _chatApiFormat = normalizeApiFormat(
       StorageService.getString('chat_api_format'),
     );
+    _chatTimeoutSeconds = _normalizeTimeout(
+      StorageService.getInt('chat_timeout_seconds'),
+    );
+    _chatReasoningEffort =
+        StorageService.getString('chat_reasoning_effort') ?? '';
+    _chatStream = StorageService.getBool('chat_stream') ?? false;
     await _loadModelProfiles();
     _loadRoleModelProfileSelections();
     _loadProviderQuietRules();
@@ -345,15 +361,29 @@ class SettingsService extends ChangeNotifier {
     required String key,
     required String model,
     String? apiFormat,
+    int? timeoutSeconds,
+    String? reasoningEffort,
+    bool? stream,
   }) async {
     _chatApiUrl = url;
     _chatApiKey = key;
     _chatModel = model;
     if (apiFormat != null) _chatApiFormat = normalizeApiFormat(apiFormat);
+    if (timeoutSeconds != null) {
+      _chatTimeoutSeconds = _normalizeTimeout(timeoutSeconds);
+    }
+    if (reasoningEffort != null) _chatReasoningEffort = reasoningEffort.trim();
+    if (stream != null) _chatStream = stream;
     await StorageService.setString('chat_api_url', url);
     await SecureStorageService.setString('chat_api_key', key);
     await StorageService.setString('chat_model', model);
     await StorageService.setString('chat_api_format', _chatApiFormat);
+    await StorageService.setInt('chat_timeout_seconds', _chatTimeoutSeconds);
+    await StorageService.setString(
+      'chat_reasoning_effort',
+      _chatReasoningEffort,
+    );
+    await StorageService.setBool('chat_stream', _chatStream);
     notifyListeners();
   }
 
@@ -385,10 +415,15 @@ class SettingsService extends ChangeNotifier {
             final id = '${json['id'] ?? ''}';
             return ModelApiProfile.fromJson(
               json,
-              apiKey: SecureStorageService.getString('model_api_profile_key_$id'),
+              apiKey: SecureStorageService.getString(
+                'model_api_profile_key_$id',
+              ),
             );
           })
-          .where((profile) => profile.id.isNotEmpty && profile.capabilities.isNotEmpty)
+          .where(
+            (profile) =>
+                profile.id.isNotEmpty && profile.capabilities.isNotEmpty,
+          )
           .toList();
       return;
     }
@@ -409,7 +444,8 @@ class SettingsService extends ChangeNotifier {
       );
       migrated.add(profile);
     }
-    final legacyVision = StorageService.getJsonList('vision_model_profiles') ?? [];
+    final legacyVision =
+        StorageService.getJsonList('vision_model_profiles') ?? [];
     for (final json in legacyVision) {
       final legacy = VisionModelProfile.fromJson(
         json,
@@ -421,16 +457,18 @@ class SettingsService extends ChangeNotifier {
       final id = migrated.any((item) => item.id == legacy.id)
           ? 'vision_${legacy.id}'
           : legacy.id;
-      migrated.add(ModelApiProfile(
-        id: id,
-        name: legacy.name,
-        apiUrl: legacy.apiUrl,
-        model: legacy.model,
-        apiKey: legacy.apiKey,
-        apiFormat: legacy.apiFormat,
-        capabilities: const {ModelProfileCapability.vision},
-        visionMode: legacy.mode,
-      ));
+      migrated.add(
+        ModelApiProfile(
+          id: id,
+          name: legacy.name,
+          apiUrl: legacy.apiUrl,
+          model: legacy.model,
+          apiKey: legacy.apiKey,
+          apiFormat: legacy.apiFormat,
+          capabilities: const {ModelProfileCapability.vision},
+          visionMode: legacy.mode,
+        ),
+      );
       await SecureStorageService.setString(
         'model_api_profile_key_$id',
         legacy.apiKey,
@@ -481,15 +519,17 @@ class SettingsService extends ChangeNotifier {
     required String key,
     String apiFormat = 'auto',
   }) async {
-    await saveApiProfile(ModelApiProfile(
-      id: id,
-      name: name,
-      apiUrl: url,
-      model: model,
-      apiKey: key,
-      apiFormat: apiFormat,
-      capabilities: const {ModelProfileCapability.chat},
-    ));
+    await saveApiProfile(
+      ModelApiProfile(
+        id: id,
+        name: name,
+        apiUrl: url,
+        model: model,
+        apiKey: key,
+        apiFormat: apiFormat,
+        capabilities: const {ModelProfileCapability.chat},
+      ),
+    );
   }
 
   Future<void> saveApiProfile(ModelApiProfile profile) async {
@@ -646,6 +686,9 @@ class SettingsService extends ChangeNotifier {
             'ai_api_key': _chatApiKey,
             'ai_model': _chatModel,
             'ai_api_format': _chatApiFormat,
+            'ai_timeout_seconds': _chatTimeoutSeconds,
+            'ai_reasoning_effort': _chatReasoningEffort,
+            'ai_stream': _chatStream,
             'intent_enabled': _intentEnabled,
             'intent_api_url': _intentApiUrl,
             'intent_api_key': _intentApiKey,
@@ -700,14 +743,23 @@ class SettingsService extends ChangeNotifier {
           ? _chatModel
           : (server['ai_model']?.toString() ?? _chatModel).trim();
       final chatApiFormat = normalizeApiFormat(server['ai_api_format']);
+      final chatTimeoutSeconds = _normalizeTimeout(
+        (server['ai_timeout_seconds'] as num?)?.toInt() ?? _chatTimeoutSeconds,
+      );
+      final chatReasoningEffort =
+          (server['ai_reasoning_effort']?.toString() ?? _chatReasoningEffort)
+              .trim();
+      final chatStream = server['ai_stream'] is bool
+          ? server['ai_stream'] as bool
+          : _chatStream;
 
       final intentEnabled = server['intent_enabled'] == true;
       final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
       final intentKey = (server['intent_api_key']?.toString() ?? '').trim();
       final intentModel =
           (server['intent_model']?.toString() ?? _intentModel).trim().isEmpty
-           ? _intentModel
-           : (server['intent_model']?.toString() ?? _intentModel).trim();
+          ? _intentModel
+          : (server['intent_model']?.toString() ?? _intentModel).trim();
       final intentApiFormat = normalizeApiFormat(server['intent_api_format']);
 
       final visionEnabled = server['vision_enabled'] == true;
@@ -756,6 +808,9 @@ class SettingsService extends ChangeNotifier {
         key: chatKey,
         model: chatModel,
         apiFormat: chatApiFormat,
+        timeoutSeconds: chatTimeoutSeconds,
+        reasoningEffort: chatReasoningEffort,
+        stream: chatStream,
       );
       await updateIntentApi(
         enabled: intentEnabled,
@@ -807,13 +862,22 @@ class SettingsService extends ChangeNotifier {
           ? _chatModel
           : (server['ai_model']?.toString() ?? _chatModel).trim();
       final chatApiFormat = normalizeApiFormat(server['ai_api_format']);
+      final chatTimeoutSeconds = _normalizeTimeout(
+        (server['ai_timeout_seconds'] as num?)?.toInt() ?? _chatTimeoutSeconds,
+      );
+      final chatReasoningEffort =
+          (server['ai_reasoning_effort']?.toString() ?? _chatReasoningEffort)
+              .trim();
+      final chatStream = server['ai_stream'] is bool
+          ? server['ai_stream'] as bool
+          : _chatStream;
 
       final intentEnabled = server['intent_enabled'] == true;
       final intentUrl = (server['intent_api_url']?.toString() ?? '').trim();
       final intentModel =
           (server['intent_model']?.toString() ?? _intentModel).trim().isEmpty
-           ? _intentModel
-           : (server['intent_model']?.toString() ?? _intentModel).trim();
+          ? _intentModel
+          : (server['intent_model']?.toString() ?? _intentModel).trim();
       final intentApiFormat = normalizeApiFormat(server['intent_api_format']);
 
       final visionEnabled = server['vision_enabled'] == true;
@@ -859,6 +923,9 @@ class SettingsService extends ChangeNotifier {
         key: _chatApiKey,
         model: chatModel,
         apiFormat: chatApiFormat,
+        timeoutSeconds: chatTimeoutSeconds,
+        reasoningEffort: chatReasoningEffort,
+        stream: chatStream,
       );
       await updateIntentApi(
         enabled: intentEnabled,

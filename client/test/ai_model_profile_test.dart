@@ -32,4 +32,24 @@ void main() {
     expect(profile.toJson(), containsPair('api_format', 'gemini_native'));
     expect(profile.toJson(), isNot(contains('api_key')));
   });
+
+  test('unified profile filters capabilities and keeps keys out of JSON', () {
+    const profile = ModelApiProfile(
+      id: 'shared-1',
+      name: 'Shared provider',
+      apiUrl: 'https://example.com/v1',
+      model: 'example-model',
+      apiKey: 'secret',
+      apiFormat: 'openai_compatible',
+      capabilities: {
+        ModelProfileCapability.chat,
+        ModelProfileCapability.intent,
+      },
+    );
+
+    expect(profile.supports(ModelProfileCapability.chat), isTrue);
+    expect(profile.supports(ModelProfileCapability.vision), isFalse);
+    expect(profile.toJson()['capabilities'], contains('intent'));
+    expect(profile.toJson(), isNot(contains('api_key')));
+  });
 }

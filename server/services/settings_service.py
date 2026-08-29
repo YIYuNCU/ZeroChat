@@ -35,6 +35,9 @@ def get_default_settings() -> Dict[str, Any]:
         "ai_api_key": "",
         "ai_model": "deepseek-chat",
         "ai_api_format": "auto",
+        "ai_timeout_seconds": 60,
+        "ai_reasoning_effort": "",
+        "ai_stream": False,
         "intent_enabled": False,
         "intent_api_url": "",
         "intent_api_key": "",
@@ -104,7 +107,7 @@ def save_settings(settings: Dict[str, Any]) -> bool:
         return False
 
 
-def get_ai_config() -> Dict[str, str]:
+def get_ai_config() -> Dict[str, Any]:
     """获取 AI API 配置"""
     settings = load_settings()
     return {
@@ -112,6 +115,9 @@ def get_ai_config() -> Dict[str, str]:
         "api_key": settings.get("ai_api_key", ""),
         "model": settings.get("ai_model", "deepseek-chat"),
         "api_format": _normalize_api_format(settings.get("ai_api_format")),
+        "timeout_seconds": _normalize_timeout(settings.get("ai_timeout_seconds")),
+        "reasoning_effort": str(settings.get("ai_reasoning_effort") or "").strip(),
+        "stream": bool(settings.get("ai_stream", False)),
     }
 
 
@@ -146,6 +152,13 @@ def get_vision_config() -> Dict[str, Any]:
 def _normalize_api_format(value: Any) -> str:
     value = str(value or "auto").strip().lower()
     return value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+
+
+def _normalize_timeout(value: Any) -> int:
+    try:
+        return max(1, min(3600, int(value)))
+    except (TypeError, ValueError):
+        return 60
 
 
 def get_embedding_config() -> Dict[str, Any]:

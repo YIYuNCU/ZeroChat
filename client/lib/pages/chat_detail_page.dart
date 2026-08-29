@@ -69,6 +69,9 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   bool _showTyping = false;
   bool _isEmojiPanelVisible = false;
   late Role _currentRole;
+  int _pageSession = 0;
+  final Set<String> _scheduledPlaceholderRepairs = <String>{};
+  bool _chatWindowActivated = false;
 
   /// 当前引用状态
   QuoteState? _quoteState;
@@ -94,31 +97,42 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     // 监听设置更新（包括背景图）
     SettingsService.instance.addListener(_onSettingsChanged);
 
-    _initializeChat();
+    _initializeChat(++_pageSession);
   }
 
-  Future<void> _initializeChat() async {
+  Future<void> _initializeChat(int session) async {
     await ChatController.instance.initChat(
       widget.chatId,
       isGroup: widget.isGroup,
       memberIds: widget.memberIds,
     );
+    if (!mounted || session != _pageSession) return;
 
-    await ChatController.instance.onChatPageEnter(widget.chatId);
+    final entered = await ChatController.instance.enterChatPage(
+      widget.chatId,
+      isActive: () => mounted && session == _pageSession,
+      onActivated: () => _chatWindowActivated = true,
+    );
+    _chatWindowActivated = entered;
+    if (!mounted || session != _pageSession) return;
 
-    if (mounted) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && session == _pageSession) {
         _scrollToBottom(animate: false);
-      });
-    }
+      }
+    });
   }
 
   @override
   void dispose() {
+    _pageSession++;
+    _scheduledPlaceholderRepairs.clear();
     _scrollController.removeListener(_onScroll);
     SettingsService.instance.removeListener(_onSettingsChanged);
     ChatController.instance.unregisterTypingCallback(widget.chatId);
-    ChatController.instance.onChatPageExit(widget.chatId);
+    if (_chatWindowActivated) {
+      ChatController.instance.onChatPageExit(widget.chatId);
+    }
     _inputBarController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -686,12 +700,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                       );
                     }
 
-                    // Only repair placeholder stickers for currently visible items
-                    // to avoid scanning entire history and causing jank.
-                    MessageStore.instance.repairVisiblePlaceholderStickers(
-                      widget.chatId,
-                      visibleMessages,
-                    );
+                    // Defer network-backed repairs until after this frame.
+                    _schedulePlaceholderRepair(visibleMessages);
 
                     _handleAutoScroll(totalMessagesCount);
 
@@ -765,13 +775,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             else
               Padding(
                 padding: EdgeInsets.only(bottom: inputBottomInset),
-                child: AnimatedBuilder(
-                  animation: ChatController.instance,
-                  builder: (context, _) => InputBar(
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: ChatController.instance.processingListenable(
+                    widget.chatId,
+                  ),
+                  builder: (context, isProcessing, _) => InputBar(
                     controller: _inputBarController,
-                    sendEnabled: !ChatController.instance.isProcessing(
-                      widget.chatId,
-                    ),
+                    sendEnabled: !isProcessing,
                     onInputActivated: _onInputActivated,
                     onEmojiPanelVisibilityChanged:
                         _onEmojiPanelVisibilityChanged,
@@ -993,6 +1003,33 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       return true;
     }
     return RoleService.getRoleById(message.senderId)?.showNoReply ?? false;
+  }
+
+  void _schedulePlaceholderRepair(List<Message> visibleMessages) {
+    final repairMessages = <Message>[];
+    for (final message in visibleMessages) {
+      if (message.type != MessageType.sticker ||
+          !message.content.toLowerCase().contains('placeholder://') ||
+          !_scheduledPlaceholderRepairs.add(message.id)) {
+        continue;
+      }
+      repairMessages.add(message);
+    }
+    if (repairMessages.isEmpty) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      try {
+        await MessageStore.instance.repairVisiblePlaceholderStickers(
+          widget.chatId,
+          repairMessages,
+        );
+      } finally {
+        for (final message in repairMessages) {
+          _scheduledPlaceholderRepairs.remove(message.id);
+        }
+      }
+    });
   }
 
   Widget _buildMessageBubble(Message message) {

@@ -5,6 +5,16 @@ import 'followup_config.dart';
 import 'stats_config.dart';
 import 'sticker.dart';
 
+int? _normalizeAiTimeout(Object? value) {
+  final parsed = value is num ? value.toInt() : int.tryParse('${value ?? ''}');
+  return parsed == null ? null : parsed.clamp(1, 3600);
+}
+
+String? _normalizeAiReasoningEffort(Object? value) {
+  final text = value?.toString().trim();
+  return text == null || text.isEmpty ? null : text;
+}
+
 /// 角色模型
 /// 用于 AI 角色的人设配置和参数设置
 class Role {
@@ -20,6 +30,9 @@ class Role {
   final String aiApiUrl;
   final String aiApiKey;
   final double aiTemperature;
+  final int? aiTimeoutSeconds;
+  final String? aiReasoningEffort;
+  final bool? aiStream;
   final String gender;
   final Map<String, dynamic> menstruationCycle;
 
@@ -80,6 +93,9 @@ class Role {
     this.aiApiUrl = '',
     this.aiApiKey = '',
     this.aiTemperature = 0.7,
+    this.aiTimeoutSeconds,
+    this.aiReasoningEffort,
+    this.aiStream,
     this.gender = 'men',
     Map<String, dynamic>? menstruationCycle,
     this.temperature = 0.7,
@@ -144,6 +160,9 @@ class Role {
     String? aiApiUrl,
     String? aiApiKey,
     double? aiTemperature,
+    int? aiTimeoutSeconds,
+    String? aiReasoningEffort,
+    bool? aiStream,
     String? gender,
     Map<String, dynamic>? menstruationCycle,
     double? temperature,
@@ -180,6 +199,9 @@ class Role {
       aiApiUrl: aiApiUrl ?? this.aiApiUrl,
       aiApiKey: aiApiKey ?? this.aiApiKey,
       aiTemperature: aiTemperature ?? this.aiTemperature,
+      aiTimeoutSeconds: aiTimeoutSeconds ?? this.aiTimeoutSeconds,
+      aiReasoningEffort: aiReasoningEffort ?? this.aiReasoningEffort,
+      aiStream: aiStream ?? this.aiStream,
       gender: gender ?? this.gender,
       menstruationCycle: menstruationCycle ?? this.menstruationCycle,
       temperature: temperature ?? this.temperature,
@@ -256,6 +278,11 @@ class Role {
           (json['ai_temperature'] as num?)?.toDouble() ??
           (json['temperature'] as num?)?.toDouble() ??
           0.7,
+      aiTimeoutSeconds: _normalizeAiTimeout(json['ai_timeout_seconds']),
+      aiReasoningEffort: _normalizeAiReasoningEffort(
+        json['ai_reasoning_effort'],
+      ),
+      aiStream: json['ai_stream'] is bool ? json['ai_stream'] as bool : null,
       gender: json['gender'] as String? ?? 'men',
       menstruationCycle:
           (json['menstruation_cycle'] as Map<String, dynamic>?) ??
@@ -292,14 +319,10 @@ class Role {
             )
           : const StickerConfig(),
       onebotConfig: json['onebot_config'] != null
-          ? OneBotConfig.fromJson(
-              json['onebot_config'] as Map<String, dynamic>,
-            )
+          ? OneBotConfig.fromJson(json['onebot_config'] as Map<String, dynamic>)
           : const OneBotConfig(),
       statsConfig: json['stats_config'] != null
-          ? StatsConfig.fromJson(
-              json['stats_config'] as Map<String, dynamic>,
-            )
+          ? StatsConfig.fromJson(json['stats_config'] as Map<String, dynamic>)
           : const StatsConfig(),
       showAction: json['show_action'] as bool? ?? true,
       showSound: json['show_sound'] as bool? ?? true,
@@ -329,6 +352,10 @@ class Role {
       'ai_api_url': aiApiUrl,
       'ai_api_key': aiApiKey,
       'ai_temperature': aiTemperature,
+      if (aiTimeoutSeconds != null) 'ai_timeout_seconds': aiTimeoutSeconds,
+      if (aiReasoningEffort != null && aiReasoningEffort!.trim().isNotEmpty)
+        'ai_reasoning_effort': aiReasoningEffort,
+      if (aiStream != null) 'ai_stream': aiStream,
       'gender': gender,
       'menstruation_cycle': menstruationCycle,
       'temperature': temperature,

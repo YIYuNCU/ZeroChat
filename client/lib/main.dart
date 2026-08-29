@@ -284,7 +284,9 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
   @override
   void didHaveMemoryPressure() {
     MediaCacheService.clearInMemoryImageCache();
-    debugPrint('MediaCacheService: cleared decoded image cache on memory pressure');
+    debugPrint(
+      'MediaCacheService: cleared decoded image cache on memory pressure',
+    );
   }
 
   @override

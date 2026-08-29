@@ -371,6 +371,12 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
     if update.ai_api_format is not None:
         value = str(update.ai_api_format).strip().lower()
         updates["ai_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+    if update.ai_timeout_seconds is not None:
+        updates["ai_timeout_seconds"] = max(1, min(3600, update.ai_timeout_seconds))
+    if update.ai_reasoning_effort is not None:
+        updates["ai_reasoning_effort"] = str(update.ai_reasoning_effort).strip()
+    if update.ai_stream is not None:
+        updates["ai_stream"] = update.ai_stream
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
     if update.intent_api_url is not None:
@@ -500,6 +506,9 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                 if role_model.ai_temperature is not None
                 else 0.7
             ),
+            "ai_timeout_seconds": role_model.ai_timeout_seconds,
+            "ai_reasoning_effort": role_model.ai_reasoning_effort,
+            "ai_stream": role_model.ai_stream,
             "personality": (
                 role_model.personality.model_dump()
                 if role_model.personality

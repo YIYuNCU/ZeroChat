@@ -111,6 +111,9 @@ class SettingsUpdate(BaseModel):
     ai_api_key: Optional[str] = None
     ai_model: Optional[str] = None
     ai_api_format: Optional[str] = None
+    ai_timeout_seconds: Optional[int] = None
+    ai_reasoning_effort: Optional[str] = None
+    ai_stream: Optional[bool] = None
     intent_enabled: Optional[bool] = None
     intent_api_url: Optional[str] = None
     intent_api_key: Optional[str] = None
@@ -158,6 +161,12 @@ async def update_settings(update: SettingsUpdate):
     if update.ai_api_format is not None:
         value = update.ai_api_format.strip().lower()
         updates["ai_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+    if update.ai_timeout_seconds is not None:
+        updates["ai_timeout_seconds"] = max(1, min(3600, update.ai_timeout_seconds))
+    if update.ai_reasoning_effort is not None:
+        updates["ai_reasoning_effort"] = update.ai_reasoning_effort.strip()
+    if update.ai_stream is not None:
+        updates["ai_stream"] = update.ai_stream
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
     if update.intent_api_url is not None:

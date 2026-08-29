@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from routers.settings import SettingsUpdate, _model_ids, _models_request, update_settings
+from routers.ai_behavior import IntentDetectRequest, detect_intent
 from services.ai_service import (
     _build_chat_request,
     _normalize_api_url,
@@ -198,6 +199,7 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_settings_persist_validated_protocol_fields(self):
         update = SettingsUpdate(
             ai_api_format="gemini_native",
+            intent_api_format="openai_compatible",
             vision_api_format="unexpected",
         )
         with patch("routers.settings.settings_service.save_settings", return_value=True) as save:
@@ -206,8 +208,34 @@ class ProviderCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(
             save.call_args.args[0],
-            {"ai_api_format": "gemini_native", "vision_api_format": "auto"},
+            {
+                "ai_api_format": "gemini_native",
+                "intent_api_format": "openai_compatible",
+                "vision_api_format": "auto",
+            },
         )
+
+    async def test_intent_request_forwards_its_protocol_format(self):
+        request = IntentDetectRequest(
+            message="remember this",
+            api_url="https://generativelanguage.googleapis.com/v1beta",
+            api_key="test-key",
+            model="gemini-2.5-flash",
+            api_format="gemini_native",
+        )
+        with patch(
+            "services.json_parse.call_ai_json",
+            new=AsyncMock(
+                return_value={
+                    "success": True,
+                    "data": {"intent": "normal_chat"},
+                }
+            ),
+        ) as call:
+            result = await detect_intent(request)
+
+        self.assertTrue(result.success)
+        self.assertEqual(call.await_args.kwargs["api_format"], "gemini_native")
 
     async def test_deepseek_vision_replaces_data_url_with_one_day_file(self):
         data_url = "data:image/png;base64,AA=="

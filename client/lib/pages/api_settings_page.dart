@@ -4,7 +4,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../models/ai_model_profile.dart';
-import '../models/proactive_config.dart';
 import '../models/provider_quiet_rule.dart';
 import '../services/role_service.dart';
 import '../services/secure_backend_client.dart';
@@ -61,7 +60,9 @@ class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
               _NavigationRow(
                 icon: Icons.dns_outlined,
                 title: '后端连接',
-                subtitle: settings.backendUrl.isEmpty ? '未配置' : settings.backendUrl,
+                subtitle: settings.backendUrl.isEmpty
+                    ? '未配置'
+                    : settings.backendUrl,
                 onTap: () => _push(context, const BackendConnectionPage()),
               ),
             ],
@@ -72,7 +73,10 @@ class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
               _NavigationRow(
                 icon: Icons.chat_bubble_outline,
                 title: '默认聊天模型',
-                subtitle: _modelSummary(settings.chatModel, settings.chatApiUrl),
+                subtitle: _modelSummary(
+                  settings.chatModel,
+                  settings.chatApiUrl,
+                ),
                 onTap: () => _push(
                   context,
                   const ModelSettingsPage(kind: ModelSettingsKind.chat),
@@ -128,7 +132,8 @@ class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
               _NavigationRow(
                 icon: Icons.bookmarks_outlined,
                 title: '模型档案管理',
-                subtitle: '${settings.modelProfilesFor(ModelProfileCapability.chat).length} 个聊天档案，${settings.modelProfilesFor(ModelProfileCapability.intent).length} 个意图档案',
+                subtitle:
+                    '${settings.modelProfilesFor(ModelProfileCapability.chat).length} 个聊天档案，${settings.modelProfilesFor(ModelProfileCapability.intent).length} 个意图档案',
                 onTap: () => _push(context, const ModelProfilesPage()),
               ),
               const Divider(height: 1, indent: 56),
@@ -147,8 +152,11 @@ class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
   }
 }
 
-String _modelSummary(String model, String url) =>
-    url.trim().isEmpty ? '未配置' : model.trim().isEmpty ? url : model;
+String _modelSummary(String model, String url) => url.trim().isEmpty
+    ? '未配置'
+    : model.trim().isEmpty
+    ? url
+    : model;
 
 String _featureSummary(bool enabled, String model, String url) {
   if (!enabled) return '未启用';
@@ -255,11 +263,25 @@ class _BackendConnectionPageState extends State<BackendConnectionPage> {
         const _PageHint('Token 与传输密钥仅保存在当前设备，不会覆盖服务端安全配置。'),
         _Section(
           children: [
-            _FieldRow(label: '服务器地址', controller: _url, hint: 'http://localhost:8000'),
+            _FieldRow(
+              label: '服务器地址',
+              controller: _url,
+              hint: 'http://localhost:8000',
+            ),
             const Divider(height: 1),
-            _FieldRow(label: 'Token', controller: _token, hint: '后端鉴权 Token', obscure: true),
+            _FieldRow(
+              label: 'Token',
+              controller: _token,
+              hint: '后端鉴权 Token',
+              obscure: true,
+            ),
             const Divider(height: 1),
-            _FieldRow(label: '传输密钥', controller: _secret, hint: '后端传输加密密钥', obscure: true),
+            _FieldRow(
+              label: '传输密钥',
+              controller: _secret,
+              hint: '后端传输加密密钥',
+              obscure: true,
+            ),
           ],
         ),
         const _SectionGap(),
@@ -283,7 +305,10 @@ class _BackendConnectionPageState extends State<BackendConnectionPage> {
         if (_result != null)
           Padding(
             padding: const EdgeInsets.all(16),
-            child: Text(_result!, style: const TextStyle(color: Color(0xFF666666))),
+            child: Text(
+              _result!,
+              style: const TextStyle(color: Color(0xFF666666)),
+            ),
           ),
       ],
     ),
@@ -350,7 +375,11 @@ class _ModelProfilesPageState extends State<ModelProfilesPage> {
         elevation: 0,
         title: const Text('模型档案管理'),
         actions: [
-          IconButton(tooltip: '新建档案', onPressed: () => _edit(), icon: const Icon(Icons.add)),
+          IconButton(
+            tooltip: '新建档案',
+            onPressed: () => _edit(),
+            icon: const Icon(Icons.add),
+          ),
         ],
       ),
       body: Column(
@@ -361,7 +390,11 @@ class _ModelProfilesPageState extends State<ModelProfilesPage> {
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               children: [
-                ChoiceChip(label: const Text('全部'), selected: _filter == null, onSelected: (_) => setState(() => _filter = null)),
+                ChoiceChip(
+                  label: const Text('全部'),
+                  selected: _filter == null,
+                  onSelected: (_) => setState(() => _filter = null),
+                ),
                 for (final capability in ModelProfileCapability.values)
                   Padding(
                     padding: const EdgeInsets.only(left: 8),
@@ -394,11 +427,16 @@ class _ModelProfilesPageState extends State<ModelProfilesPage> {
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              IconButton(tooltip: '编辑档案', onPressed: () => _edit(profile), icon: const Icon(Icons.edit_outlined)),
+                              IconButton(
+                                tooltip: '编辑档案',
+                                onPressed: () => _edit(profile),
+                                icon: const Icon(Icons.edit_outlined),
+                              ),
                               IconButton(
                                 tooltip: '删除档案',
                                 onPressed: () async {
-                                  await SettingsService.instance.deleteModelProfile(profile.id);
+                                  await SettingsService.instance
+                                      .deleteModelProfile(profile.id);
                                   if (mounted) setState(() {});
                                 },
                                 icon: const Icon(Icons.delete_outline),
@@ -430,10 +468,18 @@ class _ProviderQuietRulesPageState extends State<ProviderQuietRulesPage> {
       (name: '当前聊天模型', url: settings.chatApiUrl, model: settings.chatModel),
     ];
     final seen = <String>{'${settings.chatApiUrl}|${settings.chatModel}'};
-    for (final profile in ModelProfileCapability.values.expand(settings.modelProfilesFor)) {
+    for (final profile in ModelProfileCapability.values.expand(
+      settings.modelProfilesFor,
+    )) {
       final key = '${profile.apiUrl}|${profile.model}';
-      if (profile.apiUrl.isNotEmpty && profile.model.isNotEmpty && seen.add(key)) {
-        targets.add((name: profile.name, url: profile.apiUrl, model: profile.model));
+      if (profile.apiUrl.isNotEmpty &&
+          profile.model.isNotEmpty &&
+          seen.add(key)) {
+        targets.add((
+          name: profile.name,
+          url: profile.apiUrl,
+          model: profile.model,
+        ));
       }
     }
     return targets;
@@ -445,14 +491,22 @@ class _ProviderQuietRulesPageState extends State<ProviderQuietRulesPage> {
       return;
     }
     final all = SettingsService.instance.providerQuietRules;
-    final existing = all.where((rule) => ProviderQuietRule.matches(rule, url, model)).toList();
+    final existing = all
+        .where((rule) => ProviderQuietRule.matches(rule, url, model))
+        .toList();
     final edited = await showQuietRuleEditor(
       context,
       initialRules: existing.map((rule) => rule.toRule()).toList(),
     );
     if (edited == null) return;
     final updated = edited
-        .map((rule) => ProviderQuietRule.fromRuleAndTarget(rule: rule, apiUrl: url, model: model))
+        .map(
+          (rule) => ProviderQuietRule.fromRuleAndTarget(
+            rule: rule,
+            apiUrl: url,
+            model: model,
+          ),
+        )
         .toList();
     await SettingsService.instance.updateProviderQuietRules([
       ...all.where((rule) => !ProviderQuietRule.matches(rule, url, model)),
@@ -475,14 +529,26 @@ class _ProviderQuietRulesPageState extends State<ProviderQuietRulesPage> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(controller: url, decoration: const InputDecoration(labelText: 'API 地址')),
-            TextField(controller: model, decoration: const InputDecoration(labelText: '模型')),
+            TextField(
+              controller: url,
+              decoration: const InputDecoration(labelText: 'API 地址'),
+            ),
+            TextField(
+              controller: model,
+              decoration: const InputDecoration(labelText: '模型'),
+            ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, (url: url.text.trim(), model: model.text.trim())),
+            onPressed: () => Navigator.pop(context, (
+              url: url.text.trim(),
+              model: model.text.trim(),
+            )),
             child: const Text('确定'),
           ),
         ],
@@ -490,7 +556,10 @@ class _ProviderQuietRulesPageState extends State<ProviderQuietRulesPage> {
     );
     url.dispose();
     model.dispose();
-    if (target != null && target.url.isNotEmpty && target.model.isNotEmpty && mounted) {
+    if (target != null &&
+        target.url.isNotEmpty &&
+        target.model.isNotEmpty &&
+        mounted) {
       await _editTarget(target.url, target.model);
     }
   }
@@ -504,7 +573,13 @@ class _ProviderQuietRulesPageState extends State<ProviderQuietRulesPage> {
         backgroundColor: const Color(0xFFEDEDED),
         elevation: 0,
         title: const Text('模型安静时间'),
-        actions: [IconButton(tooltip: '添加自定义模型', onPressed: _addCustom, icon: const Icon(Icons.add))],
+        actions: [
+          IconButton(
+            tooltip: '添加自定义模型',
+            onPressed: _addCustom,
+            icon: const Icon(Icons.add),
+          ),
+        ],
       ),
       body: ListView(
         children: [
@@ -516,12 +591,27 @@ class _ProviderQuietRulesPageState extends State<ProviderQuietRulesPage> {
                   title: Text(target.name),
                   subtitle: Text(
                     rules
-                            .where((rule) => ProviderQuietRule.matches(rule, target.url, target.model))
+                            .where(
+                              (rule) => ProviderQuietRule.matches(
+                                rule,
+                                target.url,
+                                target.model,
+                              ),
+                            )
                             .map((rule) => rule.label)
                             .join('；')
                             .isEmpty
                         ? '未设置'
-                        : rules.where((rule) => ProviderQuietRule.matches(rule, target.url, target.model)).map((rule) => rule.label).join('；'),
+                        : rules
+                              .where(
+                                (rule) => ProviderQuietRule.matches(
+                                  rule,
+                                  target.url,
+                                  target.model,
+                                ),
+                              )
+                              .map((rule) => rule.label)
+                              .join('；'),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -548,6 +638,13 @@ Future<ModelApiProfile?> _showProfileEditor(
   final model = TextEditingController(text: existing?.model ?? '');
   var format = existing?.apiFormat ?? 'auto';
   var visionMode = existing?.visionMode ?? 'standalone';
+  final timeout = TextEditingController(
+    text: existing?.timeoutSeconds?.toString() ?? '',
+  );
+  final reasoningEffort = TextEditingController(
+    text: existing?.reasoningEffort ?? '',
+  );
+  bool? stream = existing?.stream;
   var capabilities = {...?existing?.capabilities};
   final result = await showDialog<ModelApiProfile>(
     context: context,
@@ -558,17 +655,52 @@ Future<ModelApiProfile?> _showProfileEditor(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(controller: name, decoration: const InputDecoration(labelText: '档案名称')),
-              TextField(controller: url, decoration: const InputDecoration(labelText: 'API 地址')),
-              TextField(controller: key, obscureText: true, decoration: const InputDecoration(labelText: 'API Key')),
-              TextField(controller: model, decoration: const InputDecoration(labelText: '模型')),
+              TextField(
+                controller: name,
+                decoration: const InputDecoration(labelText: '档案名称'),
+              ),
+              TextField(
+                controller: url,
+                decoration: const InputDecoration(labelText: 'API 地址'),
+              ),
+              TextField(
+                controller: key,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'API Key'),
+              ),
+              TextField(
+                controller: model,
+                decoration: const InputDecoration(labelText: '模型'),
+              ),
+              TextField(
+                controller: timeout,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: '超时时间（秒，留空继承全局）'),
+              ),
+              TextField(
+                controller: reasoningEffort,
+                decoration: const InputDecoration(labelText: '思考强度（留空继承全局）'),
+              ),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('使用流式传输（未选中继承全局）'),
+                value: stream ?? false,
+                tristate: true,
+                onChanged: (value) => setState(() => stream = value),
+              ),
               DropdownButtonFormField<String>(
-                value: format,
+                initialValue: format,
                 decoration: const InputDecoration(labelText: '协议格式'),
                 items: const [
                   DropdownMenuItem(value: 'auto', child: Text('自动识别')),
-                  DropdownMenuItem(value: 'openai_compatible', child: Text('OpenAI 兼容')),
-                  DropdownMenuItem(value: 'gemini_native', child: Text('Gemini 原生')),
+                  DropdownMenuItem(
+                    value: 'openai_compatible',
+                    child: Text('OpenAI 兼容'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'gemini_native',
+                    child: Text('Gemini 原生'),
+                  ),
                 ],
                 onChanged: (value) => setState(() => format = value ?? 'auto'),
               ),
@@ -588,33 +720,57 @@ Future<ModelApiProfile?> _showProfileEditor(
                 ),
               if (capabilities.contains(ModelProfileCapability.vision))
                 DropdownButtonFormField<String>(
-                  value: visionMode,
+                  initialValue: visionMode,
                   decoration: const InputDecoration(labelText: '视觉运行模式'),
                   items: const [
                     DropdownMenuItem(value: 'standalone', child: Text('独立识图')),
                     DropdownMenuItem(value: 'pre_model', child: Text('预处理模型')),
                     DropdownMenuItem(value: 'tool', child: Text('工具调用')),
                   ],
-                  onChanged: (value) => setState(() => visionMode = value ?? 'standalone'),
+                  onChanged: (value) =>
+                      setState(() => visionMode = value ?? 'standalone'),
                 ),
             ],
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
           FilledButton(
             onPressed: () {
-              if (name.text.trim().isEmpty || url.text.trim().isEmpty || model.text.trim().isEmpty || capabilities.isEmpty) return;
-              Navigator.pop(context, ModelApiProfile(
-                id: existing?.id ?? 'model_profile_${DateTime.now().microsecondsSinceEpoch}',
-                name: name.text.trim(),
-                apiUrl: url.text.trim(),
-                apiKey: key.text.trim(),
-                model: model.text.trim(),
-                apiFormat: format,
-                capabilities: capabilities,
-                visionMode: capabilities.contains(ModelProfileCapability.vision) ? visionMode : null,
-              ));
+              if (name.text.trim().isEmpty ||
+                  url.text.trim().isEmpty ||
+                  model.text.trim().isEmpty ||
+                  capabilities.isEmpty) {
+                return;
+              }
+              Navigator.pop(
+                context,
+                ModelApiProfile(
+                  id:
+                      existing?.id ??
+                      'model_profile_${DateTime.now().microsecondsSinceEpoch}',
+                  name: name.text.trim(),
+                  apiUrl: url.text.trim(),
+                  apiKey: key.text.trim(),
+                  model: model.text.trim(),
+                  apiFormat: format,
+                  capabilities: capabilities,
+                  visionMode:
+                      capabilities.contains(ModelProfileCapability.vision)
+                      ? visionMode
+                      : null,
+                  timeoutSeconds: int.tryParse(
+                    timeout.text.trim(),
+                  )?.clamp(1, 3600),
+                  reasoningEffort: reasoningEffort.text.trim().isEmpty
+                      ? null
+                      : reasoningEffort.text.trim(),
+                  stream: stream,
+                ),
+              );
             },
             child: const Text('保存'),
           ),
@@ -626,6 +782,8 @@ Future<ModelApiProfile?> _showProfileEditor(
   url.dispose();
   key.dispose();
   model.dispose();
+  timeout.dispose();
+  reasoningEffort.dispose();
   return result;
 }
 
@@ -635,10 +793,20 @@ Future<String?> _askProfileName(BuildContext context, String initial) async {
     context: context,
     builder: (context) => AlertDialog(
       title: const Text('保存模型档案'),
-      content: TextField(controller: controller, autofocus: true, decoration: const InputDecoration(labelText: '档案名称')),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        decoration: const InputDecoration(labelText: '档案名称'),
+      ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-        FilledButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text('保存')),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, controller.text.trim()),
+          child: const Text('保存'),
+        ),
       ],
     ),
   );
@@ -651,7 +819,10 @@ class _Section extends StatelessWidget {
   const _Section({required this.children});
 
   @override
-  Widget build(BuildContext context) => Container(color: Colors.white, child: Column(children: children));
+  Widget build(BuildContext context) => Container(
+    color: Colors.white,
+    child: Column(children: children),
+  );
 }
 
 class _SectionGap extends StatelessWidget {
@@ -666,7 +837,10 @@ class _PageHint extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-    child: Text(text, style: const TextStyle(fontSize: 12, color: Color(0xFF777777))),
+    child: Text(
+      text,
+      style: const TextStyle(fontSize: 12, color: Color(0xFF777777)),
+    ),
   );
 }
 
@@ -675,14 +849,23 @@ class _NavigationRow extends StatelessWidget {
   final String title;
   final String subtitle;
   final VoidCallback onTap;
-  const _NavigationRow({required this.icon, required this.title, required this.subtitle, required this.onTap});
+  const _NavigationRow({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) => ListTile(
     leading: Icon(icon, color: const Color(0xFF07C160)),
     title: Text(title),
     subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-    trailing: const Icon(Icons.arrow_forward_ios, size: 16, color: Color(0xFFBBBBBB)),
+    trailing: const Icon(
+      Icons.arrow_forward_ios,
+      size: 16,
+      color: Color(0xFFBBBBBB),
+    ),
     onTap: onTap,
   );
 }
@@ -692,7 +875,12 @@ class _FieldRow extends StatefulWidget {
   final TextEditingController controller;
   final String hint;
   final bool obscure;
-  const _FieldRow({required this.label, required this.controller, required this.hint, this.obscure = false});
+  const _FieldRow({
+    required this.label,
+    required this.controller,
+    required this.hint,
+    this.obscure = false,
+  });
 
   @override
   State<_FieldRow> createState() => _FieldRowState();
@@ -719,7 +907,11 @@ class _FieldRowState extends State<_FieldRow> {
                   ? IconButton(
                       tooltip: _obscured ? '显示' : '隐藏',
                       onPressed: () => setState(() => _obscured = !_obscured),
-                      icon: Icon(_obscured ? Icons.visibility_off_outlined : Icons.visibility_outlined),
+                      icon: Icon(
+                        _obscured
+                            ? Icons.visibility_off_outlined
+                            : Icons.visibility_outlined,
+                      ),
                     )
                   : null,
             ),
@@ -735,13 +927,28 @@ class _ActionRow extends StatelessWidget {
   final String label;
   final bool busy;
   final VoidCallback? onTap;
-  const _ActionRow({required this.icon, required this.label, this.busy = false, this.onTap});
+  const _ActionRow({
+    required this.icon,
+    required this.label,
+    this.busy = false,
+    this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) => ListTile(
-    leading: busy ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)) : Icon(icon),
+    leading: busy
+        ? const SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+        : Icon(icon),
     title: Text(label),
-    trailing: const Icon(Icons.arrow_forward_ios, size: 16, color: Color(0xFFBBBBBB)),
+    trailing: const Icon(
+      Icons.arrow_forward_ios,
+      size: 16,
+      color: Color(0xFFBBBBBB),
+    ),
     onTap: onTap,
   );
 }
@@ -753,21 +960,33 @@ class _FormatSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-    child: Row(children: [
-      const SizedBox(width: 82, child: Text('协议格式')),
-      Expanded(child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: value,
-          isExpanded: true,
-          items: const [
-            DropdownMenuItem(value: 'auto', child: Text('自动识别')),
-            DropdownMenuItem(value: 'openai_compatible', child: Text('OpenAI 兼容')),
-            DropdownMenuItem(value: 'gemini_native', child: Text('Gemini 原生')),
-          ],
-          onChanged: (next) { if (next != null) onChanged(next); },
+    child: Row(
+      children: [
+        const SizedBox(width: 82, child: Text('协议格式')),
+        Expanded(
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: value,
+              isExpanded: true,
+              items: const [
+                DropdownMenuItem(value: 'auto', child: Text('自动识别')),
+                DropdownMenuItem(
+                  value: 'openai_compatible',
+                  child: Text('OpenAI 兼容'),
+                ),
+                DropdownMenuItem(
+                  value: 'gemini_native',
+                  child: Text('Gemini 原生'),
+                ),
+              ],
+              onChanged: (next) {
+                if (next != null) onChanged(next);
+              },
+            ),
+          ),
         ),
-      )),
-    ]),
+      ],
+    ),
   );
 }
 
@@ -778,21 +997,27 @@ class _VisionModeSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-    child: Row(children: [
-      const SizedBox(width: 82, child: Text('运行模式')),
-      Expanded(child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: value,
-          isExpanded: true,
-          items: const [
-            DropdownMenuItem(value: 'standalone', child: Text('独立识图')),
-            DropdownMenuItem(value: 'pre_model', child: Text('预处理模型')),
-            DropdownMenuItem(value: 'tool', child: Text('工具调用')),
-          ],
-          onChanged: (next) { if (next != null) onChanged(next); },
+    child: Row(
+      children: [
+        const SizedBox(width: 82, child: Text('运行模式')),
+        Expanded(
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: value,
+              isExpanded: true,
+              items: const [
+                DropdownMenuItem(value: 'standalone', child: Text('独立识图')),
+                DropdownMenuItem(value: 'pre_model', child: Text('预处理模型')),
+                DropdownMenuItem(value: 'tool', child: Text('工具调用')),
+              ],
+              onChanged: (next) {
+                if (next != null) onChanged(next);
+              },
+            ),
+          ),
         ),
-      )),
-    ]),
+      ],
+    ),
   );
 }
 
@@ -803,22 +1028,41 @@ class _ModelRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-    child: Row(children: [
-      const SizedBox(width: 82, child: Text('模型')),
-      Expanded(
-        child: models.isEmpty
-            ? TextField(controller: controller, decoration: const InputDecoration(border: InputBorder.none, hintText: '输入模型名称'))
-            : DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: models.contains(controller.text) ? controller.text : null,
-                  hint: const Text('选择模型'),
-                  isExpanded: true,
-                  items: models.map((item) => DropdownMenuItem(value: item, child: Text(item, overflow: TextOverflow.ellipsis))).toList(),
-                  onChanged: (value) { if (value != null) controller.text = value; },
+    child: Row(
+      children: [
+        const SizedBox(width: 82, child: Text('模型')),
+        Expanded(
+          child: models.isEmpty
+              ? TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    hintText: '输入模型名称',
+                  ),
+                )
+              : DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: models.contains(controller.text)
+                        ? controller.text
+                        : null,
+                    hint: const Text('选择模型'),
+                    isExpanded: true,
+                    items: models
+                        .map(
+                          (item) => DropdownMenuItem(
+                            value: item,
+                            child: Text(item, overflow: TextOverflow.ellipsis),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value != null) controller.text = value;
+                    },
+                  ),
                 ),
-              ),
-      ),
-    ]),
+        ),
+      ],
+    ),
   );
 }
 
@@ -826,54 +1070,90 @@ class _ProfileSelector extends StatelessWidget {
   final String? value;
   final List<ModelApiProfile> profiles;
   final ValueChanged<String?> onChanged;
-  const _ProfileSelector({required this.value, required this.profiles, required this.onChanged});
+  const _ProfileSelector({
+    required this.value,
+    required this.profiles,
+    required this.onChanged,
+  });
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-    child: Row(children: [
-      const SizedBox(width: 82, child: Text('模型档案')),
-      Expanded(child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: profiles.any((item) => item.id == value) ? value : null,
-          hint: const Text('选择并应用档案'),
-          isExpanded: true,
-          items: profiles.map((item) => DropdownMenuItem(value: item.id, child: Text(item.name, overflow: TextOverflow.ellipsis))).toList(),
-          onChanged: onChanged,
+    child: Row(
+      children: [
+        const SizedBox(width: 82, child: Text('模型档案')),
+        Expanded(
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: profiles.any((item) => item.id == value) ? value : null,
+              hint: const Text('选择并应用档案'),
+              isExpanded: true,
+              items: profiles
+                  .map(
+                    (item) => DropdownMenuItem(
+                      value: item.id,
+                      child: Text(item.name, overflow: TextOverflow.ellipsis),
+                    ),
+                  )
+                  .toList(),
+              onChanged: onChanged,
+            ),
+          ),
         ),
-      )),
-    ]),
+      ],
+    ),
   );
 }
 
-String _capabilityLabel(ModelProfileCapability capability) => switch (capability) {
-  ModelProfileCapability.chat => '聊天',
-  ModelProfileCapability.intent => '意图识别',
-  ModelProfileCapability.vision => '视觉识别',
-  ModelProfileCapability.embedding => '向量记忆',
-};
+String _capabilityLabel(ModelProfileCapability capability) =>
+    switch (capability) {
+      ModelProfileCapability.chat => '聊天',
+      ModelProfileCapability.intent => '意图识别',
+      ModelProfileCapability.vision => '视觉识别',
+      ModelProfileCapability.embedding => '向量记忆',
+    };
 
 void _showMessage(BuildContext context, String text) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 }
 
-({String url, Map<String, String> headers, bool nativeGemini}) _buildModelsRequest(
-  String apiUrl,
-  String apiKey,
-  String apiFormat,
-) {
+({String url, Map<String, String> headers, bool nativeGemini})
+_buildModelsRequest(String apiUrl, String apiKey, String apiFormat) {
   final uri = Uri.parse(apiUrl.trim());
   final google = uri.host.toLowerCase() == 'generativelanguage.googleapis.com';
-  final native = apiFormat == 'gemini_native' || (apiFormat != 'openai_compatible' && google && !uri.path.toLowerCase().contains('/openai'));
+  final native =
+      apiFormat == 'gemini_native' ||
+      (apiFormat != 'openai_compatible' &&
+          google &&
+          !uri.path.toLowerCase().contains('/openai'));
   var path = uri.path.replaceAll(RegExp(r'/+$'), '');
   if (native) {
     path = _nativeGeminiBasePath(path);
-    if (!path.toLowerCase().endsWith('/v1') && !path.toLowerCase().endsWith('/v1beta')) path = '$path/v1beta';
-    return (url: uri.replace(path: '$path/models', queryParameters: {'key': apiKey}).toString(), headers: const {}, nativeGemini: true);
+    if (!path.toLowerCase().endsWith('/v1') &&
+        !path.toLowerCase().endsWith('/v1beta')) {
+      path = '$path/v1beta';
+    }
+    return (
+      url: uri
+          .replace(path: '$path/models', queryParameters: {'key': apiKey})
+          .toString(),
+      headers: const {},
+      nativeGemini: true,
+    );
   }
-  if (google && apiFormat == 'openai_compatible' && !path.toLowerCase().contains('/openai')) path = '$path/openai';
+  if (google &&
+      apiFormat == 'openai_compatible' &&
+      !path.toLowerCase().contains('/openai')) {
+    path = '$path/openai';
+  }
   path = path.replaceFirst(RegExp(r'/chat/completions$'), '');
-  if (!path.endsWith('/models')) path = path.endsWith('/v1') ? '$path/models' : '$path/v1/models';
-  return (url: uri.replace(path: path, query: null).toString(), headers: {'Authorization': 'Bearer $apiKey'}, nativeGemini: false);
+  if (!path.endsWith('/models')) {
+    path = path.endsWith('/v1') ? '$path/models' : '$path/v1/models';
+  }
+  return (
+    url: uri.replace(path: path, query: null).toString(),
+    headers: {'Authorization': 'Bearer $apiKey'},
+    nativeGemini: false,
+  );
 }
 
 List<String> _readModelIds(dynamic decoded, bool nativeGemini) {
@@ -905,21 +1185,36 @@ bool _usesNativeGemini(String value, String apiFormat) {
 }
 
 String _nativeGeminiBasePath(String path) {
-  var result = path.replaceFirst(RegExp(r'/openai(?:/|$)', caseSensitive: false), '/');
-  result = result.replaceFirst(RegExp(r'/models(?:/.*)?$', caseSensitive: false), '');
-  result = result.replaceFirst(RegExp(r'/chat/completions$', caseSensitive: false), '');
+  var result = path.replaceFirst(
+    RegExp(r'/openai(?:/|$)', caseSensitive: false),
+    '/',
+  );
+  result = result.replaceFirst(
+    RegExp(r'/models(?:/.*)?$', caseSensitive: false),
+    '',
+  );
+  result = result.replaceFirst(
+    RegExp(r'/chat/completions$', caseSensitive: false),
+    '',
+  );
   return result.replaceAll(RegExp(r'/+$'), '');
 }
 
 String _nativeGeminiEndpoint(String value, String model, String apiKey) {
   final uri = Uri.parse(value.trim());
   var path = _nativeGeminiBasePath(uri.path);
-  if (!path.toLowerCase().endsWith('/v1') && !path.toLowerCase().endsWith('/v1beta')) path = '$path/v1beta';
-  return uri.replace(
-    path: '$path/models/${model.replaceFirst(RegExp(r'^models/'), '')}:generateContent',
-    queryParameters: {'key': apiKey.trim()},
-    fragment: '',
-  ).toString();
+  if (!path.toLowerCase().endsWith('/v1') &&
+      !path.toLowerCase().endsWith('/v1beta')) {
+    path = '$path/v1beta';
+  }
+  return uri
+      .replace(
+        path:
+            '$path/models/${model.replaceFirst(RegExp(r'^models/'), '')}:generateContent',
+        queryParameters: {'key': apiKey.trim()},
+        fragment: '',
+      )
+      .toString();
 }
 
 Map<String, dynamic> _nativeGeminiTestBody(ModelSettingsKind kind) {
@@ -930,11 +1225,17 @@ Map<String, dynamic> _nativeGeminiTestBody(ModelSettingsKind kind) {
     parts.add({
       'inlineData': {
         'mimeType': 'image/png',
-        'data': 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
+        'data':
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
       },
     });
   }
-  return {'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': {'maxOutputTokens': 8}};
+  return {
+    'contents': [
+      {'role': 'user', 'parts': parts},
+    ],
+    'generationConfig': {'maxOutputTokens': 8},
+  };
 }
 
 Map<String, dynamic> _chatTestBody(ModelSettingsKind kind, String model) {
@@ -950,7 +1251,8 @@ Map<String, dynamic> _chatTestBody(ModelSettingsKind kind, String model) {
             {
               'type': 'image_url',
               'image_url': {
-                'url': 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
+                'url':
+                    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl0fZcAAAAASUVORK5CYII=',
               },
             },
           ],
@@ -970,7 +1272,11 @@ Map<String, dynamic> _chatTestBody(ModelSettingsKind kind, String model) {
 String _chatEndpoint(String value) {
   final uri = Uri.parse(value.trim());
   var path = uri.path.replaceAll(RegExp(r'/+$'), '');
-  if (!path.endsWith('/chat/completions')) path = path.endsWith('/v1') ? '$path/chat/completions' : '$path/v1/chat/completions';
+  if (!path.endsWith('/chat/completions')) {
+    path = path.endsWith('/v1')
+        ? '$path/chat/completions'
+        : '$path/v1/chat/completions';
+  }
   return uri.replace(path: path, query: '', fragment: '').toString();
 }
 
@@ -978,7 +1284,8 @@ String _embeddingEndpoint(String value) {
   final uri = Uri.parse(value.trim());
   var path = uri.path.replaceAll(RegExp(r'/+$'), '');
   if (path.endsWith('/chat/completions')) {
-    path = '${path.substring(0, path.length - '/chat/completions'.length)}/embeddings';
+    path =
+        '${path.substring(0, path.length - '/chat/completions'.length)}/embeddings';
   } else if (!path.endsWith('/embeddings')) {
     path = path.endsWith('/v1') ? '$path/embeddings' : '$path/v1/embeddings';
   }
@@ -987,7 +1294,9 @@ String _embeddingEndpoint(String value) {
 
 String _responseSummary(String value) {
   final normalized = value.replaceAll(RegExp(r'\s+'), ' ').trim();
-  return normalized.length > 120 ? '${normalized.substring(0, 120)}...' : normalized;
+  return normalized.length > 120
+      ? '${normalized.substring(0, 120)}...'
+      : normalized;
 }
 
 class _ModelSettingsPageState extends State<ModelSettingsPage> {
@@ -997,6 +1306,9 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
   bool _enabled = true;
   String _format = 'auto';
   String _visionMode = 'standalone';
+  late final TextEditingController _timeout;
+  late final TextEditingController _reasoningEffort;
+  bool _stream = false;
   List<String> _models = [];
   bool _fetching = false;
   bool _testing = false;
@@ -1033,6 +1345,13 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
         _enabled = settings.embeddingEnabled;
     }
     _profileId = _matchingProfile()?.id;
+    _timeout = TextEditingController(
+      text: settings.chatTimeoutSeconds.toString(),
+    );
+    _reasoningEffort = TextEditingController(
+      text: settings.chatReasoningEffort,
+    );
+    _stream = settings.chatStream;
   }
 
   @override
@@ -1040,12 +1359,18 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
     _url.dispose();
     _key.dispose();
     _model.dispose();
+    _timeout.dispose();
+    _reasoningEffort.dispose();
     super.dispose();
   }
 
   ModelApiProfile? _matchingProfile() {
-    for (final profile in SettingsService.instance.modelProfilesFor(widget.kind.capability)) {
-      if (profile.apiUrl == _url.text && profile.model == _model.text) return profile;
+    for (final profile in SettingsService.instance.modelProfilesFor(
+      widget.kind.capability,
+    )) {
+      if (profile.apiUrl == _url.text && profile.model == _model.text) {
+        return profile;
+      }
     }
     return null;
   }
@@ -1063,12 +1388,19 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
         headers: request.headers,
         includeAuth: false,
       ).timeout(const Duration(seconds: 10));
-      if (response.statusCode != 200) throw Exception('HTTP ${response.statusCode}');
-      final models = _readModelIds(jsonDecode(response.body), request.nativeGemini);
+      if (response.statusCode != 200) {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+      final models = _readModelIds(
+        jsonDecode(response.body),
+        request.nativeGemini,
+      );
       if (!mounted) return;
       setState(() {
         _models = models;
-        if (models.isNotEmpty && !models.contains(_model.text)) _model.text = models.first;
+        if (models.isNotEmpty && !models.contains(_model.text)) {
+          _model.text = models.first;
+        }
       });
       _showMessage(context, '获取到 ${models.length} 个模型');
     } catch (error) {
@@ -1079,7 +1411,9 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
   }
 
   Future<void> _test() async {
-    if (_url.text.trim().isEmpty || _key.text.trim().isEmpty || _model.text.trim().isEmpty) {
+    if (_url.text.trim().isEmpty ||
+        _key.text.trim().isEmpty ||
+        _model.text.trim().isEmpty) {
       _showMessage(context, '请先填写 API 地址、API Key 和模型');
       return;
     }
@@ -1089,7 +1423,10 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
       final response = widget.kind == ModelSettingsKind.embedding
           ? await SecureBackendClient.postRawJson(
               _embeddingEndpoint(_url.text),
-              body: {'model': _model.text.trim(), 'input': 'ZeroChat configuration test'},
+              body: {
+                'model': _model.text.trim(),
+                'input': 'ZeroChat configuration test',
+              },
               headers: {'Authorization': 'Bearer ${_key.text.trim()}'},
               includeAuth: false,
               timeout: const Duration(seconds: 20),
@@ -1108,11 +1445,15 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
               timeout: const Duration(seconds: 30),
             );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('HTTP ${response.statusCode}: ${_responseSummary(response.body)}');
+        throw Exception(
+          'HTTP ${response.statusCode}: ${_responseSummary(response.body)}',
+        );
       }
       if (mounted) _showMessage(context, '当前配置可用');
     } catch (error) {
-      if (mounted) _showMessage(context, '测试失败: ${_responseSummary(error.toString())}');
+      if (mounted) {
+        _showMessage(context, '测试失败: ${_responseSummary(error.toString())}');
+      }
     } finally {
       if (mounted) setState(() => _testing = false);
     }
@@ -1124,13 +1465,39 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
       final settings = SettingsService.instance;
       switch (widget.kind) {
         case ModelSettingsKind.chat:
-          await settings.updateChatApi(url: _url.text.trim(), key: _key.text.trim(), model: _model.text.trim(), apiFormat: _format);
+          await settings.updateChatApi(
+            url: _url.text.trim(),
+            key: _key.text.trim(),
+            model: _model.text.trim(),
+            apiFormat: _format,
+            timeoutSeconds: int.tryParse(_timeout.text.trim()),
+            reasoningEffort: _reasoningEffort.text.trim(),
+            stream: _stream,
+          );
         case ModelSettingsKind.intent:
-          await settings.updateIntentApi(enabled: _enabled, url: _url.text.trim(), key: _key.text.trim(), model: _model.text.trim(), apiFormat: _format);
+          await settings.updateIntentApi(
+            enabled: _enabled,
+            url: _url.text.trim(),
+            key: _key.text.trim(),
+            model: _model.text.trim(),
+            apiFormat: _format,
+          );
         case ModelSettingsKind.vision:
-          await settings.updateVisionApi(enabled: _enabled, url: _url.text.trim(), key: _key.text.trim(), model: _model.text.trim(), mode: _visionMode, apiFormat: _format);
+          await settings.updateVisionApi(
+            enabled: _enabled,
+            url: _url.text.trim(),
+            key: _key.text.trim(),
+            model: _model.text.trim(),
+            mode: _visionMode,
+            apiFormat: _format,
+          );
         case ModelSettingsKind.embedding:
-          await settings.updateEmbeddingApi(enabled: _enabled, url: _url.text.trim(), key: _key.text.trim(), model: _model.text.trim());
+          await settings.updateEmbeddingApi(
+            enabled: _enabled,
+            url: _url.text.trim(),
+            key: _key.text.trim(),
+            model: _model.text.trim(),
+          );
       }
       final synced = await settings.syncApiSettingsToBackend();
       if (!mounted) return;
@@ -1150,21 +1517,31 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
     final name = await _askProfileName(context, _model.text.trim());
     if (name == null || name.isEmpty) return;
     final id = 'model_profile_${DateTime.now().microsecondsSinceEpoch}';
-    await SettingsService.instance.saveApiProfile(ModelApiProfile(
-      id: id,
-      name: name,
-      apiUrl: _url.text.trim(),
-      model: _model.text.trim(),
-      apiKey: _key.text.trim(),
-      apiFormat: _format,
-      capabilities: {widget.kind.capability},
-      visionMode: widget.kind == ModelSettingsKind.vision ? _visionMode : null,
-    ));
+    await SettingsService.instance.saveApiProfile(
+      ModelApiProfile(
+        id: id,
+        name: name,
+        apiUrl: _url.text.trim(),
+        model: _model.text.trim(),
+        apiKey: _key.text.trim(),
+        apiFormat: _format,
+        capabilities: {widget.kind.capability},
+        visionMode: widget.kind == ModelSettingsKind.vision
+            ? _visionMode
+            : null,
+        timeoutSeconds: int.tryParse(_timeout.text.trim())?.clamp(1, 3600),
+        reasoningEffort: _reasoningEffort.text.trim().isEmpty
+            ? null
+            : _reasoningEffort.text.trim(),
+        stream: _stream,
+      ),
+    );
     if (mounted) setState(() => _profileId = id);
   }
 
   void _applyProfile(String? id) {
     if (id == null || id.isEmpty) return;
+    final settings = SettingsService.instance;
     final profile = SettingsService.instance
         .modelProfilesFor(widget.kind.capability)
         .firstWhere((item) => item.id == id);
@@ -1174,13 +1551,21 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
       _key.text = profile.apiKey;
       _model.text = profile.model;
       _format = profile.apiFormat;
+      _timeout.text =
+          profile.timeoutSeconds?.toString() ??
+          settings.chatTimeoutSeconds.toString();
+      _reasoningEffort.text =
+          profile.reasoningEffort ?? settings.chatReasoningEffort;
+      _stream = profile.stream ?? settings.chatStream;
       if (profile.visionMode != null) _visionMode = profile.visionMode!;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final profiles = SettingsService.instance.modelProfilesFor(widget.kind.capability);
+    final profiles = SettingsService.instance.modelProfilesFor(
+      widget.kind.capability,
+    );
     return Scaffold(
       backgroundColor: const Color(0xFFEDEDED),
       appBar: AppBar(
@@ -1188,48 +1573,106 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
         elevation: 0,
         title: Text(widget.kind.title),
         actions: [
-          TextButton(onPressed: _saving ? null : _save, child: Text(_saving ? '保存中...' : '保存')),
+          TextButton(
+            onPressed: _saving ? null : _save,
+            child: Text(_saving ? '保存中...' : '保存'),
+          ),
         ],
       ),
       body: ListView(
         children: [
           if (widget.kind.hasToggle) ...[
-            _Section(children: [
-              SwitchListTile(
-                title: Text('启用${widget.kind.title}'),
-                value: _enabled,
-                onChanged: (value) => setState(() => _enabled = value),
-              ),
-            ]),
+            _Section(
+              children: [
+                SwitchListTile(
+                  title: Text('启用${widget.kind.title}'),
+                  value: _enabled,
+                  onChanged: (value) => setState(() => _enabled = value),
+                ),
+              ],
+            ),
             const _SectionGap(),
           ],
           _Section(
             children: [
-              _FieldRow(label: 'API 地址', controller: _url, hint: 'https://api.example.com/v1'),
+              _FieldRow(
+                label: 'API 地址',
+                controller: _url,
+                hint: 'https://api.example.com/v1',
+              ),
               if (widget.kind.hasFormat) ...[
                 const Divider(height: 1),
-                _FormatSelector(value: _format, onChanged: (value) => setState(() => _format = value)),
+                _FormatSelector(
+                  value: _format,
+                  onChanged: (value) => setState(() => _format = value),
+                ),
               ],
               const Divider(height: 1),
-              _FieldRow(label: 'API Key', controller: _key, hint: 'sk-xxx', obscure: true),
+              _FieldRow(
+                label: 'API Key',
+                controller: _key,
+                hint: 'sk-xxx',
+                obscure: true,
+              ),
               const Divider(height: 1),
               _ModelRow(controller: _model, models: _models),
+              if (widget.kind == ModelSettingsKind.chat) ...[
+                const Divider(height: 1),
+                _FieldRow(
+                  label: '超时时间（秒）',
+                  controller: _timeout,
+                  hint: '1-3600',
+                ),
+                const Divider(height: 1),
+                _FieldRow(
+                  label: '思考强度',
+                  controller: _reasoningEffort,
+                  hint: '如 low / medium / high',
+                ),
+                const Divider(height: 1),
+                SwitchListTile(
+                  title: const Text('使用流式传输'),
+                  value: _stream,
+                  onChanged: (value) => setState(() => _stream = value),
+                ),
+              ],
               const Divider(height: 1),
-              _ActionRow(icon: Icons.cloud_download_outlined, label: _fetching ? '获取中...' : '获取模型列表', busy: _fetching, onTap: _fetching ? null : _fetchModels),
+              _ActionRow(
+                icon: Icons.cloud_download_outlined,
+                label: _fetching ? '获取中...' : '获取模型列表',
+                busy: _fetching,
+                onTap: _fetching ? null : _fetchModels,
+              ),
               const Divider(height: 1),
-              _ActionRow(icon: Icons.play_circle_outline, label: _testing ? '测试中...' : '测试当前配置', busy: _testing, onTap: _testing ? null : _test),
+              _ActionRow(
+                icon: Icons.play_circle_outline,
+                label: _testing ? '测试中...' : '测试当前配置',
+                busy: _testing,
+                onTap: _testing ? null : _test,
+              ),
               if (widget.kind.hasVisionMode) ...[
                 const Divider(height: 1),
-                _VisionModeSelector(value: _visionMode, onChanged: (value) => setState(() => _visionMode = value)),
+                _VisionModeSelector(
+                  value: _visionMode,
+                  onChanged: (value) => setState(() => _visionMode = value),
+                ),
               ],
             ],
           ),
           const _SectionGap(),
           _Section(
             children: [
-              _ProfileSelector(value: _profileId, profiles: profiles, onChanged: _applyProfile),
+              _ProfileSelector(
+                value: _profileId,
+                profiles: profiles,
+                onChanged: _applyProfile,
+              ),
               const Divider(height: 1),
-              _ActionRow(icon: Icons.bookmark_add_outlined, label: '保存为模型档案', onTap: _saveAsProfile),
+              _ActionRow(
+                icon: Icons.bookmark_add_outlined,
+                label: '保存为模型档案',
+                onTap: _saveAsProfile,
+              ),
             ],
           ),
           const SizedBox(height: 30),

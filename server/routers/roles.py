@@ -180,6 +180,9 @@ class RoleCreate(BaseModel):
     ai_api_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_temperature: Optional[float] = None
+    ai_timeout_seconds: Optional[int] = None
+    ai_reasoning_effort: Optional[str] = None
+    ai_stream: Optional[bool] = None
 
     # 性别与生理周期
     gender: Optional[str] = "men"
@@ -244,6 +247,9 @@ class RoleUpdate(BaseModel):
     ai_api_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_temperature: Optional[float] = None
+    ai_timeout_seconds: Optional[int] = None
+    ai_reasoning_effort: Optional[str] = None
+    ai_stream: Optional[bool] = None
     gender: Optional[str] = None
     menstruation_cycle: Optional[MenstruationCycle] = None
     max_context_rounds: Optional[int] = None
@@ -529,6 +535,9 @@ async def create_role(role: RoleCreate, request: Request):
         "ai_api_url": role.ai_api_url or "",
         "ai_api_key": role.ai_api_key or "",
         "ai_temperature": role.ai_temperature if role.ai_temperature is not None else 0.7,
+        "ai_timeout_seconds": role.ai_timeout_seconds,
+        "ai_reasoning_effort": role.ai_reasoning_effort,
+        "ai_stream": role.ai_stream,
         "personality": role.personality.model_dump() if role.personality else {
             "openness": 50, "conscientiousness": 50, "extraversion": 50,
             "agreeableness": 50, "neuroticism": 50

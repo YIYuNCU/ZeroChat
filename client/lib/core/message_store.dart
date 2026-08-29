@@ -30,7 +30,7 @@ class MessageStore extends ChangeNotifier {
   final Map<String, Message> _lastMessages = {};
   final Map<String, int> _messageCounts = {};
   final Set<String> _knownChatIds = {};
-  final Set<String> _activeChatWindows = {};
+  final Map<String, int> _activeChatWindowCounts = <String, int>{};
   final Map<String, Future<void>> _loadingFutures = {};
   String? _archiveDirectoryPath;
 
@@ -180,7 +180,7 @@ class MessageStore extends ChangeNotifier {
       _localMessageRevision += 1;
       await _appendMessagesToArchive(chatId, [messageToStore]);
       _notifyMessageUpdate(chatId);
-      if (!_activeChatWindows.contains(chatId)) {
+      if (!_activeChatWindowCounts.containsKey(chatId)) {
         _messages.remove(chatId);
       }
     });
@@ -214,7 +214,7 @@ class MessageStore extends ChangeNotifier {
       _localMessageRevision += 1;
       await _appendMessagesToArchive(chatId, messagesToStore);
       _notifyMessageUpdate(chatId);
-      if (!_activeChatWindows.contains(chatId)) {
+      if (!_activeChatWindowCounts.containsKey(chatId)) {
         _messages.remove(chatId);
       }
     });
@@ -479,7 +479,12 @@ class MessageStore extends ChangeNotifier {
   }
 
   void releaseChatWindow(String chatId) {
-    _activeChatWindows.remove(chatId);
+    final count = _activeChatWindowCounts[chatId] ?? 0;
+    if (count > 1) {
+      _activeChatWindowCounts[chatId] = count - 1;
+      return;
+    }
+    _activeChatWindowCounts.remove(chatId);
     _messages.remove(chatId);
     final streamController = _streamControllers.remove(chatId);
     if (streamController != null) {
@@ -488,7 +493,8 @@ class MessageStore extends ChangeNotifier {
   }
 
   void activateChatWindow(String chatId) {
-    _activeChatWindows.add(chatId);
+    _activeChatWindowCounts[chatId] =
+        (_activeChatWindowCounts[chatId] ?? 0) + 1;
   }
 
   /// 获取最后一条消息
@@ -967,7 +973,7 @@ class MessageStore extends ChangeNotifier {
           } else {
             _lastMessages.remove(chatId);
           }
-          if (_activeChatWindows.contains(chatId)) {
+          if (_activeChatWindowCounts.containsKey(chatId)) {
             _messages[chatId] = _residentTail(messages);
           } else {
             _messages.remove(chatId);

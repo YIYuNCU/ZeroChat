@@ -208,7 +208,7 @@ def _resolve_ai_config(
     api_key: Optional[str],
     temperature: Optional[float] = None,
     api_format: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[float], str]:
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[float], str, int, str, bool]:
     config = settings_service.load_settings()
     resolved_model = model or config.get("ai_model", "deepseek-chat")
     resolved_format = _normalize_api_format(api_format or config.get("ai_api_format"))
@@ -217,9 +217,15 @@ def _resolve_ai_config(
     )
     resolved_key = api_key or config.get("ai_api_key", "")
     resolved_temperature = temperature if temperature is not None else config.get("ai_temperature", 0.7)
-    return resolved_model, resolved_url, resolved_key, resolved_temperature, resolved_format
+    timeout = config.get("ai_timeout_seconds", 60)
+    try:
+        timeout = max(1, min(3600, int(timeout)))
+    except (TypeError, ValueError):
+        timeout = 60
+    effort = str(config.get("ai_reasoning_effort") or "").strip()
+    return resolved_model, resolved_url, resolved_key, resolved_temperature, resolved_format, timeout, effort, bool(config.get("ai_stream", False))
 
-def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[float], str]:
+def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[float], str, int, str, bool]:
     if not role_data:
         return _resolve_ai_config(None, None, None, None, None)
 
@@ -228,6 +234,9 @@ def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optio
     api_key = role_data.get("ai_api_key")
     temperature = role_data.get("ai_temperature")
     api_format = role_data.get("ai_api_format")
+    timeout = role_data.get("ai_timeout_seconds")
+    effort = role_data.get("ai_reasoning_effort")
+    stream = role_data.get("ai_stream")
     metadata = role_data.get("metadata")
     if isinstance(metadata, dict):
         model = model or metadata.get("ai_model")
@@ -235,8 +244,18 @@ def _get_role_ai_config(role_data: Optional[Dict]) -> Tuple[Optional[str], Optio
         api_key = api_key or metadata.get("ai_api_key")
         temperature = temperature if temperature is not None else metadata.get("ai_temperature")
         api_format = api_format or metadata.get("ai_api_format")
+        timeout = timeout if timeout is not None else metadata.get("ai_timeout_seconds")
+        effort = effort if effort is not None else metadata.get("ai_reasoning_effort")
+        stream = stream if stream is not None else metadata.get("ai_stream")
 
-    return _resolve_ai_config(model, api_url, api_key, temperature, api_format)
+    resolved = _resolve_ai_config(model, api_url, api_key, temperature, api_format)
+    if timeout is None and effort is None and stream is None:
+        return resolved
+    try:
+        normalized_timeout = max(1, min(3600, int(timeout))) if timeout is not None else resolved[5]
+    except (TypeError, ValueError):
+        normalized_timeout = resolved[5]
+    return (*resolved[:5], normalized_timeout, str(effort or resolved[6]).strip(), bool(stream) if stream is not None else resolved[7])
 
 
 def _is_grok_model(model: Optional[str]) -> bool:
@@ -542,6 +561,61 @@ def _usage_platform(api_url: str) -> str:
         return "未知平台"
 
 
+async def _post_chat_stream(client, endpoint, headers, payload, timeout_seconds, messages, model, stats_role_id):
+    text_parts, reasoning_parts, tool_calls = [], [], {}
+    usage = None
+    timeout = httpx.Timeout(float(timeout_seconds), connect=min(20.0, float(timeout_seconds)))
+    async with client.stream("POST", endpoint, headers=headers, json=payload, timeout=timeout) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            line = line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if raw == "[DONE]":
+                break
+            item = json.loads(raw)
+            usage = item.get("usage") or usage
+            for choice in item.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    text_parts.append(str(delta["content"]))
+                if delta.get("reasoning_content"):
+                    reasoning_parts.append(str(delta["reasoning_content"]))
+                for tc in delta.get("tool_calls") or []:
+                    index = tc.get("index", 0)
+                    current = tool_calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    current["id"] += str(tc.get("id") or "")
+                    function = tc.get("function") or {}
+                    current["function"]["name"] += str(function.get("name") or "")
+                    current["function"]["arguments"] += str(function.get("arguments") or "")
+    content = _extract_plain_message_content("".join(text_parts))
+    if not content and not tool_calls:
+        raise ValueError("empty streaming response")
+    result = {"success": True, "content": content, "user_content": messages[-1], "error": None}
+    if usage:
+        result["usage"] = usage
+    if tool_calls:
+        result["tool_calls"] = list(tool_calls.values())
+        result["assistant_content"] = "".join(text_parts) or None
+    if reasoning_parts:
+        result["reasoning_content"] = "".join(reasoning_parts)
+    if usage and stats_role_id:
+        try:
+            from services.memory_service import record_usage, _run_db
+            await _run_db(
+                stats_role_id,
+                record_usage,
+                stats_role_id,
+                usage,
+                model,
+                _usage_platform(endpoint),
+            )
+        except Exception as exc:
+            logger.warning("record_usage failed: %s", exc)
+    return result
+
+
 async def _post_chat(
     messages: List[Dict[str, str]],
     api_url: str,
@@ -552,6 +626,9 @@ async def _post_chat(
     tools: Optional[List[Dict]] = None,
     stats_role_id: Optional[str] = None,
     api_format: Optional[str] = None,
+    timeout_seconds: int = 60,
+    reasoning_effort: str = "",
+    stream: bool = False,
 ) -> Dict[str, Any]:
     try:
         api_format = _normalize_api_format(api_format)
@@ -569,11 +646,22 @@ async def _post_chat(
             tools,
             api_format,
         )
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        if stream and not native_gemini:
+            payload["stream"] = True
         client = _get_http_client()
+        if stream and not native_gemini:
+            try:
+                return await _post_chat_stream(client, endpoint, headers, payload, timeout_seconds, messages, model, stats_role_id)
+            except Exception as exc:
+                logger.warning("Streaming chat failed, retrying non-stream: %s", exc)
+                payload.pop("stream", None)
         response = await client.post(
             endpoint,
             headers=headers,
             json=payload,
+            timeout=httpx.Timeout(float(timeout_seconds), connect=min(20.0, float(timeout_seconds))),
         )
         response.raise_for_status()
         data = response.json()
@@ -643,6 +731,9 @@ async def call_ai(
     tools: Optional[List[Dict]] = None,
     stats_role_id: Optional[str] = None,
     api_format: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
+    reasoning_effort: Optional[str] = None,
+    stream: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     统一 AI API 调用
@@ -657,9 +748,12 @@ async def call_ai(
     Returns:
         {"success": bool, "content": str, "error": str}
     """
-    resolved_model, resolved_url, resolved_key, resolved_temperature, resolved_format = _resolve_ai_config(
+    resolved_model, resolved_url, resolved_key, resolved_temperature, resolved_format, config_timeout, config_effort, config_stream = _resolve_ai_config(
         model, api_url, api_key, temperature, api_format,
     )
+    timeout_seconds = config_timeout if timeout_seconds is None else max(1, min(3600, int(timeout_seconds)))
+    reasoning_effort = config_effort if reasoning_effort is None else reasoning_effort.strip()
+    stream = config_stream if stream is None else bool(stream)
     if not resolved_url or not resolved_key:
         return {"success": False, "content": None, "error": "AI API 未配置"}
 
@@ -673,6 +767,9 @@ async def call_ai(
         tools=tools,
         stats_role_id=stats_role_id,
         api_format=resolved_format,
+        timeout_seconds=timeout_seconds,
+        reasoning_effort=reasoning_effort,
+        stream=stream,
     )
 
 async def call_ai_direct(
@@ -782,7 +879,7 @@ def _build_stats_instruction(
     if not stats:
         return ""
     stats_current = stats_current or {}
-    resolved_model, _, _, _, _ = _get_role_ai_config(role_data)
+    resolved_model, _, _, _, _, _, _, _ = _get_role_ai_config(role_data)
     is_grok = _is_grok_model(resolved_model)
     layout_rule = (
         "  - Grok 专项格式：<数值> 块必须位于整组对话的最后，紧贴最后一个 <对话> 块；"
@@ -842,7 +939,7 @@ def _build_system_prompt(
     stats_config = role_data.get("stats_config") or {}
     stats_enabled = bool(stats_config.get("enabled") and stats_config.get("stats"))
     sound_enabled = role_data.get("show_sound", True) is not False
-    resolved_model, _, _, _, _ = _get_role_ai_config(role_data)
+    resolved_model, _, _, _, _, _, _, _ = _get_role_ai_config(role_data)
     is_grok = _is_grok_model(resolved_model)
     use_conservative_tool_prompt_policy = _uses_conservative_tool_prompt_policy(
         resolved_model
@@ -1107,7 +1204,7 @@ async def _call_with_role_config(
     tools: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """Call AI using role-specific model configuration."""
-    model_override, url_override, key_override, temp_override, format_override = _get_role_ai_config(role_data)
+    model_override, url_override, key_override, temp_override, format_override, timeout_seconds, reasoning_effort, stream = _get_role_ai_config(role_data)
     stats_role_id = str(role_data.get("id") or "").strip() if isinstance(role_data, dict) else ""
     return await call_ai(
         messages,
@@ -1118,6 +1215,9 @@ async def _call_with_role_config(
         tools=tools,
         stats_role_id=stats_role_id or None,
         api_format=format_override,
+        timeout_seconds=timeout_seconds,
+        reasoning_effort=reasoning_effort,
+        stream=stream,
     )
 
 
@@ -1191,7 +1291,7 @@ async def generate_with_role(
     messages = []
     is_onebot = origin.startswith("onebot")
     is_third_party = is_onebot and sender != "user"
-    resolved_model, _, _, _, _ = _get_role_ai_config(role_data)
+    resolved_model, _, _, _, _, _, _, _ = _get_role_ai_config(role_data)
     system_content = _build_system_prompt(
         role_data,
         None,

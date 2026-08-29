@@ -63,10 +63,12 @@ class ChatController extends ChangeNotifier {
   final Map<String, ChatContext> _contexts = {};
 
   /// 正在处理的聊天 ID 集合
-  final Set<String> _processingChats = {};
+  final Map<String, int> _processingChatCounts = <String, int>{};
+  final Map<String, ValueNotifier<bool>> _processingStateNotifiers =
+      <String, ValueNotifier<bool>>{};
 
   /// 后台等待中的请求 ID（按 chatId）
-  final Map<String, String> _activeRequestIds = {};
+  final Map<String, List<String>> _activeRequestIds = <String, List<String>>{};
 
   /// "正在输入"状态回调（按 chatId）- 仅用于单聊
   final Map<String, void Function(bool)> _typingCallbacks = {};
@@ -291,7 +293,7 @@ class ChatController extends ChangeNotifier {
     _waitTimers.remove(chatId);
 
     if (pendingMessages.isEmpty) return;
-    if (_processingChats.contains(chatId)) {
+    if (isProcessing(chatId)) {
       debugPrint('ChatController: Already processing $chatId, queueing');
       // 处理期间可能已有新消息入队（notifyInputActivity 追加到同一 chatId）。
       // 直接赋值会丢弃这些新项，因此把已取出的旧批次插回队首，保持时间顺序。
@@ -337,7 +339,6 @@ class ChatController extends ChangeNotifier {
     );
 
     // 标记正在处理
-    _processingChats.add(chatId);
     _beginBackgroundTrackedRequest(chatId);
     notifyListeners();
 
@@ -359,7 +360,7 @@ class ChatController extends ChangeNotifier {
     final aggregateViaTool = SettingsService.instance.visionMode == 'tool';
 
     // 非 tool 模式沿用旧的即时路径：处理中直接忽略
-    if (!aggregateViaTool && _processingChats.contains(chatId)) {
+    if (!aggregateViaTool && isProcessing(chatId)) {
       debugPrint('ChatController: Already processing $chatId, ignoring image');
       return;
     }
@@ -420,7 +421,6 @@ class ChatController extends ChangeNotifier {
     }
 
     // 非 tool 模式：标记正在处理，走即时 vision 路径
-    _processingChats.add(chatId);
     _beginBackgroundTrackedRequest(chatId);
     notifyListeners();
 
@@ -463,7 +463,7 @@ class ChatController extends ChangeNotifier {
       return;
     }
 
-    if (_processingChats.contains(chatId)) {
+    if (isProcessing(chatId)) {
       debugPrint(
         'ChatController: Already processing $chatId, ignoring sticker',
       );
@@ -508,7 +508,6 @@ class ChatController extends ChangeNotifier {
       lastMessageTime: DateTime.now(),
     );
 
-    _processingChats.add(chatId);
     _beginBackgroundTrackedRequest(chatId);
     notifyListeners();
 
@@ -574,7 +573,6 @@ class ChatController extends ChangeNotifier {
       await MessageStore.instance.addMessage(chatId, errorMsg);
     } finally {
       _hideTyping(chatId);
-      _processingChats.remove(chatId);
       _completeBackgroundTrackedRequest(chatId);
       notifyListeners();
       _flushPendingIfNeeded(chatId);
@@ -612,7 +610,7 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> retryFailedMessage(String chatId, String messageId) async {
-    if (_processingChats.contains(chatId)) {
+    if (isProcessing(chatId)) {
       return;
     }
 
@@ -645,7 +643,6 @@ class ChatController extends ChangeNotifier {
       lastMessageTime: DateTime.now(),
     );
 
-    _processingChats.add(chatId);
     _beginBackgroundTrackedRequest(chatId);
     notifyListeners();
 
@@ -690,7 +687,6 @@ class ChatController extends ChangeNotifier {
       } catch (e) {
         debugPrint('ChatController: Error processing message: $e');
       } finally {
-        _processingChats.remove(chatId);
         _completeBackgroundTrackedRequest(chatId);
         notifyListeners();
         _updateChatList(chatId);
@@ -707,10 +703,13 @@ class ChatController extends ChangeNotifier {
   }
 
   void _beginBackgroundTrackedRequest(String chatId) {
+    final count = (_processingChatCounts[chatId] ?? 0) + 1;
+    _processingChatCounts[chatId] = count;
+    _processingStateNotifier(chatId).value = true;
     final requestId = '${DateTime.now().microsecondsSinceEpoch}_$chatId';
     final baselineMessageId =
         MessageStore.instance.getLastMessage(chatId)?.id ?? '';
-    _activeRequestIds[chatId] = requestId;
+    _activeRequestIds.putIfAbsent(chatId, () => <String>[]).add(requestId);
     BackgroundRuntimeService.registerPendingRequest(
       requestId: requestId,
       chatId: chatId,
@@ -719,17 +718,40 @@ class ChatController extends ChangeNotifier {
   }
 
   void _completeBackgroundTrackedRequest(String chatId) {
-    final requestId = _activeRequestIds.remove(chatId);
-    if (requestId == null || requestId.isEmpty) {
-      return;
+    final requestIds = _activeRequestIds[chatId];
+    if (requestIds != null && requestIds.isNotEmpty) {
+      final requestId = requestIds.removeLast();
+      BackgroundRuntimeService.completePendingRequest(requestId);
+      if (requestIds.isEmpty) {
+        _activeRequestIds.remove(chatId);
+      }
     }
-    BackgroundRuntimeService.completePendingRequest(requestId);
+
+    final count = _processingChatCounts[chatId] ?? 0;
+    if (count <= 1) {
+      _processingChatCounts.remove(chatId);
+      _processingStateNotifier(chatId).value = false;
+    } else {
+      _processingChatCounts[chatId] = count - 1;
+    }
   }
 
   /// 进入聊天页
   Future<void> onChatPageEnter(String chatId) async {
+    await enterChatPage(chatId);
+  }
+
+  Future<bool> enterChatPage(
+    String chatId, {
+    bool Function()? isActive,
+    void Function()? onActivated,
+  }) async {
     await MessageStore.instance.ensureLoaded(chatId);
+    if (isActive != null && !isActive()) {
+      return false;
+    }
     MessageStore.instance.activateChatWindow(chatId);
+    onActivated?.call();
     MessageStore.instance.clearUnread(chatId);
     ChatListService.instance.clearUnread(chatId);
     MessageStore.instance.refreshStream(chatId);
@@ -746,6 +768,7 @@ class ChatController extends ChangeNotifier {
         .catchError((e) {
           debugPrint('ChatController: Role sync failed: $e');
         });
+    return true;
   }
 
   /// 退出聊天页
@@ -846,7 +869,16 @@ class ChatController extends ChangeNotifier {
     _typingCallbacks.remove(chatId);
   }
 
-  bool isProcessing(String chatId) => _processingChats.contains(chatId);
+  ValueListenable<bool> processingListenable(String chatId) =>
+      _processingStateNotifier(chatId);
+
+  ValueNotifier<bool> _processingStateNotifier(String chatId) =>
+      _processingStateNotifiers.putIfAbsent(
+        chatId,
+        () => ValueNotifier<bool>((_processingChatCounts[chatId] ?? 0) > 0),
+      );
+
+  bool isProcessing(String chatId) => (_processingChatCounts[chatId] ?? 0) > 0;
 
   // ========== 单聊处理 ==========
 

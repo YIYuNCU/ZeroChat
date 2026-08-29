@@ -481,12 +481,12 @@ async def detect_intent(request: IntentDetectRequest):
       if not local_message:
           return IntentDetectResponse(success=False, error="message is empty")
 
-       intent_config = settings_service.get_intent_config()
-       ai_config = settings_service.get_ai_config()
-       api_url = request.api_url or intent_config.get("api_url") or ai_config.get("api_url")
-       api_key = request.api_key or intent_config.get("api_key") or ai_config.get("api_key")
-       model = request.model or intent_config.get("model") or ai_config.get("model") or "deepseek-chat"
-       api_format = request.api_format or intent_config.get("api_format") or ai_config.get("api_format")
+      intent_config = settings_service.get_intent_config()
+      ai_config = settings_service.get_ai_config()
+      api_url = request.api_url or intent_config.get("api_url") or ai_config.get("api_url")
+      api_key = request.api_key or intent_config.get("api_key") or ai_config.get("api_key")
+      model = request.model or intent_config.get("model") or ai_config.get("model") or "deepseek-chat"
+      api_format = request.api_format or intent_config.get("api_format") or ai_config.get("api_format")
 
       if not api_url or not api_key:
           return IntentDetectResponse(success=False, error="AI API 未配置")
@@ -502,9 +502,9 @@ async def detect_intent(request: IntentDetectRequest):
           api_key=api_key,
           model=model,
           temperature=0.1,
-           max_tokens=200,
-           direct=True,
-           api_format=api_format,
+          max_tokens=200,
+          direct=True,
+          api_format=api_format,
       )
 
       if not result.get("success"):

@@ -32,6 +32,9 @@ class ModelApiProfile {
   final String apiFormat;
   final Set<ModelProfileCapability> capabilities;
   final String? visionMode;
+  final int? timeoutSeconds;
+  final String? reasoningEffort;
+  final bool? stream;
 
   const ModelApiProfile({
     required this.id,
@@ -42,6 +45,9 @@ class ModelApiProfile {
     required this.capabilities,
     this.apiFormat = 'auto',
     this.visionMode,
+    this.timeoutSeconds,
+    this.reasoningEffort,
+    this.stream,
   });
 
   bool supports(ModelProfileCapability capability) =>
@@ -54,9 +60,9 @@ class ModelApiProfile {
     final rawCapabilities = json['capabilities'];
     final capabilities = rawCapabilities is List
         ? rawCapabilities
-            .map(ModelProfileCapability.fromStorage)
-            .whereType<ModelProfileCapability>()
-            .toSet()
+              .map(ModelProfileCapability.fromStorage)
+              .whereType<ModelProfileCapability>()
+              .toSet()
         : <ModelProfileCapability>{};
     return ModelApiProfile(
       id: '${json['id'] ?? ''}',
@@ -67,6 +73,9 @@ class ModelApiProfile {
       apiFormat: normalizeApiFormat(json['api_format']),
       capabilities: capabilities,
       visionMode: _normalizeVisionMode(json['vision_mode']),
+      timeoutSeconds: _normalizeTimeout(json['timeout_seconds']),
+      reasoningEffort: _normalizeReasoningEffort(json['reasoning_effort']),
+      stream: json['stream'] is bool ? json['stream'] as bool : null,
     );
   }
 
@@ -78,6 +87,10 @@ class ModelApiProfile {
     'api_format': apiFormat,
     'capabilities': capabilities.map((item) => item.storageValue).toList(),
     if (visionMode != null) 'vision_mode': visionMode,
+    if (timeoutSeconds != null) 'timeout_seconds': timeoutSeconds,
+    if (reasoningEffort != null && reasoningEffort!.trim().isNotEmpty)
+      'reasoning_effort': reasoningEffort,
+    if (stream != null) 'stream': stream,
   };
 }
 
@@ -119,9 +132,30 @@ class VisionModelProfile {
     enabled: json['enabled'] is bool ? json['enabled'] as bool : true,
     mode: _normalizeVisionMode(json['mode']) ?? 'standalone',
   );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'api_url': apiUrl,
+    'model': model,
+    'api_format': apiFormat,
+    'enabled': enabled,
+    'mode': mode,
+  };
 }
 
 String? _normalizeVisionMode(Object? value) {
   final mode = value?.toString().trim().toLowerCase();
   return const {'standalone', 'pre_model', 'tool'}.contains(mode) ? mode : null;
+}
+
+int? _normalizeTimeout(Object? value) {
+  final parsed = value is num ? value.toInt() : int.tryParse('${value ?? ''}');
+  if (parsed == null) return null;
+  return parsed.clamp(1, 3600);
+}
+
+String? _normalizeReasoningEffort(Object? value) {
+  final text = value?.toString().trim();
+  return text == null || text.isEmpty ? null : text;
 }
