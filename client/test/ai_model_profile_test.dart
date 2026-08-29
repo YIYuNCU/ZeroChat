@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zerochat/models/ai_model_profile.dart';
+import 'package:zerochat/models/role.dart';
 
 void main() {
   test('chat profile defaults legacy protocol to auto', () {
@@ -51,5 +52,21 @@ void main() {
     expect(profile.supports(ModelProfileCapability.vision), isFalse);
     expect(profile.toJson()['capabilities'], contains('intent'));
     expect(profile.toJson(), isNot(contains('api_key')));
+  });
+
+  test('role-specific chat settings survive JSON round trip', () {
+    final role = Role(
+      id: 'role-1',
+      name: 'Role',
+      systemPrompt: 'Prompt',
+      aiTimeoutSeconds: 240,
+      aiReasoningEffort: 'high',
+      aiStream: true,
+    );
+
+    final restored = Role.fromJson(role.toJson());
+    expect(restored.aiTimeoutSeconds, 240);
+    expect(restored.aiReasoningEffort, 'high');
+    expect(restored.aiStream, isTrue);
   });
 }

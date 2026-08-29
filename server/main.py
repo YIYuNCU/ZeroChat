@@ -82,7 +82,12 @@ CONFIG = load_config()
 validate_security_config(CONFIG)
 
 from core.lifecycle import create_lifespan
-from core.middleware import PathWhitelistMiddleware, RequestLoggingMiddleware, SecurityMiddleware
+from core.middleware import (
+    ApiRateLimitMiddleware,
+    PathWhitelistMiddleware,
+    RequestLoggingMiddleware,
+    SecurityMiddleware,
+)
 from routers import ai_behavior, moments, onebot, roles, settings, tasks
 from services import scheduler_service
 from transport.file_routes import create_files_router
@@ -115,6 +120,7 @@ app.add_middleware(
     allow_origins=[
         "https://sakura.evian.asia",
         "https://zc.evian.asia",
+        "https://zerochat-aliyun.evian.asia",
     ],
     allow_origin_regex=(
         r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
@@ -133,6 +139,7 @@ app.add_middleware(
     ],
 )
 # 路径白名单：最后注册 → 最外层执行，扫描探测在进入日志/鉴权前即被 404
+app.add_middleware(ApiRateLimitMiddleware, config=CONFIG, logger=logger)
 app.add_middleware(PathWhitelistMiddleware, logger=logger)
 
 # 注册业务路由
@@ -183,6 +190,7 @@ if __name__ == "__main__":
         port=CONFIG["port"],
         reload=False,
         log_level="info",
+        server_header=False,
         ws_ping_interval=60,
         ws_ping_timeout=30,
     )

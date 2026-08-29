@@ -1,5 +1,11 @@
 import hmac
+import ipaddress
 import json
+import time
+from collections import deque
+from math import ceil
+from threading import Lock
+from typing import Callable, Deque, Dict, Tuple
 
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -15,6 +21,90 @@ from services.security_service import (
 
 # 请求体大小上限（字节），防止超大 payload 消耗内存
 _MAX_BODY_BYTES = 10 * 1024 * 1024
+
+
+class ApiRateLimitMiddleware(BaseHTTPMiddleware):
+    """Bounded in-memory rate limiting for public API traffic."""
+
+    def __init__(
+        self,
+        app,
+        config: dict,
+        logger,
+        *,
+        window_seconds: float = 60.0,
+        unauthenticated_limit: int = 20,
+        authenticated_limit: int = 120,
+        max_clients: int = 10_000,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        super().__init__(app)
+        self.auth_token = get_auth_token(config)
+        self.logger = logger
+        self.window_seconds = max(float(window_seconds), 1.0)
+        self.unauthenticated_limit = max(int(unauthenticated_limit), 1)
+        self.authenticated_limit = max(int(authenticated_limit), self.unauthenticated_limit)
+        self.max_clients = max(int(max_clients), 1)
+        self.clock = clock
+        self._buckets: Dict[Tuple[str, bool], Deque[float]] = {}
+        self._lock = Lock()
+
+    @staticmethod
+    def _client_ip(request: Request) -> str:
+        """Return a stable, validated address without trusting arbitrary text."""
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded and len(forwarded) <= 4096:
+            for candidate in reversed(forwarded.split(",")):
+                try:
+                    return str(ipaddress.ip_address(candidate.strip()))
+                except ValueError:
+                    continue
+
+        client = request.client.host if request.client else "unknown"
+        try:
+            return str(ipaddress.ip_address(client))
+        except ValueError:
+            return client[:128] or "unknown"
+
+    def _allow(self, key: Tuple[str, bool], now: float, limit: int) -> Tuple[bool, int]:
+        cutoff = now - self.window_seconds
+        with self._lock:
+            # Prune stale scanner-generated keys without a background task.
+            for old_key, old_bucket in list(self._buckets.items()):
+                while old_bucket and old_bucket[0] <= cutoff:
+                    old_bucket.popleft()
+                if not old_bucket:
+                    self._buckets.pop(old_key, None)
+
+            if key not in self._buckets and len(self._buckets) >= self.max_clients:
+                if len(self._buckets) >= self.max_clients:
+                    oldest_key = min(self._buckets, key=lambda item: self._buckets[item][0])
+                    self._buckets.pop(oldest_key, None)
+
+            bucket = self._buckets.setdefault(key, deque())
+            if len(bucket) >= limit:
+                retry_after = max(1, ceil(bucket[0] + self.window_seconds - now))
+                return False, retry_after
+            bucket.append(now)
+            return True, 0
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        is_api_path = path == "/api" or path.startswith("/api/")
+        if is_api_path and request.method.upper() != "OPTIONS":
+            incoming_token = request.headers.get("X-Auth-Token", "")
+            authenticated = hmac.compare_digest(incoming_token, self.auth_token)
+            key = (self._client_ip(request), authenticated)
+            limit = self.authenticated_limit if authenticated else self.unauthenticated_limit
+            allowed, retry_after = self._allow(key, self.clock(), limit)
+            if not allowed:
+                self.logger.warning("API rate limit exceeded: %s from %s", request.method, key[0])
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too Many Requests"},
+                    headers={"Retry-After": str(retry_after)},
+                )
+        return await call_next(request)
 
 
 class SecurityMiddleware(BaseHTTPMiddleware):
