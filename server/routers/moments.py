@@ -121,7 +121,7 @@ def _read_cached_moments_hash() -> Optional[str]:
         return None
 
 
-def _write_cached_moments_hash(value: str):
+def _write_cached_moments_hash(value: str, count: Optional[int] = None):
     try:
         MOMENTS_HASH_FILE.parent.mkdir(parents=True, exist_ok=True)
         source_stat = MOMENTS_FILE.stat() if MOMENTS_FILE.exists() else None
@@ -129,6 +129,7 @@ def _write_cached_moments_hash(value: str):
             MOMENTS_HASH_FILE,
             {
                 "hash": value,
+                "count": count,
                 "source_mtime_ns": source_stat.st_mtime_ns if source_stat else 0,
                 "source_size": source_stat.st_size if source_stat else 0,
             },
@@ -139,7 +140,7 @@ def _write_cached_moments_hash(value: str):
 
 def _refresh_default_moments_hash_cache():
     rendered = _build_rendered_moments(DEFAULT_HASH_LIMIT)
-    _write_cached_moments_hash(_compute_moments_hash(rendered))
+    _write_cached_moments_hash(_compute_moments_hash(rendered), len(rendered))
 
 class MomentCreate(BaseModel):
     author_id: str
@@ -171,12 +172,19 @@ def save_moments(moments: List[dict]):
 @router.get("/moments")
 async def list_moments(limit: int = 50, client_hash: Optional[str] = None):
     """获取朋友圈列表"""
+    cached = _read_cached_moments_hash() if limit == DEFAULT_HASH_LIMIT else None
+    if cached and client_hash == cached:
+        try:
+            metadata = json.loads(MOMENTS_HASH_FILE.read_text(encoding="utf-8"))
+            count = metadata.get("count")
+            if isinstance(count, int) and count >= 0 and metadata.get("hash") == cached:
+                return {"not_modified": True, "hash": cached, "moments": [], "count": count}
+        except (OSError, ValueError, AttributeError):
+            pass
     moments = _build_rendered_moments(limit)
-    if limit == DEFAULT_HASH_LIMIT:
-        moments_hash = _read_cached_moments_hash() or _compute_moments_hash(moments)
-        _write_cached_moments_hash(moments_hash)
-    else:
-        moments_hash = _compute_moments_hash(moments)
+    moments_hash = _compute_moments_hash(moments)
+    if limit == DEFAULT_HASH_LIMIT and (not cached or client_hash == cached):
+        _write_cached_moments_hash(moments_hash, len(moments))
     if client_hash and client_hash == moments_hash:
         return {
             "moments": [],
@@ -198,7 +206,7 @@ async def get_moments_hash(limit: int = 50):
     moments = _build_rendered_moments(limit)
     moments_hash = _compute_moments_hash(moments)
     if limit == DEFAULT_HASH_LIMIT:
-        _write_cached_moments_hash(moments_hash)
+        _write_cached_moments_hash(moments_hash, len(moments))
     return {"hash": moments_hash, "limit": limit}
 
 @router.post("/moments")

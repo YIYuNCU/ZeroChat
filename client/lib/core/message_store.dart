@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/message.dart';
 import 'message_parts.dart';
@@ -10,6 +9,7 @@ import '../services/sticker_service.dart';
 import '../services/storage_service.dart';
 import '../services/secure_websocket_client.dart';
 import '../services/chat_list_service.dart';
+import '../services/message_archive_service.dart';
 
 /// 消息存储层
 /// 聊天记录的唯一真实来源（Single Source of Truth）
@@ -31,6 +31,7 @@ class MessageStore extends ChangeNotifier {
   final Map<String, int> _messageCounts = {};
   final Set<String> _knownChatIds = {};
   final Map<String, int> _activeChatWindowCounts = <String, int>{};
+  final Set<String> _expandedChatWindows = {};
   final Map<String, Future<void>> _loadingFutures = {};
   String? _archiveDirectoryPath;
 
@@ -66,6 +67,9 @@ class MessageStore extends ChangeNotifier {
   Future<void> _archiveMutationTail = Future<void>.value();
   bool _snapshotSyncRequested = false;
   Future<void>? _snapshotSyncFuture;
+  int _hashRevision = -1;
+  String? _cachedHash;
+  Future<void>? _initFuture;
 
   /// 初始化（确保只执行一次）
   static Future<void> init() async {
@@ -73,13 +77,36 @@ class MessageStore extends ChangeNotifier {
       debugPrint('MessageStore: Already initialized');
       return;
     }
-    await _instance._loadArchiveIndex();
-    await _instance._reclassifyInterruptedOutbox();
-    await _instance._syncAllChatsFromBackendIfNeeded();
-    _instance._initialized = true;
+    await (_instance._initFuture ??= _instance._initLocal());
     debugPrint(
       'MessageStore initialized with ${_instance._knownChatIds.length} archived chats',
     );
+  }
+
+  Future<void> _initLocal() async {
+    await _loadArchiveIndex();
+    _initialized = true;
+    unawaited(
+      _withArchiveMutation(() async {
+        await _migrateLegacyArchives();
+        await _reclassifyInterruptedOutbox();
+      }).catchError((Object error) {
+        debugPrint('MessageStore: local outbox recovery failed: $error');
+      }),
+    );
+  }
+
+  Future<void> _migrateLegacyArchives() async {
+    for (final chatId in _knownChatIds.toList()) {
+      if (!await (await _archiveFile(chatId)).exists()) {
+        final legacy = await _readLegacyMessages(chatId);
+        if (legacy.isNotEmpty) {
+          await _writeArchivedMessages(chatId, legacy);
+          await StorageService.remove('messages_v2_$chatId');
+          await StorageService.remove('messages_$chatId');
+        }
+      }
+    }
   }
 
   /// 确保指定 chatId 的消息已加载
@@ -262,17 +289,23 @@ class MessageStore extends ChangeNotifier {
     Message? updatedMessage;
     final updated = await _withArchiveMutation(() async {
       final messages = _messages[chatId];
-      if (messages == null || messages.isEmpty) return false;
+      if (messages == null) return false;
       final index = messages.indexWhere((m) => m.id == messageId);
-      if (index < 0) return false;
+      final original = index >= 0
+          ? messages[index]
+          : (await MessageArchiveService.read(
+              (await _archiveFile(chatId)).path,
+              pendingOnly: sendStatus != null,
+            )).messages.where((m) => m.id == messageId).firstOrNull;
+      if (original == null) return false;
 
-      updatedMessage = messages[index].copyWith(
+      updatedMessage = original.copyWith(
         content: content,
         type: type,
         quotedPreviewText: quotedPreviewText,
         sendStatus: sendStatus,
       );
-      messages[index] = updatedMessage!;
+      if (index >= 0) messages[index] = updatedMessage!;
       if (_lastMessages[chatId]?.id == messageId) {
         _lastMessages[chatId] = updatedMessage!;
       }
@@ -459,27 +492,34 @@ class MessageStore extends ChangeNotifier {
     int count = historyPageSize,
   }) async {
     await ensureLoaded(chatId);
-    final resident = _messages[chatId]!;
-    if (resident.isEmpty) return 0;
+    return _withArchiveMutation(() async {
+      final resident = _messages[chatId];
+      if (resident == null) return 0;
+      if (resident.isEmpty) return 0;
 
-    final archive = await _readArchivedMessages(chatId);
-    final firstResidentId = resident.first.id;
-    final firstResidentIndex = archive.indexWhere(
-      (m) => m.id == firstResidentId,
-    );
-    if (firstResidentIndex <= 0) return 0;
+      final firstResidentIndex = getMessageCount(chatId) - resident.length;
+      if (firstResidentIndex <= 0) return 0;
 
-    final start = (firstResidentIndex - count)
-        .clamp(0, firstResidentIndex)
-        .toInt();
-    final older = archive.sublist(start, firstResidentIndex);
-    resident.insertAll(0, older);
-    _notifyMessageUpdate(chatId);
-    return older.length;
+      final start = (firstResidentIndex - count)
+          .clamp(0, firstResidentIndex)
+          .toInt();
+      final page = await MessageArchiveService.read(
+        (await _archiveFile(chatId)).path,
+        start: start,
+        count: firstResidentIndex - start,
+      );
+      final older = page.messages;
+      if (!identical(_messages[chatId], resident)) return 0;
+      if (older.isNotEmpty) _expandedChatWindows.add(chatId);
+      resident.insertAll(0, older);
+      _notifyMessageUpdate(chatId);
+      return older.length;
+    });
   }
 
   void releaseChatWindow(String chatId) {
     final count = _activeChatWindowCounts[chatId] ?? 0;
+    if (count <= 1) _expandedChatWindows.remove(chatId);
     if (count > 1) {
       _activeChatWindowCounts[chatId] = count - 1;
       return;
@@ -625,17 +665,26 @@ class MessageStore extends ChangeNotifier {
   Future<void> _reclassifyInterruptedOutbox() async {
     var reclassified = 0;
     for (final chatId in _knownChatIds.toList()) {
-      final list = await _readArchivedMessages(chatId);
-      var changed = false;
+      final list = (await MessageArchiveService.read(
+        (await _archiveFile(chatId)).path,
+        pendingOnly: true,
+      )).messages;
+      final replacements = <Message>[];
       for (var i = 0; i < list.length; i++) {
         final m = list[i];
         if (m.senderId == 'me' && m.sendStatus == MessageSendStatus.sending) {
-          list[i] = m.copyWith(sendStatus: MessageSendStatus.failed);
+          replacements.add(m.copyWith(sendStatus: MessageSendStatus.failed));
           reclassified += 1;
-          changed = true;
         }
       }
-      if (changed) await _writeArchivedMessages(chatId, list);
+      if (replacements.isNotEmpty) {
+        await MessageArchiveService.replaceMessages(
+          (await _archiveFile(chatId)).path,
+          replacements,
+        );
+        _localMessageRevision++;
+        _hashRevision = -1;
+      }
     }
     if (reclassified > 0) {
       debugPrint(
@@ -646,28 +695,32 @@ class MessageStore extends ChangeNotifier {
 
   /// 加载指定聊天的消息
   Future<void> _loadMessages(String chatId) async {
-    final archive = await _readArchivedMessages(chatId);
-    if (archive.isEmpty && !(await _archiveFile(chatId)).existsSync()) {
+    final file = await _archiveFile(chatId);
+    var page = await MessageArchiveService.read(
+      file.path,
+      count: residentMessageLimit,
+    );
+    if (page.total == 0 && !await file.exists()) {
       final legacy = await _readLegacyMessages(chatId);
       if (legacy.isNotEmpty) {
         await _writeArchivedMessages(chatId, legacy);
         await StorageService.remove('messages_v2_$chatId');
         await StorageService.remove('messages_$chatId');
-        archive.addAll(legacy);
+        page = (messages: _residentTail(legacy), total: legacy.length);
       }
     }
 
     _knownChatIds.add(chatId);
-    _messageCounts[chatId] = archive.length;
-    _messages[chatId] = _residentTail(archive);
-    if (archive.isNotEmpty) {
-      _lastMessages[chatId] = archive.last;
+    _messageCounts[chatId] = page.total;
+    _messages[chatId] = page.messages;
+    if (page.messages.isNotEmpty) {
+      _lastMessages[chatId] = page.messages.last;
     } else {
       _lastMessages.remove(chatId);
     }
     await _persistArchiveIndex();
     debugPrint(
-      'MessageStore: Loaded ${_messages[chatId]!.length}/${archive.length} messages for $chatId',
+      'MessageStore: Loaded ${page.messages.length}/${page.total} messages for $chatId',
     );
   }
 
@@ -730,27 +783,7 @@ class MessageStore extends ChangeNotifier {
 
   Future<List<Message>> _readArchivedMessages(String chatId) async {
     final file = await _archiveFile(chatId);
-    if (!await file.exists()) return <Message>[];
-    final messages = <Message>[];
-    try {
-      await for (final line
-          in file
-              .openRead()
-              .transform(utf8.decoder)
-              .transform(const LineSplitter())) {
-        if (line.trim().isEmpty) continue;
-        try {
-          messages.add(Message.fromStorageString(line));
-        } catch (e) {
-          debugPrint(
-            'MessageStore: skipped invalid archive record for $chatId: $e',
-          );
-        }
-      }
-    } catch (e) {
-      debugPrint('MessageStore: failed to read archive for $chatId: $e');
-    }
-    return messages;
+    return (await MessageArchiveService.read(file.path)).messages;
   }
 
   Future<void> _writeArchivedMessages(
@@ -758,24 +791,8 @@ class MessageStore extends ChangeNotifier {
     List<Message> messages,
   ) async {
     final file = await _archiveFile(chatId);
-    final temp = File('${file.path}.tmp');
-    final contents = messages
-        .map((message) => message.toStorageString())
-        .join('\n');
-    await temp.writeAsString(
-      contents.isEmpty ? '' : '$contents\n',
-      flush: true,
-    );
-    try {
-      await temp.rename(file.path);
-    } on FileSystemException {
-      // Windows cannot replace an existing file through rename(). The fallback
-      // still keeps the old archive until the temporary file is complete.
-      if (await file.exists()) {
-        await file.delete();
-      }
-      await temp.rename(file.path);
-    }
+    await MessageArchiveService.write(file.path, messages);
+    _hashRevision = -1;
     _knownChatIds.add(chatId);
     _messageCounts[chatId] = messages.length;
     await _persistArchiveIndex();
@@ -786,11 +803,8 @@ class MessageStore extends ChangeNotifier {
     List<Message> messages,
   ) async {
     final file = await _archiveFile(chatId);
-    await file.writeAsString(
-      '${messages.map((message) => message.toStorageString()).join('\n')}\n',
-      mode: FileMode.append,
-      flush: true,
-    );
+    await MessageArchiveService.append(file.path, messages);
+    _hashRevision = -1;
     _knownChatIds.add(chatId);
     _messageCounts[chatId] = (_messageCounts[chatId] ?? 0) + messages.length;
     await _persistArchiveIndex();
@@ -800,30 +814,37 @@ class MessageStore extends ChangeNotifier {
     String chatId,
     Message replacement,
   ) async {
-    final archive = await _readArchivedMessages(chatId);
-    final index = archive.indexWhere((message) => message.id == replacement.id);
-    if (index < 0) return;
-    archive[index] = replacement;
-    await _writeArchivedMessages(chatId, archive);
+    await MessageArchiveService.replaceMessage(
+      (await _archiveFile(chatId)).path,
+      replacement,
+    );
+    _hashRevision = -1;
   }
 
   Future<void> _removeArchivedMessage(String chatId, String messageId) async {
-    final archive = await _readArchivedMessages(chatId);
-    final initialLength = archive.length;
-    archive.removeWhere((message) => message.id == messageId);
-    if (archive.length != initialLength) {
-      await _writeArchivedMessages(chatId, archive);
+    if (await MessageArchiveService.removeMessage(
+      (await _archiveFile(chatId)).path,
+      messageId,
+    )) {
+      _messageCounts[chatId] = (getMessageCount(chatId) - 1).clamp(0, 1 << 31);
+      _hashRevision = -1;
+      await _persistArchiveIndex();
     }
   }
 
-  List<Message> _residentTail(List<Message> archive) {
-    final start = archive.length > residentMessageLimit
-        ? archive.length - residentMessageLimit
-        : 0;
+  List<Message> _residentTail(
+    List<Message> archive, {
+    int limit = residentMessageLimit,
+  }) {
+    final start = archive.length > limit ? archive.length - limit : 0;
     return List<Message>.from(archive.sublist(start));
   }
 
   void _trimResidentMessages(String chatId) {
+    if (_expandedChatWindows.contains(chatId) &&
+        _activeChatWindowCounts.containsKey(chatId)) {
+      return;
+    }
     final resident = _messages[chatId];
     if (resident == null || resident.length <= residentMessageLimit) return;
     resident.removeRange(0, resident.length - residentMessageLimit);
@@ -909,9 +930,8 @@ class MessageStore extends ChangeNotifier {
             continue;
           }
 
-          final previousIds = (await _readArchivedMessages(
-            chatId,
-          )).map((message) => message.id).toSet();
+          final localArchive = await _readArchivedMessages(chatId);
+          final previousIds = localArchive.map((message) => message.id).toSet();
           final messages = <Message>[];
           for (final item in rawMessages) {
             if (item is! Map) {
@@ -951,7 +971,6 @@ class MessageStore extends ChangeNotifier {
           // 的本地用户消息，避免快照覆盖丢失离线期间产生的消息。
           // 因 drainOutbox() 先于本方法执行，多数本地消息已在服务端并自然去重，
           // 合并只兜底真正未同步的那些。
-          final localArchive = await _readArchivedMessages(chatId);
           final mergedMessages = mergeSnapshotWithLocalMessages(
             messages,
             localArchive,
@@ -974,7 +993,16 @@ class MessageStore extends ChangeNotifier {
             _lastMessages.remove(chatId);
           }
           if (_activeChatWindowCounts.containsKey(chatId)) {
-            _messages[chatId] = _residentTail(messages);
+            final previousWindowSize =
+                _messages[chatId]?.length ?? residentMessageLimit;
+            _messages[chatId] = _residentTail(
+              messages,
+              limit:
+                  _expandedChatWindows.contains(chatId) &&
+                      previousWindowSize > residentMessageLimit
+                  ? previousWindowSize
+                  : residentMessageLimit,
+            );
           } else {
             _messages.remove(chatId);
           }
@@ -1014,49 +1042,29 @@ class MessageStore extends ChangeNotifier {
   }
 
   Future<String> _calculateLocalChatsMd5() async {
-    final canonical = <String, List<Map<String, dynamic>>>{};
+    if (_hashRevision == _localMessageRevision && _cachedHash != null) {
+      return _cachedHash!;
+    }
+    final paths = <String, String>{};
 
     final chatIds = _knownChatIds.toList()..sort();
     for (final chatId in chatIds) {
-      var list = await _readArchivedMessages(chatId);
-      if (list.isEmpty) {
+      final file = await _archiveFile(chatId);
+      if (!await file.exists()) {
         final legacy = await _readLegacyMessages(chatId);
         if (legacy.isNotEmpty) {
           await _writeArchivedMessages(chatId, legacy);
           await StorageService.remove('messages_v2_$chatId');
           await StorageService.remove('messages_$chatId');
-          list = legacy;
         }
       }
-      final serialized =
-          list
-              // Exclude all unconfirmed local messages. They are retained
-              // separately during snapshot merge and must not cause every
-              // reconnect to request the same full snapshot.
-              .where((m) => m.sendStatus == MessageSendStatus.sent)
-              .map(
-                (m) => {
-                  'id': m.id,
-                  'content': m.content,
-                  'sender_id': m.senderId,
-                  'receiver_id': m.receiverId,
-                  'timestamp': m.timestamp.toIso8601String(),
-                  'type': m.type.name,
-                  'quote_id': m.quotedMessageId,
-                  'quote_content': m.quotedPreviewText,
-                },
-              )
-              .toList()
-            ..sort(
-              (a, b) => (a['timestamp'] ?? '').toString().compareTo(
-                (b['timestamp'] ?? '').toString(),
-              ),
-            );
-      canonical[chatId] = serialized;
+      paths[chatId] = file.path;
     }
 
-    final jsonStr = jsonEncode(canonical);
-    return md5.convert(utf8.encode(jsonStr)).toString();
+    final hash = await MessageArchiveService.hash(paths);
+    _hashRevision = _localMessageRevision;
+    _cachedHash = hash;
+    return hash;
   }
 
   /// 异步同步消息到后端（不阻塞 UI）。
@@ -1153,18 +1161,17 @@ class MessageStore extends ChangeNotifier {
     if (_draining) return;
     _draining = true;
     try {
-      for (final chatId in _knownChatIds.toList()) {
-        await ensureLoaded(chatId);
-      }
       final pending = <MapEntry<String, Message>>[];
-      for (final entry in _messages.entries) {
-        for (final m in entry.value) {
-          if (m.sendStatus == MessageSendStatus.failed ||
-              m.sendStatus == MessageSendStatus.sending) {
-            pending.add(MapEntry(entry.key, m));
-          }
+      await _withArchiveMutation(() async {
+        await _migrateLegacyArchives();
+        for (final chatId in _knownChatIds.toList()) {
+          final page = await MessageArchiveService.read(
+            (await _archiveFile(chatId)).path,
+            pendingOnly: true,
+          );
+          pending.addAll(page.messages.map((m) => MapEntry(chatId, m)));
         }
-      }
+      });
 
       if (pending.isEmpty) return;
       debugPrint('MessageStore: draining outbox (${pending.length} messages)');

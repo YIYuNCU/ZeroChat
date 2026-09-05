@@ -25,6 +25,7 @@ class MomentsService extends ChangeNotifier {
   /// 同类请求去重：全量拉取优先于 hash 校验，保证推送不会被校验请求吞掉。
   Future<bool>? _inFlightHashSync;
   Future<bool>? _inFlightFullFetch;
+  bool _fetchAgain = false;
   DateTime? _lastHashCheckAt;
   static const Duration _hashCheckThrottle = Duration(seconds: 30);
 
@@ -356,13 +357,18 @@ class MomentsService extends ChangeNotifier {
   // ========== 后端同步 ==========
 
   /// 从后端获取朋友圈列表
-  Future<bool> fetchFromBackend({int limit = 50, String? expectedHash}) async {
+  Future<bool> fetchFromBackend({
+    int limit = 50,
+    String? expectedHash,
+    bool force = false,
+  }) async {
     final inFlight = _inFlightFullFetch;
     if (inFlight != null) {
+      if (force) _fetchAgain = true;
       return inFlight;
     }
 
-    final future = _fetchFromBackend(limit: limit, expectedHash: expectedHash);
+    final future = _drainFetches(limit, expectedHash);
     _inFlightFullFetch = future;
     try {
       return await future;
@@ -371,6 +377,18 @@ class MomentsService extends ChangeNotifier {
         _inFlightFullFetch = null;
       }
     }
+  }
+
+  Future<bool> _drainFetches(int limit, String? expectedHash) async {
+    var changed = false;
+    do {
+      _fetchAgain = false;
+      changed =
+          await _fetchFromBackend(limit: limit, expectedHash: expectedHash) ||
+          changed;
+      expectedHash = null;
+    } while (_fetchAgain);
+    return changed;
   }
 
   Future<bool> _fetchFromBackend({
@@ -410,7 +428,7 @@ class MomentsService extends ChangeNotifier {
 
         _posts = backendPosts;
         _dedupePostsInMemory();
-        await _savePosts(hash: expectedHash ?? responseHash);
+        await _savePosts(hash: responseHash ?? expectedHash);
         _hasValidLocalCache = true;
         notifyListeners();
         debugPrint(

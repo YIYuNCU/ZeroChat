@@ -15,8 +15,16 @@ class ChatListService extends ChangeNotifier {
   static ChatListService get instance => _instance;
 
   final List<ChatInfo> _chatList = [];
+  List<ChatInfo>? _sortedChatList;
+
+  @override
+  void notifyListeners() {
+    _sortedChatList = null;
+    super.notifyListeners();
+  }
 
   List<ChatInfo> get chatList {
+    if (_sortedChatList != null) return _sortedChatList!;
     // 置顶的排在前面，然后按时间排序
     final sorted = List<ChatInfo>.from(_chatList);
     sorted.sort((a, b) {
@@ -24,7 +32,7 @@ class ChatListService extends ChangeNotifier {
       if (!a.isPinned && b.isPinned) return 1;
       return b.lastMessageTime.compareTo(a.lastMessageTime);
     });
-    return sorted;
+    return _sortedChatList = List.unmodifiable(sorted);
   }
 
   int get totalUnreadCount =>
@@ -33,6 +41,7 @@ class ChatListService extends ChangeNotifier {
   /// 初始化服务
   static Future<void> init() async {
     await _instance._loadChatList();
+    _instance.notifyListeners();
     debugPrint(
       'ChatListService initialized with ${_instance._chatList.length} chats',
     );
@@ -40,6 +49,7 @@ class ChatListService extends ChangeNotifier {
 
   /// 加载聊天列表
   Future<void> _loadChatList() async {
+    _sortedChatList = null;
     final jsonList = StorageService.getJsonList('chat_list');
     if (jsonList != null) {
       _chatList.clear();
@@ -100,6 +110,11 @@ class ChatListService extends ChangeNotifier {
 
     final chat = _chatList[index];
     final unreadDelta = unreadIncrement + (incrementUnread ? 1 : 0);
+    if (unreadDelta == 0 &&
+        (lastMessage == null || lastMessage == chat.lastMessage) &&
+        lastMessageTime == chat.lastMessageTime) {
+      return;
+    }
     _chatList[index] = chat.copyWith(
       lastMessage: lastMessage ?? chat.lastMessage,
       lastMessageTime: lastMessageTime ?? DateTime.now(),

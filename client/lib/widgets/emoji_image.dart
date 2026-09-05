@@ -51,6 +51,7 @@ class _EmojiImageState extends State<EmojiImage> {
   Timer? _retryTimer;
   int _retryCount = 0;
   bool _resolved = false;
+  bool _repairing = false;
 
   bool get _isTransferReference =>
       EmojiTransferService.isTransferReference(widget.source);
@@ -86,6 +87,7 @@ class _EmojiImageState extends State<EmojiImage> {
     _reconnectSubscription = null;
     _retryCount = 0;
     _resolved = false;
+    _repairing = false;
     _localPathFuture = null;
   }
 
@@ -128,6 +130,25 @@ class _EmojiImageState extends State<EmojiImage> {
     setState(_startResolution);
   }
 
+  Widget _handleFileError(String path) {
+    if (!_repairing && _retryCount < _maxRetries) {
+      _repairing = true;
+      final reference = widget.source;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted || reference != widget.source) return;
+        await FileImage(File(path)).evict();
+        if (widget.resolveLocalPath == null) {
+          await EmojiTransferService.invalidate(reference);
+        }
+        if (!mounted || reference != widget.source) return;
+        _resolved = false;
+        _repairing = false;
+        _scheduleRetry();
+      });
+    }
+    return widget.error;
+  }
+
   @override
   void dispose() {
     _resetTransfer();
@@ -159,7 +180,7 @@ class _EmojiImageState extends State<EmojiImage> {
           File(localPath),
           fit: widget.fit,
           cacheWidth: widget.cacheWidth,
-          errorBuilder: (_, _, _) => widget.error,
+          errorBuilder: (_, _, _) => _handleFileError(localPath),
         );
       },
     );

@@ -5,6 +5,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val isolatedDeviceTest = providers.gradleProperty("zerochatDeviceTest").orNull == "true"
+
 android {
     namespace = "com.zerochat.zerochat"
     compileSdk = maxOf(flutter.compileSdkVersion, 36)
@@ -22,7 +24,8 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.zerochat.zerochat"
+        applicationId = if (isolatedDeviceTest) "com.zerochat.zerochat.devicetest" else "com.zerochat.zerochat"
+        manifestPlaceholders["appLabel"] = if (isolatedDeviceTest) "ZeroChat Test" else "zerochat"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

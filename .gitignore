@@ -218,6 +218,7 @@ client/zerochat.iml
 client/.idea/
 client/.dart_tool/
 client/build/
+.android-test/
 
 *.properties
 *.lock

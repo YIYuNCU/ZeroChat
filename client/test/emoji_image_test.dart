@@ -44,7 +44,7 @@ void main() {
   testWidgets('renders ws emoji references from a resolved local file', (
     tester,
   ) async {
-    final imageFile = await _createEmojiFile();
+    final imageFile = (await tester.runAsync(_createEmojiFile))!;
     final resolvedReferences = <String>[];
 
     await tester.pumpWidget(
@@ -65,7 +65,7 @@ void main() {
   testWidgets('retries a failed transfer after exponential backoff', (
     tester,
   ) async {
-    final imageFile = await _createEmojiFile();
+    final imageFile = (await tester.runAsync(_createEmojiFile))!;
     var attempts = 0;
 
     await tester.pumpWidget(
@@ -113,6 +113,37 @@ void main() {
     expect(attempts, 2);
   });
 
+  testWidgets(
+    'a resolved file error invalidates resolution and schedules retry',
+    (tester) async {
+      final imageFile = (await tester.runAsync(_createEmojiFile))!;
+      var attempts = 0;
+      await tester.pumpWidget(
+        _subject(
+          source: 'ws-emoji://user/repair',
+          resolveLocalPath: (_) async {
+            attempts++;
+            return imageFile.path;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final image = tester.widget<Image>(find.byType(Image));
+      image.errorBuilder!(
+        tester.element(find.byType(Image)),
+        const FileSystemException('removed'),
+        StackTrace.current,
+      );
+      tester.binding.scheduleFrame();
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(attempts, 2);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets('keeps HTTP sources on the authenticated network image path', (
     tester,
   ) async {
@@ -130,9 +161,6 @@ void main() {
     await tester.pump();
 
     expect(resolverCalled, isFalse);
-    expect(
-      tester.widget<Image>(find.byType(Image)).image,
-      isA<NetworkImage>(),
-    );
+    expect(tester.widget<Image>(find.byType(Image)).image, isA<NetworkImage>());
   });
 }

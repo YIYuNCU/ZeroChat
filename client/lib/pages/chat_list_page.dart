@@ -24,7 +24,6 @@ class _ChatListPageState extends State<ChatListPage> {
   void initState() {
     super.initState();
     ChatListService.instance.addListener(_onChatListChanged);
-    MessageStore.instance.addListener(_onChatListChanged);
     _initChatList();
   }
 
@@ -38,7 +37,6 @@ class _ChatListPageState extends State<ChatListPage> {
   @override
   void dispose() {
     ChatListService.instance.removeListener(_onChatListChanged);
-    MessageStore.instance.removeListener(_onChatListChanged);
     super.dispose();
   }
 
@@ -153,6 +151,7 @@ class _ChatListPageState extends State<ChatListPage> {
 
   Widget _buildChatItem(ChatInfo chat) {
     return Material(
+      key: ValueKey(chat.id),
       color: chat.isPinned ? const Color(0xFFF5F5F5) : Colors.white,
       child: InkWell(
         onTap: () => _openChat(chat),

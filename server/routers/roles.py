@@ -22,12 +22,16 @@ ROLES_DIR = DATA_DIR / "roles"
 USER_EMOJI_DIR = DATA_DIR / "user_emojis"
 USER_EMOJI_DB = DATA_DIR / "user_emojis.sqlite"
 from core.utils import (
+    atomic_write_json,
     ensure_direct_child_path,
     ensure_path_within_root,
     ensure_simple_path_segment,
     is_tool_role_id,
 )
 from core.quiet_rules import QuietRule, validate_quiet_rules
+from services.chat_io_service import (
+    canonical_chat_message, offload_role_io, role_lock, run_file_io, snapshot_cache,
+)
 
 def _normalize_category_name(name: str) -> str:
     normalized = str(name or "").strip().lower()
@@ -319,6 +323,11 @@ def _overlay_role_core_memory_from_db(role_data: Dict[str, Any]) -> Dict[str, An
         return role_data
 
 def get_role_dir(role_id: str) -> Path:
+    with role_lock(role_id):
+        return _get_role_dir(role_id)
+
+
+def _get_role_dir(role_id: str) -> Path:
     """获取角色目录，自动创建完整目录结构"""
     role_id = _normalize_role_id(role_id)
     role_dir = _resolve_direct_child(ROLES_DIR, role_id, "role_id")
@@ -341,9 +350,11 @@ def get_role_dir(role_id: str) -> Path:
         _resolve_direct_child(subdirs["emojis"], emotion, "emotion").mkdir(exist_ok=True)
 
     messages_file = _resolve_direct_child(subdirs["chats"], "messages.json", "chat file")
-    if not messages_file.exists():
-        with open(messages_file, "w", encoding="utf-8") as f:
+    try:
+        with open(messages_file, "x", encoding="utf-8") as f:
             json.dump({"messages": []}, f)
+    except FileExistsError:
+        pass
 
     posts_file = _resolve_direct_child(subdirs["moments"], "posts.json", "moments file")
     if not posts_file.exists():
@@ -687,8 +698,10 @@ async def delete_role(role_id: str):
     """删除角色"""
     role_id = _normalize_role_id(role_id)
     role_dir = _resolve_direct_child(ROLES_DIR, role_id, "role_id")
-    if role_dir.exists():
-        shutil.rmtree(role_dir)
+    with role_lock(role_id):
+        if role_dir.exists():
+            shutil.rmtree(role_dir)
+    snapshot_cache.clear()
     try:
         from routers.ai_behavior import invalidate_role_cache
         invalidate_role_cache(role_id)
@@ -1305,16 +1318,16 @@ class ChatMessageUpdate(BaseModel):
     quote_content: Optional[str] = None
 
 def _load_role_chat_messages(role_id: str) -> List[Dict[str, Any]]:
-    role_dir = get_role_dir(role_id)
-    messages_file = role_dir / "chats" / "messages.json"
-    if not messages_file.exists():
-        return []
-    with open(messages_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        messages = data.get("messages", [])
-        if isinstance(messages, list):
-            return messages
-        return []
+    with role_lock(role_id):
+        # Reads must not create role directories or touch unrelated assets.
+        role_dir = _resolve_direct_child(ROLES_DIR, role_id, "role_id")
+        chats_dir = _resolve_direct_child(role_dir, "chats", "chat directory")
+        messages_file = _resolve_direct_child(chats_dir, "messages.json", "chat file")
+        if not messages_file.exists():
+            return []
+        with open(messages_file, "r", encoding="utf-8") as f:
+            messages = json.load(f).get("messages", [])
+            return [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
 
 def _to_absolute_backend_url(url: str, backend_base_url: Optional[str]) -> str:
     raw = str(url or "").strip()
@@ -1478,7 +1491,26 @@ def _normalize_chat_message_for_sync(message: Dict[str, Any], backend_base_url: 
         )
     return normalized
 
-def _build_chats_snapshot(backend_base_url: Optional[str] = None) -> Dict[str, Any]:
+def _build_chats_snapshot(backend_base_url: Optional[str] = None, *, client_md5=None, hash_only=False) -> Dict[str, Any]:
+    import copy
+    def paths():
+        return [path / "chats" / "messages.json" for path in sorted(_iter_safe_role_dirs())]
+    def project(value):
+        if hash_only or (client_md5 and client_md5 == value["md5"]):
+            return {k: v for k, v in value.items() if k != "chats"}
+        return copy.deepcopy(value)
+    return snapshot_cache.get(
+        (str(ROLES_DIR.resolve()), backend_base_url), paths,
+        lambda: _build_chats_snapshot_uncached(backend_base_url), project,
+    )
+
+
+async def get_chat_snapshot(backend_base_url=None, *, client_md5=None, hash_only=False):
+    return await run_file_io(_build_chats_snapshot, backend_base_url,
+                             client_md5=client_md5, hash_only=hash_only)
+
+
+def _build_chats_snapshot_uncached(backend_base_url: Optional[str] = None) -> Dict[str, Any]:
     chats: Dict[str, List[Dict[str, Any]]] = {}
     for role_dir in sorted(_iter_safe_role_dirs(), key=lambda p: p.name):
         role_id = role_dir.name
@@ -1489,7 +1521,12 @@ def _build_chats_snapshot(backend_base_url: Optional[str] = None) -> Dict[str, A
         messages.sort(key=lambda m: (str(m.get("timestamp", "")), str(m.get("id", ""))))
         chats[role_id] = messages
 
-    canonical = json.dumps(chats, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    canonical_chats = {
+        role_id: sorted((canonical_chat_message(m) for m in messages),
+                        key=lambda m: (m["timestamp"], m["id"]))
+        for role_id, messages in chats.items()
+    }
+    canonical = json.dumps(canonical_chats, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     snapshot_md5 = hashlib.md5(canonical.encode("utf-8")).hexdigest()
     total_messages = sum(len(items) for items in chats.values())
 
@@ -1546,7 +1583,8 @@ def compute_roles_hash(role_items: List[Dict[str, Any]]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 @router.get("/roles/{role_id}/chats/messages")
-async def get_chat_messages(role_id: str, request: Request, limit: int = 100, offset: int = 0):
+@offload_role_io
+def get_chat_messages(role_id: str, request: Request, limit: int = 100, offset: int = 0):
     """获取角色聊天记录"""
     role_dir = get_role_dir(role_id)
     messages_file = role_dir / "chats" / "messages.json"
@@ -1572,7 +1610,7 @@ async def get_chat_messages(role_id: str, request: Request, limit: int = 100, of
 async def get_all_chats_snapshot(request: Request, client_md5: Optional[str] = None):
     """获取所有聊天记录快照；传入 client_md5 相同则仅返回无需同步"""
     backend_base_url = str(request.base_url).rstrip("/")
-    snapshot = _build_chats_snapshot(backend_base_url)
+    snapshot = await get_chat_snapshot(backend_base_url, client_md5=client_md5)
     if client_md5 and client_md5 == snapshot["md5"]:
         return {
             "need_sync": False,
@@ -1590,7 +1628,8 @@ async def get_all_chats_snapshot(request: Request, client_md5: Optional[str] = N
     }
 
 @router.post("/roles/{role_id}/chats/messages")
-async def save_chat_message(role_id: str, message: ChatMessage):
+@offload_role_io
+def save_chat_message(role_id: str, message: ChatMessage):
     """保存单条聊天消息"""
     role_dir = get_role_dir(role_id)
     messages_file = role_dir / "chats" / "messages.json"
@@ -1610,13 +1649,14 @@ async def save_chat_message(role_id: str, message: ChatMessage):
         )
     
     # 保存
-    with open(messages_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    if message.id not in existing_ids:
+        atomic_write_json(messages_file, data)
     
     return {"success": True, "message_id": message.id}
 
 @router.put("/roles/{role_id}/chats/messages/{message_id}")
-async def update_chat_message(role_id: str, message_id: str, payload: ChatMessageUpdate):
+@offload_role_io
+def update_chat_message(role_id: str, message_id: str, payload: ChatMessageUpdate):
     """更新单条聊天消息内容（用于占位消息修复等场景）"""
     role_dir = get_role_dir(role_id)
     messages_file = role_dir / "chats" / "messages.json"
@@ -1649,13 +1689,13 @@ async def update_chat_message(role_id: str, message_id: str, payload: ChatMessag
     if not updated:
         raise HTTPException(status_code=404, detail="消息不存在")
 
-    with open(messages_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(messages_file, data)
 
     return {"success": True, "message_id": message_id}
 
 @router.post("/roles/{role_id}/chats/sync")
-async def sync_chat_messages(role_id: str, sync: ChatMessagesSync):
+@offload_role_io
+def sync_chat_messages(role_id: str, sync: ChatMessagesSync):
     """批量同步聊天消息"""
     role_dir = get_role_dir(role_id)
     messages_file = role_dir / "chats" / "messages.json"
@@ -1682,13 +1722,13 @@ async def sync_chat_messages(role_id: str, sync: ChatMessagesSync):
     data["messages"].sort(key=lambda m: m.get("timestamp", ""))
     
     # 保存
-    with open(messages_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(messages_file, data)
     
     return {"success": True, "added": added, "total": len(data["messages"])}
 
 @router.delete("/roles/{role_id}/chats/messages/{message_id}")
-async def delete_chat_message(role_id: str, message_id: str):
+@offload_role_io
+def delete_chat_message(role_id: str, message_id: str):
     """删除单条聊天消息"""
     role_dir = get_role_dir(role_id)
     messages_file = role_dir / "chats" / "messages.json"
@@ -1703,7 +1743,6 @@ async def delete_chat_message(role_id: str, message_id: str):
     data["messages"] = [m for m in data.get("messages", []) if m.get("id") != message_id]
     removed = original_count - len(data["messages"])
     
-    with open(messages_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(messages_file, data)
     
     return {"success": True, "removed": removed, "total": len(data["messages"])}

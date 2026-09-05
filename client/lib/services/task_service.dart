@@ -80,6 +80,7 @@ class TaskService {
 
   /// in-flight 去重与 TTL 节流：启动路径两处拉取不会重复往返。
   static Future<bool>? _inFlightFetch;
+  static bool _fetchAgain = false;
   static DateTime? _lastFetchAt;
   static const Duration _fetchThrottle = Duration(seconds: 30);
 
@@ -265,6 +266,7 @@ class TaskService {
   static Future<bool> fetchFromBackend({bool force = false}) async {
     final inFlight = _inFlightFetch;
     if (inFlight != null) {
+      if (force) _fetchAgain = true;
       return inFlight;
     }
     if (!force && _lastFetchAt != null) {
@@ -272,13 +274,22 @@ class TaskService {
         return false;
       }
     }
-    final future = _doFetchFromBackend();
+    final future = _drainFetches();
     _inFlightFetch = future;
     try {
       return await future;
     } finally {
       _inFlightFetch = null;
     }
+  }
+
+  static Future<bool> _drainFetches() async {
+    var changed = false;
+    do {
+      _fetchAgain = false;
+      changed = await _doFetchFromBackend() || changed;
+    } while (_fetchAgain);
+    return changed;
   }
 
   static Future<bool> _doFetchFromBackend() async {

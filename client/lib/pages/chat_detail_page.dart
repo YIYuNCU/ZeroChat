@@ -438,9 +438,9 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       triggerTime: triggerTime,
     );
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(ok ? '已设置提醒' : '提醒设置失败')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(ok ? '已设置提醒' : '提醒设置失败')));
   }
 
   void _onScroll() {
@@ -483,7 +483,9 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     final residentMessageCount = MessageStore.instance
         .getMessages(widget.chatId)
         .length;
-    final hasOlderOnDisk = MessageStore.instance.hasOlderMessages(widget.chatId);
+    final hasOlderOnDisk = MessageStore.instance.hasOlderMessages(
+      widget.chatId,
+    );
     if (_visibleMessageCount >= residentMessageCount && !hasOlderOnDisk) return;
 
     final oldMaxScrollExtent = _scrollController.position.maxScrollExtent;
@@ -660,12 +662,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   initialData: MessageStore.instance.getMessages(widget.chatId),
                   builder: (context, snapshot) {
                     final messages = snapshot.data ?? [];
-      final totalMessagesCount = messages.length;
+                    final totalMessagesCount = messages.length;
                     final currentVisibleCount =
                         totalMessagesCount < _visibleMessageCount
                         ? totalMessagesCount
                         : _visibleMessageCount;
-                    final visibleStart = totalMessagesCount - currentVisibleCount;
+                    final visibleStart =
+                        totalMessagesCount - currentVisibleCount;
                     final visibleMessages = messages
                         .sublist(visibleStart)
                         .where(_shouldRenderMessage)
@@ -705,7 +708,15 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
 
                     _handleAutoScroll(totalMessagesCount);
 
+                    final messageIndices = <String, int>{
+                      for (var i = 0; i < visibleMessages.length; i++)
+                        visibleMessages[i].id: i + (hasMoreMessages ? 1 : 0),
+                    };
+
                     return ListView.builder(
+                      findChildIndexCallback: (key) => key is ValueKey<String>
+                          ? messageIndices[key.value]
+                          : null,
                       controller: _scrollController,
                       padding: const EdgeInsets.symmetric(vertical: 10),
                       itemCount:
@@ -730,7 +741,9 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                           );
                         }
 
-                        final adjustedIndex = hasMoreMessages ? index - 1 : index;
+                        final adjustedIndex = hasMoreMessages
+                            ? index - 1
+                            : index;
                         final message = visibleMessages[adjustedIndex];
                         final showTime = _shouldShowTime(
                           visibleMessages,
@@ -738,10 +751,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                         );
 
                         return Column(
+                          key: ValueKey(message.id),
                           children: [
                             if (showTime)
                               Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 10),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 10,
+                                ),
                                 child: Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 8,
@@ -769,7 +785,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                 ),
               ),
             ),
-            if (_quoteState != null && !_isMultiSelectMode) _buildQuotePreview(),
+            if (_quoteState != null && !_isMultiSelectMode)
+              _buildQuotePreview(),
             if (_isMultiSelectMode)
               _buildMultiSelectToolbar()
             else
@@ -1039,7 +1056,12 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
         padding: const EdgeInsets.symmetric(vertical: 8),
         child: Center(
           child: Container(
-            padding: const EdgeInsets.only(left: 16, right: 4, top: 6, bottom: 6),
+            padding: const EdgeInsets.only(
+              left: 16,
+              right: 4,
+              top: 6,
+              bottom: 6,
+            ),
             decoration: BoxDecoration(
               color: const Color(0xFFFFEEEE),
               borderRadius: BorderRadius.circular(4),
@@ -1051,7 +1073,10 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                 Flexible(
                   child: Text(
                     message.content,
-                    style: const TextStyle(color: Color(0xFFFF4444), fontSize: 13),
+                    style: const TextStyle(
+                      color: Color(0xFFFF4444),
+                      fontSize: 13,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -1060,7 +1085,11 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   borderRadius: BorderRadius.circular(12),
                   child: const Padding(
                     padding: EdgeInsets.all(4),
-                    child: Icon(Icons.close, size: 14, color: Color(0xFFFF8888)),
+                    child: Icon(
+                      Icons.close,
+                      size: 14,
+                      color: Color(0xFFFF8888),
+                    ),
                   ),
                 ),
               ],

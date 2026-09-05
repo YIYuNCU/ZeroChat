@@ -109,8 +109,7 @@ Future<void> _initServicesInBackground() async {
     SecureWebSocketClient.instance
         .ensureConnected()
         .then((_) {
-          // 连接就绪后补齐上次会话遗留（弱网漏收/进程被杀）的异步聊天回复。
-          return ChatController.instance.startPushRecovery();
+          return RealtimeSyncService.resyncAll();
         })
         .catchError((Object e) {
           debugPrint('⚠️ startPushRecovery failed: $e');
@@ -185,21 +184,7 @@ Future<void> _syncWithBackend() async {
     // 启动阶段仅同步公开设置，不默认拉取密钥
     await SettingsService.instance.syncPublicSettingsFromBackend();
 
-    // 升级时先把旧客户端的本地主动消息配置迁移到服务端，再以下行为准。
-    final proactiveMigrationComplete =
-        await RoleService.migrateProactiveConfigsToBackendIfNeeded();
-    if (!proactiveMigrationComplete) {
-      throw StateError('主动消息配置迁移尚未完成');
-    }
-
-    // 同步角色数据
-    await RoleService.syncIfHashMismatch();
-
-    // 本地快照可立即展示，仅在 hash 变化时下载完整朋友圈列表。
-    await MomentsService.instance.syncIfHashMismatch();
-
-    // 同步任务数据
-    await TaskService.fetchFromBackend();
+    await RealtimeSyncService.resyncAll();
 
     debugPrint('✅ Backend sync complete');
     backendSyncNotifier.value = BackendSyncStatus.success;
@@ -263,10 +248,7 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
       SecureWebSocketClient.instance.setForeground(true);
       BackgroundRuntimeService.notifyAppLifecycle(inForeground: true);
       // 回到前台后确保连接并做一次全量对账，补齐后台期间可能漏收的消息。
-      unawaited(() async {
-        await SecureWebSocketClient.instance.ensureConnected();
-        await RealtimeSyncService.resyncAll();
-      }());
+      unawaited(_recoverBackendConnection(resync: true));
       return;
     }
 
@@ -277,7 +259,16 @@ class _ZeroChatAppState extends State<ZeroChatApp> with WidgetsBindingObserver {
       BackgroundRuntimeService.notifyAppLifecycle(inForeground: false);
       // 进入后台前 flush 挂起的消息写入，避免防抖窗口内的数据丢失。
       unawaited(MessageStore.instance.flushPendingSaves());
-      unawaited(SecureWebSocketClient.instance.ensureConnected());
+      unawaited(_recoverBackendConnection());
+    }
+  }
+
+  Future<void> _recoverBackendConnection({bool resync = false}) async {
+    try {
+      await SecureWebSocketClient.instance.ensureConnected();
+      if (resync) await RealtimeSyncService.resyncAll();
+    } catch (error) {
+      debugPrint('Lifecycle backend recovery failed: $error');
     }
   }
 

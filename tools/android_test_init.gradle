@@ -1,0 +1,17 @@
+// Opt-in only: used by the emulator test build command, not normal builds.
+gradle.beforeProject { project ->
+    if (project.rootProject.name == 'gradle') return
+    project.buildscript.repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+    }
+    if (project.name == 'integration_test') {
+        project.buildscript.configurations.configureEach {
+            resolutionStrategy.force 'com.android.tools.build:gradle:8.11.1'
+        }
+    }
+    project.repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+    }
+}

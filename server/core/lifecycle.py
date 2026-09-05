@@ -165,6 +165,8 @@ def create_lifespan(data_dir: Path, config_dir: Path, runtime_dir: Path, logger)
         yield
 
         scheduler_service.stop_scheduler()
+        from services.chat_io_service import close_file_workers
+        await close_file_workers()
         await aclose_http_client()
         close_db_connections()
         logger.info("ZeroChat Server 已关闭")

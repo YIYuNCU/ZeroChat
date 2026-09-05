@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -6,6 +7,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'secure_websocket_client.dart';
+import 'settings_service.dart';
+import 'storage_service.dart';
 
 /// Downloads protected emoji assets over the encrypted WebSocket in bounded chunks.
 class EmojiTransferService {
@@ -19,14 +22,88 @@ class EmojiTransferService {
   static const int _maxCacheBytes = 200 * 1024 * 1024;
 
   static final Map<String, Future<String?>> _inFlight = {};
+  static final Map<String, String> _paths = {};
+  static final Map<String, int> _versions = {};
+  static final Map<String, DateTime> _accessTimes = {};
+  static final Set<String> _activeParts = {};
+  static Future<void>? _indexFuture;
+  static Future<void> _mutationTail = Future<void>.value();
+  static int _epoch = 0;
+  static int _downloadId = 0;
+  static Timer? _maintenanceTimer;
+  static const _legacyOriginKey = 'emoji_cache_legacy_origin_v1';
+
+  static Future<T> _mutate<T>(Future<T> Function() operation) {
+    final next = _mutationTail.then((_) => operation());
+    _mutationTail = next.then<void>(
+      (_) {},
+      onError: (Object e, StackTrace s) {},
+    );
+    return next;
+  }
+
+  static String _key(String reference, String origin) =>
+      sha256.convert(utf8.encode('$origin|$reference')).toString();
+
+  static void _scheduleMaintenance() {
+    _maintenanceTimer ??= Timer(const Duration(seconds: 3), () {
+      _maintenanceTimer = null;
+      unawaited(trimToBudget());
+    });
+  }
 
   static bool isTransferReference(String value) =>
       value.trim().startsWith('ws-emoji://');
 
-  static Future<String?> resolveLocalPath(String reference) {
+  static Future<String?> resolveLocalPath(
+    String reference, {
+    @visibleForTesting
+    Future<Map<String, dynamic>> Function(String, Map<String, dynamic>)?
+    request,
+  }) {
     final normalized = reference.trim();
     if (!isTransferReference(normalized)) return Future.value(null);
-    return _inFlight.putIfAbsent(normalized, () => _download(normalized));
+    final origin = SettingsService.instance.backendUrl;
+    final epoch = _epoch;
+    final version = _versions[_key(normalized, origin)] ?? 0;
+    final requestKey = '${_key(normalized, origin)}|$epoch|$version';
+    return _inFlight.putIfAbsent(
+      requestKey,
+      () => _download(normalized, origin, epoch, version, request ?? _request)
+          .whenComplete(() {
+            _inFlight.remove(requestKey);
+          }),
+    );
+  }
+
+  static Future<Map<String, dynamic>> _request(
+    String action,
+    Map<String, dynamic> payload,
+  ) => SecureWebSocketClient.instance.request(
+    action,
+    payload,
+    timeout: const Duration(seconds: 20),
+  );
+
+  static Future<void> invalidate(String reference) {
+    final origin = SettingsService.instance.backendUrl;
+    final key = _key(reference.trim(), origin);
+    _versions[key] = (_versions[key] ?? 0) + 1;
+    final legacyKey = sha256.convert(utf8.encode(reference.trim())).toString();
+    final paths = <String>{
+      if (_paths[key] != null) _paths.remove(key)!,
+      if (StorageService.getString(_legacyOriginKey) == origin &&
+          _paths[legacyKey] != null)
+        _paths.remove(legacyKey)!,
+    };
+    return _mutate(() async {
+      for (final path in paths) {
+        _accessTimes.remove(path);
+        try {
+          if (await File(path).exists()) await File(path).delete();
+        } catch (_) {}
+      }
+    });
   }
 
   /// Runs bounded cache maintenance without opening an emoji transfer.
@@ -36,7 +113,16 @@ class EmojiTransferService {
       final cacheDir = Directory(
         '${root.path}${Platform.pathSeparator}emoji_cache',
       );
-      await _enforceCacheBudget(cacheDir);
+      await _mutate(() async {
+        final accesses = Map<String, DateTime>.from(_accessTimes);
+        _accessTimes.clear();
+        for (final entry in accesses.entries) {
+          try {
+            await File(entry.key).setLastModified(entry.value);
+          } catch (_) {}
+        }
+        await _enforceCacheBudget(cacheDir);
+      });
     } catch (error) {
       debugPrint('EmojiTransferService: cache maintenance failed: $error');
     }
@@ -44,28 +130,53 @@ class EmojiTransferService {
 
   /// Clears only downloaded transfer assets. Imported sticker files are stored
   /// elsewhere and are never affected.
-  static Future<void> clearCache() async {
+  static Future<void> clearCache() {
+    _epoch++;
+    _versions.clear();
+    _paths.clear();
+    _accessTimes.clear();
+    _indexFuture = null;
+    _maintenanceTimer?.cancel();
+    _maintenanceTimer = null;
+    return _mutate(_clearCache);
+  }
+
+  static Future<void> _clearCache() async {
     final root = await getApplicationDocumentsDirectory();
     final cacheDir = Directory(
       '${root.path}${Platform.pathSeparator}emoji_cache',
     );
     if (await cacheDir.exists()) {
-      await cacheDir.delete(recursive: true);
+      await for (final file in cacheDir.list(followLinks: false)) {
+        if (file is File && !_activeParts.contains(file.path)) {
+          await file.delete();
+        }
+      }
     }
   }
 
-  static Future<String?> _download(String reference) async {
+  static Future<String?> _download(
+    String reference,
+    String origin,
+    int epoch,
+    int version,
+    Future<Map<String, dynamic>> Function(String, Map<String, dynamic>) request,
+  ) async {
+    File? partial;
+    bool current() =>
+        epoch == _epoch &&
+        origin == SettingsService.instance.backendUrl &&
+        (_versions[_key(reference, origin)] ?? 0) == version;
     try {
-      final cachedPath = await _findCachedPath(reference);
+      await _mutationTail;
+      if (!current()) return null;
+      final cachedPath = await _findCachedPath(reference, origin, epoch);
+      if (!current()) return null;
       if (cachedPath != null) {
         return cachedPath;
       }
 
-      final init = await SecureWebSocketClient.instance.request(
-        'emoji_file_init',
-        {'reference': reference},
-        timeout: const Duration(seconds: 20),
-      );
+      final init = await request('emoji_file_init', {'reference': reference});
       final transferId = (init['transfer_id'] ?? '').toString();
       final totalChunks = init['total_chunks'] as int? ?? 0;
       final size = init['size'] as int? ?? -1;
@@ -87,25 +198,23 @@ class EmojiTransferService {
       }
 
       final extension = _extensionFrom(filename);
-      final cacheKey = sha256.convert(utf8.encode(reference)).toString();
+      if (!current()) return null;
+      final cacheKey = _key(reference, origin);
       final target = File(
         '${cacheDir.path}${Platform.pathSeparator}$cacheKey.$extension',
       );
-      if (await target.exists() && await target.length() == size) {
-        return target.path;
-      }
-
-      final temp = File('${target.path}.part');
-      if (await temp.exists()) await temp.delete();
+      final temp = File('${target.path}.${_downloadId++}.part');
+      partial = temp;
+      _activeParts.add(temp.path);
       final sink = temp.openWrite();
       var received = 0;
       try {
         for (var index = 0; index < totalChunks; index += 1) {
-          final chunk = await SecureWebSocketClient.instance.request(
-            'emoji_file_chunk',
-            {'transfer_id': transferId, 'chunk_index': index},
-            timeout: const Duration(seconds: 20),
-          );
+          if (!current()) return null;
+          final chunk = await request('emoji_file_chunk', {
+            'transfer_id': transferId,
+            'chunk_index': index,
+          });
           if (chunk['chunk_index'] != index ||
               chunk['chunk_base64'] is! String) {
             throw const FormatException('invalid emoji chunk response');
@@ -129,15 +238,28 @@ class EmojiTransferService {
           throw const FormatException('emoji checksum mismatch');
         }
       }
-      if (await target.exists()) await target.delete();
-      await temp.rename(target.path);
-      await _enforceCacheBudget(cacheDir);
-      return target.path;
+      return await _mutate(() async {
+        if (!current()) return null;
+        if (await target.exists()) await target.delete();
+        await temp.rename(target.path);
+        if (!current()) {
+          await target.delete();
+          return null;
+        }
+        _paths[cacheKey] = target.path;
+        _scheduleMaintenance();
+        return target.path;
+      });
     } catch (error) {
       debugPrint('EmojiTransferService: transfer failed: $error');
       return null;
     } finally {
-      _inFlight.remove(reference);
+      if (partial != null) {
+        _activeParts.remove(partial.path);
+        try {
+          if (await partial.exists()) await partial.delete();
+        } catch (_) {}
+      }
     }
   }
 
@@ -151,35 +273,56 @@ class EmojiTransferService {
   /// Cached emoji file names are derived from their stable transfer reference.
   /// Look there before contacting the server so historical stickers render
   /// immediately after an app restart, including while reconnecting offline.
-  static Future<String?> _findCachedPath(String reference) async {
+  static Future<void> _loadIndex(
+    Directory cacheDir,
+    String origin,
+    int epoch,
+  ) async {
+    final found = <String, String>{};
+    if (await cacheDir.exists()) {
+      await for (final entry in cacheDir.list(followLinks: false)) {
+        if (entry is! File) continue;
+        final name = entry.uri.pathSegments.last;
+        if (RegExp(r'^[a-f0-9]{64}\.[a-z0-9]{1,5}$').hasMatch(name)) {
+          found[name.substring(0, 64)] = entry.path;
+        }
+      }
+    }
+    if (epoch != _epoch) return;
+    _paths.addAll(found);
+    if (StorageService.getString(_legacyOriginKey) == null) {
+      await StorageService.setString(_legacyOriginKey, origin);
+    }
+  }
+
+  static Future<String?> _findCachedPath(
+    String reference,
+    String origin,
+    int epoch,
+  ) async {
     try {
       final root = await getApplicationDocumentsDirectory();
       final cacheDir = Directory(
         '${root.path}${Platform.pathSeparator}emoji_cache',
       );
-      if (!await cacheDir.exists()) {
+      await (_indexFuture ??= _loadIndex(cacheDir, origin, epoch));
+      if (epoch != _epoch) return null;
+      final cacheKey = _key(reference, origin);
+      final legacyKey = sha256.convert(utf8.encode(reference)).toString();
+      final path =
+          _paths[cacheKey] ??
+          (StorageService.getString(_legacyOriginKey) == origin
+              ? _paths[legacyKey]
+              : null);
+      if (path == null) return null;
+      final file = File(path);
+      if (!await file.exists() || await file.length() == 0) {
+        _paths.removeWhere((key, value) => value == path);
         return null;
       }
-
-      final cacheKey = sha256.convert(utf8.encode(reference)).toString();
-      await for (final entry in cacheDir.list(followLinks: false)) {
-        if (entry is! File) {
-          continue;
-        }
-        final name = entry.path.split(Platform.pathSeparator).last;
-        if (!name.startsWith('$cacheKey.') || name.endsWith('.part')) {
-          continue;
-        }
-        if (await entry.length() > 0) {
-          // Keep frequently displayed emoji assets near the end of LRU cleanup.
-          try {
-            await entry.setLastModified(DateTime.now());
-          } catch (error) {
-            debugPrint('EmojiTransferService: cache access update failed: $error');
-          }
-          return entry.path;
-        }
-      }
+      _accessTimes[path] = DateTime.now();
+      _scheduleMaintenance();
+      return path;
     } catch (error) {
       debugPrint('EmojiTransferService: local cache lookup failed: $error');
     }
@@ -199,7 +342,7 @@ class EmojiTransferService {
         if (entry is! File) continue;
         final name = entry.path.split(Platform.pathSeparator).last;
         if (name.endsWith('.part')) {
-          // Orphaned partial downloads are always safe to remove.
+          if (_activeParts.contains(entry.path)) continue;
           try {
             await entry.delete();
           } catch (_) {}
@@ -238,6 +381,7 @@ class EmojiTransferService {
         if (count <= _maxCacheFiles && totalBytes <= _maxCacheBytes) break;
         try {
           await file.delete();
+          _paths.removeWhere((key, value) => value == file.path);
           count -= 1;
           totalBytes -= stats[file]!.size;
         } catch (_) {}

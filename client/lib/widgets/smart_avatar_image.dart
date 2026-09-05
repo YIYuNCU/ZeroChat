@@ -30,6 +30,8 @@ class SmartAvatarImage extends StatefulWidget {
 
 class _SmartAvatarImageState extends State<SmartAvatarImage> {
   String? _localPath;
+  int _generation = 0;
+  bool _repairAttempted = false;
 
   @override
   void initState() {
@@ -58,12 +60,15 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
     if (oldWidget.remoteUrl != widget.remoteUrl ||
         oldWidget.backendHash != widget.backendHash ||
         oldWidget.cacheKey != widget.cacheKey) {
+      _localPath = null;
+      _repairAttempted = false;
       _resolvePath();
     }
   }
 
   /// [silent] 为 true 时，已有内存命中路径，仅后台刷新，成功后若路径不变不重建。
   Future<void> _resolvePath({bool silent = false}) async {
+    final generation = ++_generation;
     final url = widget.remoteUrl;
     if (url == null || url.isEmpty || !url.startsWith('http')) {
       debugPrint(
@@ -83,7 +88,7 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
       backendHash: widget.backendHash,
     );
 
-    if (!mounted) return;
+    if (!mounted || generation != _generation) return;
     // 静默刷新且路径未变：无需 setState，避免多余重建。
     if (silent && local == _localPath) return;
     setState(() {
@@ -92,6 +97,20 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
     if (local == null) {
       debugPrint('SmartAvatarImage: failed to resolve avatar for $url');
     }
+  }
+
+  Widget _handleImageError() {
+    if (!_repairAttempted) {
+      _repairAttempted = true;
+      final generation = _generation;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted || generation != _generation) return;
+        await AvatarCacheService.evict(widget.cacheKey);
+        if (!mounted || generation != _generation) return;
+        await _resolvePath();
+      });
+    }
+    return widget.fallbackBuilder?.call() ?? const SizedBox.shrink();
   }
 
   @override
@@ -129,8 +148,7 @@ class _SmartAvatarImageState extends State<SmartAvatarImage> {
         fit: widget.fit,
         cacheWidth: cacheW,
         cacheHeight: cacheH,
-        errorBuilder: (context, error, stackTrace) =>
-            widget.fallbackBuilder?.call() ?? const SizedBox.shrink(),
+        errorBuilder: (context, error, stackTrace) => _handleImageError(),
       );
     }
 

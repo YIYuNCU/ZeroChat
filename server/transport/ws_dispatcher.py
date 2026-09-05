@@ -997,7 +997,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         client_md5 = str(
             payload.get("client_md5") or payload.get("client_hash") or ""
         ).strip()
-        snapshot = roles._build_chats_snapshot(backend_base_url)
+        snapshot = await roles.get_chat_snapshot(backend_base_url, client_md5=client_md5)
         if client_md5 and client_md5 == snapshot["md5"]:
             return {
                 "need_sync": False,
@@ -1015,7 +1015,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         }
 
     if action == "chat_hash":
-        snapshot = roles._build_chats_snapshot(backend_base_url)
+        snapshot = await roles.get_chat_snapshot(backend_base_url, hash_only=True)
         return {
             "md5": snapshot["md5"],
             "hash": snapshot["md5"],
