@@ -358,7 +358,14 @@ class _ModelProfilesPageState extends State<ModelProfilesPage> {
   Future<void> _edit([ModelApiProfile? existing]) async {
     final result = await _showProfileEditor(context, existing: existing);
     if (result == null) return;
+    final roleIds = SettingsService.instance
+        .roleIdsUsingModelProfile(result.id)
+        .toList();
     await SettingsService.instance.saveApiProfile(result);
+    await RoleService.updateModelProfileContextLength(
+      roleIds,
+      result.maxContextLength,
+    );
     if (mounted) setState(() {});
   }
 
@@ -435,8 +442,15 @@ class _ModelProfilesPageState extends State<ModelProfilesPage> {
                               IconButton(
                                 tooltip: '删除档案',
                                 onPressed: () async {
+                                  final roleIds = SettingsService.instance
+                                      .roleIdsUsingModelProfile(profile.id)
+                                      .toList();
                                   await SettingsService.instance
                                       .deleteModelProfile(profile.id);
+                                  await RoleService.updateModelProfileContextLength(
+                                    roleIds,
+                                    null,
+                                  );
                                   if (mounted) setState(() {});
                                 },
                                 icon: const Icon(Icons.delete_outline),
@@ -647,6 +661,9 @@ Future<ModelApiProfile?> _showProfileEditor(
   final budget = TextEditingController(
     text: existing?.thinkingBudget?.toString() ?? '',
   );
+  final maxContextLength = TextEditingController(
+    text: existing?.maxContextLength?.toString() ?? '',
+  );
   bool? thinkingEnabled = existing == null ? true : existing.thinkingEnabled;
   final formKey = GlobalKey<FormState>();
   bool? stream = existing?.stream;
@@ -686,6 +703,20 @@ Future<ModelApiProfile?> _showProfileEditor(
                   decoration: const InputDecoration(
                     labelText: '超时时间（秒，留空继承全局）',
                   ),
+                ),
+                TextFormField(
+                  controller: maxContextLength,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '最大上下文长度（字符，留空不限制）',
+                  ),
+                  validator: (value) {
+                    final text = value?.trim() ?? '';
+                    return text.isEmpty ||
+                            (int.tryParse(text) != null && int.parse(text) > 0)
+                        ? null
+                        : '请输入大于 0 的整数';
+                  },
                 ),
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
@@ -820,6 +851,7 @@ Future<ModelApiProfile?> _showProfileEditor(
                       ? normalizeThinkingBudget(budget.text.trim())
                       : null,
                   stream: stream,
+                  maxContextLength: int.tryParse(maxContextLength.text.trim()),
                 ),
               );
             },
@@ -838,6 +870,7 @@ Future<ModelApiProfile?> _showProfileEditor(
   timeout.dispose();
   reasoningEffort.dispose();
   budget.dispose();
+  maxContextLength.dispose();
   return result;
 }
 

@@ -114,6 +114,22 @@ void main() {
     expect(profile.toJson(), isNot(contains('api_key')));
   });
 
+  test('profile context length round trips when configured', () {
+    const profile = ModelApiProfile(
+      id: 'context-cap',
+      name: 'Context cap',
+      apiUrl: 'https://example.com/v1',
+      model: 'example-model',
+      apiKey: '',
+      capabilities: {ModelProfileCapability.chat},
+      maxContextLength: 8192,
+    );
+
+    final restored = ModelApiProfile.fromJson(profile.toJson());
+    expect(restored.maxContextLength, 8192);
+    expect(restored.toJson()['max_context_length'], 8192);
+  });
+
   test('role-specific chat settings survive JSON round trip', () {
     final role = Role(
       id: 'role-1',
@@ -122,11 +138,19 @@ void main() {
       aiTimeoutSeconds: 240,
       aiReasoningEffort: 'high',
       aiStream: true,
+      maxContextLength: 16000,
+      modelMaxContextLength: 8192,
     );
 
     final restored = Role.fromJson(role.toJson());
     expect(restored.aiTimeoutSeconds, 240);
     expect(restored.aiReasoningEffort, 'high');
     expect(restored.aiStream, isTrue);
+    expect(restored.maxContextLength, 16000);
+    expect(restored.modelMaxContextLength, 8192);
+    expect(
+      restored.copyWith(clearModelMaxContextLength: true).modelMaxContextLength,
+      isNull,
+    );
   });
 }

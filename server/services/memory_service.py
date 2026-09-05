@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 DEFAULT_MEMORY_ORIGIN = "zerochat"
+DEFAULT_MAX_CONTEXT_ROUNDS = 60
+DEFAULT_MAX_CONTEXT_LENGTH = 12000
 
 
 def _role_dir(role_id: str) -> Path:
@@ -244,7 +246,52 @@ def _get_memory_length(max_context_rounds: Optional[int] = None) -> int:
     """
     if max_context_rounds is not None and max_context_rounds > 0:
         return max_context_rounds * 2
-    return 120
+    return DEFAULT_MAX_CONTEXT_ROUNDS * 2
+
+
+def _get_context_length(max_context_length: Optional[int] = None) -> int:
+    """Return the maximum number of message-content characters in a window."""
+    if max_context_length is not None and max_context_length > 0:
+        return max_context_length
+    return DEFAULT_MAX_CONTEXT_LENGTH
+
+
+def get_effective_context_length(role_data: Optional[Dict[str, Any]]) -> int:
+    """Return the lower positive cap from a role and its selected model profile."""
+    data = role_data or {}
+    role_length = data.get("max_context_length")
+    if not isinstance(role_length, int) or role_length <= 0:
+        role_length = DEFAULT_MAX_CONTEXT_LENGTH
+    model_length = data.get("model_max_context_length")
+    if isinstance(model_length, int) and model_length > 0:
+        return min(role_length, model_length)
+    return role_length
+
+
+def _content_length(content: Any) -> int:
+    return len(str(content or ""))
+
+
+def _tail_within_limits(
+    rows: List[Any],
+    max_messages: int,
+    max_context_length: int,
+) -> List[Any]:
+    """Keep the newest complete messages that fit both window limits."""
+    selected: List[Any] = []
+    total_length = 0
+    for row in reversed(rows[-max_messages:]):
+        content = row[1] if len(row) > 1 else row[0]
+        content_length = _content_length(content)
+        if content_length > max_context_length:
+            if not selected:
+                selected.append(row)
+            break
+        if selected and total_length + content_length > max_context_length:
+            break
+        selected.append(row)
+        total_length += content_length
+    return list(reversed(selected))
 
 
 STRUCTURED_MEMORY_PREFIXES = ("message:", "time:", "origin:", "sender:")
@@ -668,7 +715,6 @@ def load_memory(role_id: str) -> Dict:
             message_count_int = int(message_count)
         except (TypeError, ValueError):
             message_count_int = 0
-
         rows = conn.execute(
             """
             SELECT id, role, content, timestamp, task_id, request_id, json_memory, origin, sender, sender_id, group_id
@@ -676,6 +722,16 @@ def load_memory(role_id: str) -> Dict:
             ORDER BY id ASC
             """
         ).fetchall()
+        content_length = _get_meta(conn, "content_length_since_summary")
+        if content_length is None:
+            recent_rows = rows[-message_count_int:] if message_count_int > 0 else []
+            content_length_int = sum(_content_length(row[2]) for row in recent_rows)
+            _set_meta(conn, "content_length_since_summary", str(content_length_int))
+        else:
+            try:
+                content_length_int = int(content_length)
+            except (TypeError, ValueError):
+                content_length_int = 0
         short_term = [
             {
                 "id": row[0],
@@ -712,6 +768,7 @@ def load_memory(role_id: str) -> Dict:
         "short_term": short_term,
         "last_summarized_at": last_summarized_at,
         "message_count_since_summary": message_count_int,
+        "content_length_since_summary": content_length_int,
         "vector_memory_count": _get_vector_memory_count(role_id),
     }
 
@@ -771,6 +828,13 @@ def save_memory(role_id: str, memory: Dict):
         _set_meta(conn, "core_memory", core_memory)
         _set_meta(conn, "last_summarized_at", memory.get("last_summarized_at"))
         _set_meta(conn, "message_count_since_summary", str(memory.get("message_count_since_summary", 0)))
+        content_length_value = memory.get("content_length_since_summary")
+        if content_length_value is None:
+            content_length_value = sum(
+                _content_length(item.get("content", "") if isinstance(item, dict) else item)
+                for item in memory.get("short_term", [])
+            )
+        _set_meta(conn, "content_length_since_summary", str(content_length_value))
         _set_meta(conn, "updated_at", datetime.now().isoformat())
 
         conn.execute("DELETE FROM short_term")
@@ -895,6 +959,16 @@ def append_short_term(
         except (TypeError, ValueError):
             current_count_int = 0
         _set_meta(conn, "message_count_since_summary", str(current_count_int + 1))
+        current_length = _get_meta(conn, "content_length_since_summary", "0")
+        try:
+            current_length_int = int(current_length)
+        except (TypeError, ValueError):
+            current_length_int = 0
+        _set_meta(
+            conn,
+            "content_length_since_summary",
+            str(current_length_int + _content_length(normalized_content)),
+        )
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端仅保证 request_id 在 DB 记录中可用。
 
@@ -904,6 +978,8 @@ async def trigger_chat_summary(
     conv_origin: str = "system",
     conv_group_id: Optional[str] = None,
     conv_sender_id: Optional[str] = None,
+    max_context_rounds: Optional[int] = None,
+    max_context_length: Optional[int] = None,
 ) -> Optional[str]:
     """
     触发记忆总结（内部调用，不暴露给前端）
@@ -920,7 +996,8 @@ async def trigger_chat_summary(
     from services.ai_service import call_ai_direct
     try:
         # 根据渠道过滤短期记忆，避免跨频道污染总结输入
-        effective_limit = _get_memory_length()
+        effective_limit = _get_memory_length(max_context_rounds)
+        effective_context_length = _get_context_length(max_context_length)
         if conv_origin == "onebot_group" and conv_group_id:
             summary_where = "WHERE origin = 'onebot_group' AND group_id = ?"
             summary_params = [conv_group_id]
@@ -938,7 +1015,10 @@ async def trigger_chat_summary(
                 f"SELECT content FROM short_term {summary_where} ORDER BY id ASC LIMIT ? OFFSET ?",
                 summary_params + [effective_limit, offset]
             ).fetchall()
-        conversation = "\n".join([str(row[0] or "") for row in rows])
+        rows = _tail_within_limits(rows, effective_limit, effective_context_length)
+        conversation = "\n".join(
+            str((row[1] if len(row) > 1 else row[0]) or "") for row in rows
+        )
 
         prompt = f"最近对话：{conversation}"
         from routers.roles import load_role
@@ -977,6 +1057,7 @@ async def get_context_messages(
     skip_summary: bool = False,
     latest: bool = False,
     max_context_rounds: Optional[int] = None,
+    max_context_length: Optional[int] = None,
 ) -> List[Dict]:
     """
     获取对话上下文消息
@@ -997,6 +1078,7 @@ async def get_context_messages(
         [{"role": "user/assistant", "content": "..."}]
     """
     effective_limit = _get_memory_length(max_context_rounds)
+    effective_context_length = _get_context_length(max_context_length)
     if effective_limit <= 0:
         return []
     if is_tool_role_id(role_id):
@@ -1021,7 +1103,10 @@ async def get_context_messages(
         def _fetch_latest():
             with _get_connection(role_id) as conn:
                 query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id DESC LIMIT ?"
-                return conn.execute(query_sql, where_params + [effective_limit]).fetchall()
+                latest_rows = conn.execute(query_sql, where_params + [effective_limit]).fetchall()
+                return _tail_within_limits(
+                    list(reversed(latest_rows)), effective_limit, effective_context_length
+                )
 
         rows = await _run_db(role_id, _fetch_latest)
         return [
@@ -1035,25 +1120,46 @@ async def get_context_messages(
                     sender=row[4] or row[0] or "assistant",
                 ),
             }
-            for row in reversed(rows)
+            for row in rows
         ]
 
-    overlap = max(1, int(effective_limit * 0.1))
-    slide = effective_limit - overlap
+    overlap_count = max(1, int(effective_limit * 0.1))
+    overlap_length = max(1, int(effective_context_length * 0.1))
     virtual_start_key = f"virtual_block_start:{conversation_key or 'default'}"
 
     def _compute_virtual_start():
         with _get_connection(role_id) as conn:
-            count_sql = f"SELECT COUNT(*) FROM short_term {where_clause}"
-            total_local = conn.execute(count_sql, where_params).fetchone()[0]
+            rows_sql = f"SELECT content FROM short_term {where_clause} ORDER BY id ASC"
+            all_rows = conn.execute(rows_sql, where_params).fetchall()
+            total_local = len(all_rows)
             if total_local == 0:
+                _set_meta(conn, virtual_start_key, "0")
                 return 0, 0, False
-            vstart = int(_get_meta(conn, virtual_start_key, "0"))
+            try:
+                vstart = int(_get_meta(conn, virtual_start_key, "0"))
+            except (TypeError, ValueError):
+                vstart = 0
+            vstart = min(max(vstart, 0), total_local)
+            pending_rows = all_rows[vstart:]
+            pending_length = sum(_content_length(row[0]) for row in pending_rows)
             trigger = False
-            if not skip_summary and total_local - vstart >= effective_limit:
-                vstart += slide
-                if total_local - vstart >= effective_limit:
-                    vstart = total_local - effective_limit + overlap
+            if not skip_summary and (
+                len(pending_rows) >= effective_limit
+                or pending_length >= effective_context_length
+            ):
+                retained = 0
+                retained_length = 0
+                for row in reversed(pending_rows):
+                    row_length = _content_length(row[0])
+                    if row_length > overlap_length:
+                        if retained == 0:
+                            retained = 1
+                        break
+                    if retained >= overlap_count or retained_length + row_length > overlap_length:
+                        break
+                    retained += 1
+                    retained_length += row_length
+                vstart = total_local - retained
                 _set_meta(conn, virtual_start_key, str(vstart))
                 trigger = True
             return total_local, vstart, trigger
@@ -1077,6 +1183,8 @@ async def get_context_messages(
             conv_origin=conv_origin,
             conv_group_id=conv_group_id,
             conv_sender_id=conv_sender_id,
+            max_context_rounds=max_context_rounds,
+            max_context_length=max_context_length,
         )
         if not content:
             logger.error(f"触发对话总结失败，无法获取新的上下文消息")
@@ -1085,7 +1193,12 @@ async def get_context_messages(
     def _fetch_context():
         with _get_connection(role_id) as conn:
             query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?"
-            return conn.execute(query_sql, where_params + [effective_limit, query_offset]).fetchall()
+            candidate_rows = conn.execute(
+                query_sql, where_params + [effective_limit, query_offset]
+            ).fetchall()
+            return _tail_within_limits(
+                candidate_rows, effective_limit, effective_context_length
+            )
 
     rows = await _run_db(role_id, _fetch_context)
     context = [
@@ -1168,6 +1281,7 @@ def update_core_memory(role_id: str, core_memory: str):
         _set_meta(conn, "core_memory", core_memory)
         _set_meta(conn, "last_summarized_at", datetime.now().isoformat())
         _set_meta(conn, "message_count_since_summary", "0")
+        _set_meta(conn, "content_length_since_summary", "0")
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端不主动覆盖。
 
@@ -1194,7 +1308,11 @@ def should_generate_sequential_memory(role_id: str) -> bool:
 
     return (datetime.now() - last_updated).total_seconds() >= 1200
 
-def should_summarize(role_id: str) -> bool:
+def should_summarize(
+    role_id: str,
+    max_context_rounds: Optional[int] = None,
+    max_context_length: Optional[int] = None,
+) -> bool:
     """
     判断是否需要总结核心记忆
     
@@ -1210,9 +1328,21 @@ def should_summarize(role_id: str) -> bool:
             count = int(count_value)
         except (TypeError, ValueError):
             count = 0
-        last_summarized = _get_meta(conn, "last_summarized_at")
-    
-    return count >= _get_memory_length()
+        length_value = _get_meta(conn, "content_length_since_summary")
+        try:
+            content_length = int(length_value) if length_value is not None else 0
+        except (TypeError, ValueError):
+            content_length = 0
+        if length_value is None and count > 0:
+            rows = conn.execute(
+                "SELECT content FROM short_term ORDER BY id DESC LIMIT ?", (count,)
+            ).fetchall()
+            content_length = sum(_content_length(row[0]) for row in rows)
+
+    return (
+        count >= _get_memory_length(max_context_rounds)
+        or content_length >= _get_context_length(max_context_length)
+    )
 
 async def sequential_memory_generation(
     role_id: str,
@@ -1240,6 +1370,7 @@ async def sequential_memory_generation(
     from services.ai_service import call_ai_direct
     from routers.roles import load_role
     try:
+        role_config = load_role(role_id) or {}
         # 根据渠道过滤短期记忆，避免跨频道污染
         if conv_origin == "onebot_group" and conv_group_id:
             seq_where = "WHERE origin = 'onebot_group' AND group_id = ?"
@@ -1256,7 +1387,8 @@ async def sequential_memory_generation(
             seq_where = ""
             seq_params = []
 
-        effective_limit = _get_memory_length()
+        effective_limit = _get_memory_length(role_config.get("max_context_rounds"))
+        effective_context_length = get_effective_context_length(role_config)
         with _get_connection(role_id) as conn:
             count = conn.execute(f"SELECT COUNT(*) FROM short_term {seq_where}", seq_params).fetchone()[0]
             offset = max(0, count - effective_limit)
@@ -1264,6 +1396,7 @@ async def sequential_memory_generation(
                 f"SELECT content FROM short_term {seq_where} ORDER BY id ASC LIMIT ? OFFSET ?",
                 seq_params + [effective_limit, offset]
             ).fetchall()
+        rows = _tail_within_limits(rows, effective_limit, effective_context_length)
         conversation = "\n".join([str(row[0] or "") for row in rows])
 
         worker = load_role(worker_id)
@@ -1307,7 +1440,11 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
         新的核心记忆内容，或 None（如果不需要总结）
     """
     try:
-        if not should_summarize(role_data.get("id", role_id)):
+        if not should_summarize(
+            role_data.get("id", role_id),
+            role_data.get("max_context_rounds"),
+            get_effective_context_length(role_data),
+        ):
             return "noneed"
     except Exception as e:
         logger.warning("检查是否需要总结核心记忆时发生错误：%s", e)
@@ -1321,10 +1458,15 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
         role_need_change = role_data.get("id", role_id)
         
         # 构建总结提示
-        conversation = "\n".join([
-            str(m.get("content", ""))
-            for m in short_term[-_get_memory_length():]
-        ])
+        summary_rows = [
+            (m.get("role"), m.get("content", "")) for m in short_term
+        ]
+        summary_rows = _tail_within_limits(
+            summary_rows,
+            _get_memory_length(role_data.get("max_context_rounds")),
+            get_effective_context_length(role_data),
+        )
+        conversation = "\n".join(str(row[1]) for row in summary_rows)
         
         prompt = f"""
     当前已有的核心记忆：
@@ -1370,6 +1512,8 @@ def clear_short_term(role_id: str):
         return
     with _get_connection(role_id) as conn:
         conn.execute("DELETE FROM short_term")
+        _set_meta(conn, "message_count_since_summary", "0")
+        _set_meta(conn, "content_length_since_summary", "0")
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端不主动覆盖。
 
@@ -1392,6 +1536,13 @@ def clear_short_term_by_conversation(role_id: str, conversation_key: str):
             )
         else:
             return
+        remaining = conn.execute("SELECT content FROM short_term").fetchall()
+        _set_meta(conn, "message_count_since_summary", str(len(remaining)))
+        _set_meta(
+            conn,
+            "content_length_since_summary",
+            str(sum(_content_length(row[0]) for row in remaining)),
+        )
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         logger.info(f"已清除记忆: role={role_id}, conversation_key={conversation_key}")
 

@@ -557,6 +557,11 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                     existing[key] = merged
                 else:
                     existing[key] = value
+        if (
+            "model_max_context_length" in role_model.model_fields_set
+            and role_model.model_max_context_length is None
+        ):
+            existing.pop("model_max_context_length", None)
         roles.save_role(role_model.id, existing)
         role_data = existing
     else:
@@ -652,6 +657,12 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                 if role_model.max_context_rounds is not None
                 else 60
             ),
+            "max_context_length": (
+                role_model.max_context_length
+                if role_model.max_context_length is not None
+                else 12000
+            ),
+            "model_max_context_length": role_model.model_max_context_length,
             "allow_web_search": (
                 role_model.allow_web_search
                 if role_model.allow_web_search is not None

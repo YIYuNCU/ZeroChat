@@ -163,6 +163,11 @@ class SettingsService extends ChangeNotifier {
   String? selectedModelProfileIdForRole(String roleId) =>
       _roleModelProfileSelections[roleId];
 
+  Iterable<String> roleIdsUsingModelProfile(String profileId) =>
+      _roleModelProfileSelections.entries
+          .where((entry) => entry.value == profileId)
+          .map((entry) => entry.key);
+
   bool get intentEnabled => _intentEnabled;
   String get intentApiUrl => _intentApiUrl;
   String get intentApiKey => _intentApiKey;

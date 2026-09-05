@@ -45,6 +45,8 @@ class Role {
   final double frequencyPenalty;
   final double presencePenalty;
   final int maxContextRounds;
+  final int maxContextLength;
+  final int? modelMaxContextLength;
   final bool allowWebSearch;
 
   // 外挂 JSON 记录内容（只读，注入到聊天上下文）
@@ -109,6 +111,8 @@ class Role {
     this.frequencyPenalty = 0.0,
     this.presencePenalty = 0.0,
     this.maxContextRounds = 60,
+    this.maxContextLength = 12000,
+    this.modelMaxContextLength,
     this.allowWebSearch = true,
     this.attachedJsonContent,
     List<String>? coreMemory,
@@ -180,6 +184,9 @@ class Role {
     double? frequencyPenalty,
     double? presencePenalty,
     int? maxContextRounds,
+    int? maxContextLength,
+    int? modelMaxContextLength,
+    bool clearModelMaxContextLength = false,
     bool? allowWebSearch,
     String? attachedJsonContent,
     List<String>? coreMemory,
@@ -228,6 +235,10 @@ class Role {
       frequencyPenalty: frequencyPenalty ?? this.frequencyPenalty,
       presencePenalty: presencePenalty ?? this.presencePenalty,
       maxContextRounds: maxContextRounds ?? this.maxContextRounds,
+      maxContextLength: maxContextLength ?? this.maxContextLength,
+      modelMaxContextLength: clearModelMaxContextLength
+          ? null
+          : (modelMaxContextLength ?? this.modelMaxContextLength),
       allowWebSearch: allowWebSearch ?? this.allowWebSearch,
       attachedJsonContent: attachedJsonContent ?? this.attachedJsonContent,
       coreMemory: coreMemory ?? this.coreMemory,
@@ -321,6 +332,10 @@ class Role {
       frequencyPenalty: (json['frequency_penalty'] as num?)?.toDouble() ?? 0.0,
       presencePenalty: (json['presence_penalty'] as num?)?.toDouble() ?? 0.0,
       maxContextRounds: json['max_context_rounds'] as int? ?? 60,
+      maxContextLength: json['max_context_length'] as int? ?? 12000,
+      modelMaxContextLength: _normalizePositiveInt(
+        json['model_max_context_length'],
+      ),
       allowWebSearch: json['allow_web_search'] as bool? ?? true,
       attachedJsonContent: json['attached_json_content'] as String?,
       coreMemory: (json['core_memory'] as List<dynamic>?)?.cast<String>() ?? [],
@@ -387,6 +402,8 @@ class Role {
       'frequency_penalty': frequencyPenalty,
       'presence_penalty': presencePenalty,
       'max_context_rounds': maxContextRounds,
+      'max_context_length': maxContextLength,
+      'model_max_context_length': modelMaxContextLength,
       'allow_web_search': allowWebSearch,
       'attached_json_content': attachedJsonContent,
       'core_memory': coreMemory,
@@ -411,4 +428,9 @@ class Role {
 
   static Role fromJsonString(String jsonStr) =>
       Role.fromJson(jsonDecode(jsonStr));
+}
+
+int? _normalizePositiveInt(Object? value) {
+  final parsed = value is num ? value.toInt() : int.tryParse('${value ?? ''}');
+  return parsed != null && parsed > 0 ? parsed : null;
 }

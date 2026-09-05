@@ -38,6 +38,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _lastPeriodStartController;
   late String _gender;
   late int _maxContextRounds;
+  late int _maxContextLength;
   late bool _allowWebSearch;
   late bool _onebotEnabled;
   late TextEditingController _onebotSecretController;
@@ -103,6 +104,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     );
     _gender = widget.role.gender;
     _maxContextRounds = widget.role.maxContextRounds;
+    _maxContextLength = widget.role.maxContextLength;
     _allowWebSearch = widget.role.allowWebSearch;
     _onebotEnabled = widget.role.onebotConfig.enabled;
     _onebotSecretController = TextEditingController(
@@ -367,6 +369,74 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                         ),
                         IconButton(
                           onPressed: () => setState(() => _maxContextRounds++),
+                          icon: const Icon(Icons.add_circle_outline),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1, indent: 16),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('最大上下文长度', style: TextStyle(fontSize: 16)),
+                          const SizedBox(height: 4),
+                          Text(
+                            '按消息字符数计算，条数或长度任一达到即更新窗口',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF888888),
+                            ),
+                          ),
+                          if (_selectedModelProfileContextLength != null)
+                            Text(
+                              '模型档案上限 $_selectedModelProfileContextLength，实际使用 $_effectiveMaxContextLength',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF888888),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          onPressed: _maxContextLength > 100
+                              ? () => setState(() => _maxContextLength -= 100)
+                              : null,
+                          icon: const Icon(Icons.remove_circle_outline),
+                        ),
+                        GestureDetector(
+                          onTap: _showEditContextLengthDialog,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF5F5F5),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              '$_maxContextLength',
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () =>
+                              setState(() => _maxContextLength += 100),
                           icon: const Icon(Icons.add_circle_outline),
                         ),
                       ],
@@ -1057,6 +1127,22 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         );
   }
 
+  int? get _selectedModelProfileContextLength {
+    final selectedId = _selectedModelProfileId;
+    if (selectedId == null) return null;
+    for (final profile in SettingsService.instance.modelProfiles) {
+      if (profile.id == selectedId) return profile.maxContextLength;
+    }
+    return null;
+  }
+
+  int get _effectiveMaxContextLength {
+    final modelLength = _selectedModelProfileContextLength;
+    return modelLength == null || _maxContextLength <= modelLength
+        ? _maxContextLength
+        : modelLength;
+  }
+
   void _applyModelProfile(AiModelProfile profile) {
     _isApplyingModelProfile = true;
     _aiModelController.text = profile.model;
@@ -1138,7 +1224,44 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   void _resetToDefault() {
     setState(() {
       _maxContextRounds = 60;
+      _maxContextLength = 12000;
     });
+  }
+
+  void _showEditContextLengthDialog() {
+    final controller = TextEditingController(text: '$_maxContextLength');
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('最大上下文长度'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(
+            hintText: '输入字符数',
+            border: OutlineInputBorder(),
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              final value = int.tryParse(controller.text.trim());
+              if (value != null && value > 0) {
+                setState(() => _maxContextLength = value);
+              }
+              Navigator.pop(context);
+            },
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showEditContextRoundsDialog() {
@@ -1236,6 +1359,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       frequencyPenalty: widget.role.frequencyPenalty,
       presencePenalty: widget.role.presencePenalty,
       maxContextRounds: _maxContextRounds,
+      maxContextLength: _maxContextLength,
+      modelMaxContextLength: _selectedModelProfileContextLength,
+      clearModelMaxContextLength: _selectedModelProfileContextLength == null,
       allowWebSearch: _allowWebSearch,
       onebotConfig: OneBotConfig(
         enabled: _onebotEnabled,

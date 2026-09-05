@@ -180,6 +180,31 @@ class RoleService {
     }
   }
 
+  /// Updates the model-profile context cap for roles currently using a profile.
+  static Future<void> updateModelProfileContextLength(
+    Iterable<String> roleIds,
+    int? maxContextLength,
+  ) async {
+    final ids = roleIds.toSet();
+    final changed = <Role>[];
+    for (var index = 0; index < _roles.length; index++) {
+      final role = _roles[index];
+      if (!ids.contains(role.id)) continue;
+      final updated = role.copyWith(
+        modelMaxContextLength: maxContextLength,
+        clearModelMaxContextLength: maxContextLength == null,
+      );
+      _roles[index] = updated;
+      changed.add(updated);
+    }
+    if (changed.isEmpty) return;
+
+    await _saveRoles();
+    for (final role in changed) {
+      await syncRoleToBackend(role);
+    }
+  }
+
   /// 仅更新本地角色对象并持久化（不触发后端 upsert）。
   /// 用于调用方已通过更专用的接口（如 roles_memory_update）把该字段写入后端，
   /// 只需同步本地缓存，避免多余的整角色 upsert 往返。
@@ -377,7 +402,12 @@ class RoleService {
               topP: 1.0,
               frequencyPenalty: 0.0,
               presencePenalty: 0.0,
-              maxContextRounds: 60,
+              maxContextRounds:
+                  (json['max_context_rounds'] as num?)?.toInt() ?? 60,
+              maxContextLength:
+                  (json['max_context_length'] as num?)?.toInt() ?? 12000,
+              modelMaxContextLength: (json['model_max_context_length'] as num?)
+                  ?.toInt(),
               coreMemory: coreMemory,
               onebotConfig: json['onebot_config'] != null
                   ? OneBotConfig.fromJson(
@@ -434,6 +464,11 @@ class RoleService {
                 gender: backendRole.gender,
                 menstruationCycle: backendRole.menstruationCycle,
                 temperature: backendRole.temperature,
+                maxContextRounds: backendRole.maxContextRounds,
+                maxContextLength: backendRole.maxContextLength,
+                modelMaxContextLength: backendRole.modelMaxContextLength,
+                clearModelMaxContextLength:
+                    backendRole.modelMaxContextLength == null,
                 onebotConfig: backendRole.onebotConfig,
                 statsConfig: backendRole.statsConfig,
                 showAction: backendRole.showAction,
@@ -547,6 +582,8 @@ class RoleService {
           'show_no_reply': role.showNoReply,
           'archived': role.archived,
           'max_context_rounds': role.maxContextRounds,
+          'max_context_length': role.maxContextLength,
+          'model_max_context_length': role.modelMaxContextLength,
           'allow_web_search': role.allowWebSearch,
           'proactive_config': role.proactiveConfig.toBackendJson(),
           'followup_config': role.followupConfig.toBackendJson(),

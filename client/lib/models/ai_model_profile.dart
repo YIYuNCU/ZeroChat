@@ -37,6 +37,7 @@ class ModelApiProfile {
   final bool? thinkingEnabled;
   final int? thinkingBudget;
   final bool? stream;
+  final int? maxContextLength;
 
   const ModelApiProfile({
     required this.id,
@@ -52,6 +53,7 @@ class ModelApiProfile {
     this.thinkingEnabled,
     this.thinkingBudget,
     this.stream,
+    this.maxContextLength,
   });
 
   bool supports(ModelProfileCapability capability) =>
@@ -84,6 +86,7 @@ class ModelApiProfile {
           normalizeThinkingBudget(json['thinking_budget']) ??
           normalizeThinkingBudget(json['reasoning_effort']),
       stream: json['stream'] is bool ? json['stream'] as bool : null,
+      maxContextLength: _normalizeContextLength(json['max_context_length']),
     );
   }
 
@@ -101,6 +104,7 @@ class ModelApiProfile {
     if (thinkingEnabled != null) 'thinking_enabled': thinkingEnabled,
     if (thinkingBudget != null) 'thinking_budget': thinkingBudget,
     if (stream != null) 'stream': stream,
+    if (maxContextLength != null) 'max_context_length': maxContextLength,
   };
 }
 
@@ -174,6 +178,11 @@ String? _normalizeReasoningEffort(Object? value) {
 
 int? normalizeThinkingBudget(Object? value) {
   final parsed = int.tryParse('${value ?? ''}');
+  return parsed != null && parsed > 0 ? parsed : null;
+}
+
+int? _normalizeContextLength(Object? value) {
+  final parsed = value is num ? value.toInt() : int.tryParse('${value ?? ''}');
   return parsed != null && parsed > 0 ? parsed : null;
 }
 

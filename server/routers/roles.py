@@ -246,6 +246,8 @@ class RoleCreate(BaseModel):
 
     # 上下文设置
     max_context_rounds: Optional[int] = None
+    max_context_length: Optional[int] = None
+    model_max_context_length: Optional[int] = Field(default=None, gt=0)
     allow_web_search: Optional[bool] = None
 
     # 扩展元数据
@@ -286,6 +288,8 @@ class RoleUpdate(BaseModel):
     gender: Optional[str] = None
     menstruation_cycle: Optional[MenstruationCycle] = None
     max_context_rounds: Optional[int] = None
+    max_context_length: Optional[int] = None
+    model_max_context_length: Optional[int] = Field(default=None, gt=0)
     allow_web_search: Optional[bool] = None
 
 class MemoryUpdate(BaseModel):
@@ -595,6 +599,11 @@ async def create_role(role: RoleCreate, request: Request):
         for key, value in role.model_dump(exclude_none=True).items():
             if key != 'id' and value is not None:
                 existing[key] = value
+        if (
+            "model_max_context_length" in role.model_fields_set
+            and role.model_max_context_length is None
+        ):
+            existing.pop("model_max_context_length", None)
         save_role(role.id, existing)
         if role.core_memory is not None:
             from services.memory_service import load_memory, save_memory
@@ -657,6 +666,9 @@ async def create_role(role: RoleCreate, request: Request):
             "last_period_start": "2026-01-24"
         },
         "metadata": role.metadata or {},
+        "max_context_rounds": role.max_context_rounds if role.max_context_rounds is not None else 60,
+        "max_context_length": role.max_context_length if role.max_context_length is not None else 12000,
+        "model_max_context_length": role.model_max_context_length,
         "created_at": datetime.now().isoformat()
     }
     save_role(role.id, data)
@@ -679,6 +691,11 @@ async def update_role(role_id: str, update: RoleUpdate, request: Request):
     
     for key, value in update.model_dump(exclude_none=True).items():
         role[key] = value
+    if (
+        "model_max_context_length" in update.model_fields_set
+        and update.model_max_context_length is None
+    ):
+        role.pop("model_max_context_length", None)
     for key in ("ai_thinking_enabled", "ai_thinking_budget", "ai_reasoning_effort"):
         if key in update.model_fields_set:
             role[key] = getattr(update, key)

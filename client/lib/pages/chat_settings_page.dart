@@ -2184,6 +2184,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       frequencyPenalty: updated.frequencyPenalty,
       presencePenalty: updated.presencePenalty,
       maxContextRounds: updated.maxContextRounds,
+      maxContextLength: updated.maxContextLength,
       allowWebSearch: updated.allowWebSearch,
       coreMemory: updated.coreMemory,
       summaryEveryNRounds: updated.summaryEveryNRounds,

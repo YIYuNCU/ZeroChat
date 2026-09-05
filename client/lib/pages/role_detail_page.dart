@@ -75,6 +75,7 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
             _buildInfoItem('温度', _role.temperature.toStringAsFixed(1)),
             _buildDivider(),
             _buildInfoItem('上下文轮数', '${_role.maxContextRounds} 轮'),
+            _buildInfoItem('上下文长度', '${_role.maxContextLength} 字符'),
           ]),
 
           const SizedBox(height: 10),

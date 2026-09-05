@@ -589,11 +589,13 @@ async def _run_memory_ai_pipeline(
         append_short_term,
         trigger_memory_summary,
         _get_memory_length,
+        get_effective_context_length,
         _run_db,
     )
     local_context = event_context or {}
     is_main_user = (user_sender == "user")
     role_max_context_rounds = role.get("max_context_rounds") if isinstance(role, dict) else None
+    role_max_context_length = get_effective_context_length(role)
     role_allow_web_search = role.get("allow_web_search", True) if isinstance(role, dict) else True
 
     # 记忆隔离策略：
@@ -617,6 +619,7 @@ async def _run_memory_ai_pipeline(
     backend_history = await get_context_messages(
         role_id, limit=_get_memory_length(role_max_context_rounds), user_message=user_message,
         conversation_key=conversation_key, max_context_rounds=role_max_context_rounds,
+        max_context_length=role_max_context_length,
     )
 
     # 主用户群聊：混合 10% 全渠道记忆 + 90% 群聊记忆
@@ -625,6 +628,7 @@ async def _run_memory_ai_pipeline(
             main_history = await get_context_messages(
                 role_id, limit=_get_memory_length(role_max_context_rounds), conversation_key="default_user",
                 skip_summary=True, max_context_rounds=role_max_context_rounds,
+                max_context_length=role_max_context_length,
             )
             memory_length = _get_memory_length(role_max_context_rounds)
             main_count = max(1, int(memory_length * 0.1))
@@ -1172,17 +1176,20 @@ async def handle_moment_post(role: Dict, event: AIEvent) -> AIResponse:
     from services.ai_service import generate_moment_post
     from services.memory_service import (
         _get_memory_length,
+        get_effective_context_length,
         _run_db,
         get_context_messages,
         get_memory_context_string,
     )
     role_max_ctx = role.get("max_context_rounds") if isinstance(role, dict) else None
+    role_max_context_length = get_effective_context_length(role)
     history = await get_context_messages(
         event.role_id,
         limit=_get_memory_length(role_max_ctx),
         skip_summary=True,
         latest=True,
         max_context_rounds=role_max_ctx,
+        max_context_length=role_max_context_length,
     )
 
     # 剥离历史消息中的对话标签，避免模型把聊天格式示范到朋友圈正文里。
@@ -1227,6 +1234,7 @@ async def handle_moment_comment(role: Dict, event: AIEvent) -> AIResponse:
     from services.ai_service import generate_moment_comment
     from services.memory_service import (
         _get_memory_length,
+        get_effective_context_length,
         _run_db,
         get_context_messages,
         get_memory_context_string,
@@ -1252,12 +1260,14 @@ async def handle_moment_comment(role: Dict, event: AIEvent) -> AIResponse:
             break
 
     role_max_ctx = role.get("max_context_rounds") if isinstance(role, dict) else None
+    role_max_context_length = get_effective_context_length(role)
     history = await get_context_messages(
         event.role_id,
         limit=_get_memory_length(role_max_ctx),
         skip_summary=True,
         latest=True,
         max_context_rounds=role_max_ctx,
+        max_context_length=role_max_context_length,
     )
     core_memory_context = (
         await _run_db(event.role_id, get_memory_context_string, event.role_id) or ""
