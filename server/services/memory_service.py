@@ -7,10 +7,12 @@ import logging
 import json
 import random
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import uuid
+import re
 
 from core.utils import ensure_direct_child_path, is_tool_role_id
 from services.vector_memory import VectorMemoryStore, embed_and_store, _extract_semantic_text
@@ -22,6 +24,12 @@ ROLES_DIR = DATA_DIR / "roles"
 DEFAULT_MEMORY_ORIGIN = "zerochat"
 DEFAULT_MAX_CONTEXT_ROUNDS = 60
 DEFAULT_MAX_CONTEXT_LENGTH = 12000
+CORE_MEMORY_MAX_ITEMS = 10
+CORE_MEMORY_MAX_ITEM_LENGTH = 240
+CORE_MEMORY_VECTOR_SOURCE = "core_summary"
+CORE_MEMORY_SUMMARY_WORKER_ID = "1000000000000"
+_CORE_MEMORY_LOCKS: Dict[str, asyncio.Lock] = {}
+_CORE_MEMORY_LOCKS_GUARD = threading.Lock()
 
 
 def _role_dir(role_id: str) -> Path:
@@ -237,6 +245,90 @@ def _core_memory_to_list(value: Any) -> List[str]:
     if not text.strip():
         return []
     return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _core_memory_fact_key(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _parse_core_memory_facts(raw: Any) -> List[Dict[str, str]]:
+    """Normalize structured model output into bounded, compatible fact lines."""
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+    items: List[Any] = []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("facts", parsed.get("items", []))
+        if isinstance(parsed, list):
+            items = parsed
+        else:
+            return []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        # Backward-compatible fallback for legacy line/semicolon summaries.
+        if text.casefold() in {"已有核心记忆", "none", "noneed"}:
+            return []
+        items = [part for line in text.splitlines() for part in re.split(r"[;；]", line)
+                 if part.strip()]
+
+    facts: List[Dict[str, str]] = []
+    seen = set()
+    allowed_categories = {"profile", "preference", "goal", "relationship", "constraint"}
+    for item in items:
+        if isinstance(item, str):
+            match = re.match(r"^\[(?P<category>[^\]]+)\]\[(?P<confidence>[^\]]+)\]\s*(?P<fact>.+)$", item.strip())
+            item = match.groupdict() if match else {"fact": item}
+        if not isinstance(item, dict) or str(item.get("status", "active")).lower() == "obsolete":
+            continue
+        fact = re.sub(r"\s+", " ", str(item.get("fact", "")).strip())
+        if not fact:
+            continue
+        fact = fact[:CORE_MEMORY_MAX_ITEM_LENGTH]
+        category = str(item.get("category", "profile")).strip().lower()
+        if category not in allowed_categories:
+            category = "profile"
+        confidence = str(item.get("confidence", "medium")).strip().lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "medium"
+        key = _core_memory_fact_key(fact)
+        if key in seen:
+            continue
+        seen.add(key)
+        facts.append({"category": category, "confidence": confidence, "fact": fact})
+        if len(facts) >= CORE_MEMORY_MAX_ITEMS:
+            break
+    return facts
+
+
+def _core_memory_result_is_valid(raw: Any) -> bool:
+    """Return whether a response is a valid payload, including zero active facts."""
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text,
+                      flags=re.IGNORECASE | re.DOTALL).strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("facts", parsed.get("items", []))
+        return isinstance(parsed, list)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return bool(text) and text.casefold() not in {"已有核心记忆", "none", "noneed"}
+
+
+def _format_core_memory_facts(facts: List[Dict[str, str]]) -> str:
+    return "\n".join(
+        f"[{item['category']}][{item['confidence']}] {item['fact']}" for item in facts
+    )
+
+
+def _core_memory_vector_facts(core_text: str) -> List[str]:
+    return [item["fact"] for item in _parse_core_memory_facts(core_text)]
+
+
+def _get_core_memory_lock(role_id: str) -> asyncio.Lock:
+    with _CORE_MEMORY_LOCKS_GUARD:
+        return _CORE_MEMORY_LOCKS.setdefault(role_id, asyncio.Lock())
 
 def _get_memory_length(max_context_rounds: Optional[int] = None) -> int:
     """获取上下文轮数（每轮=1条用户消息+1条AI回复=2条消息）
@@ -1260,6 +1352,8 @@ async def get_relevant_memories(
             "source": r["source"],
             "role": r["role"],
             "score": r["score"],
+            "timestamp": r.get("timestamp"),
+            "created_at": r.get("created_at"),
         }
         for r in results
     ]
@@ -1284,29 +1378,6 @@ def update_core_memory(role_id: str, core_memory: str):
         _set_meta(conn, "content_length_since_summary", "0")
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端不主动覆盖。
-
-def should_generate_sequential_memory(role_id: str) -> bool:
-    """
-    判断是否需要生成衔接记忆
-    
-    条件：
-    - 距离上次生成超过 20 分钟
-    """
-    if is_tool_role_id(role_id):
-        return False
-
-    with _get_connection(role_id) as conn:
-        updated_at = _get_meta(conn, "updated_at")
-    
-    if not updated_at:
-        return True
-
-    try:
-        last_updated = datetime.fromisoformat(updated_at)
-    except (TypeError, ValueError):
-        return True
-
-    return (datetime.now() - last_updated).total_seconds() >= 1200
 
 def should_summarize(
     role_id: str,
@@ -1344,95 +1415,16 @@ def should_summarize(
         or content_length >= _get_context_length(max_context_length)
     )
 
-async def sequential_memory_generation(
-    role_id: str,
-    worker_id: str,
-    now_content: str,
-    conv_origin: Optional[str] = None,
-    conv_group_id: Optional[str] = None,
-    conv_sender_id: Optional[str] = None,
-) -> Optional[str]:
-    """
-    生成衔接记忆，用于在长时间不聊天后模拟中间的场景变化，保持对话连续性
-
-    Args:
-        conv_origin: 渠道 origin，用于过滤短期记忆输入
-        conv_group_id: 群聊 ID
-        conv_sender_id: 发送者 ID
-    """
-    try:
-        if not should_generate_sequential_memory(role_id):
-            return "noneed"
-    except Exception as e:
-        logger.warning("检查是否需要生成衔接记忆时发生错误：%s", e)
-        return None
-    # 导入 AI 服务
-    from services.ai_service import call_ai_direct
-    from routers.roles import load_role
-    try:
-        role_config = load_role(role_id) or {}
-        # 根据渠道过滤短期记忆，避免跨频道污染
-        if conv_origin == "onebot_group" and conv_group_id:
-            seq_where = "WHERE origin = 'onebot_group' AND group_id = ?"
-            seq_params = [conv_group_id]
-        elif conv_origin == "onebot_private" and conv_sender_id:
-            seq_where = "WHERE origin = 'onebot_private' AND sender_id = ?"
-            seq_params = [conv_sender_id]
-        elif conv_origin is not None:
-            # 指定了渠道但非 onebot 场景 — 使用 default_user 范围
-            seq_where = "WHERE origin IN ('zerochat', 'proactive', 'system') OR (origin LIKE 'onebot%' AND sender = 'user')"
-            seq_params = []
-        else:
-            # 未指定渠道（兼容旧调用），不过滤
-            seq_where = ""
-            seq_params = []
-
-        effective_limit = _get_memory_length(role_config.get("max_context_rounds"))
-        effective_context_length = get_effective_context_length(role_config)
-        with _get_connection(role_id) as conn:
-            count = conn.execute(f"SELECT COUNT(*) FROM short_term {seq_where}", seq_params).fetchone()[0]
-            offset = max(0, count - effective_limit)
-            rows = conn.execute(
-                f"SELECT content FROM short_term {seq_where} ORDER BY id ASC LIMIT ? OFFSET ?",
-                seq_params + [effective_limit, offset]
-            ).fetchall()
-        rows = _tail_within_limits(rows, effective_limit, effective_context_length)
-        conversation = "\n".join([str(row[0] or "") for row in rows])
-
-        worker = load_role(worker_id)
-        prompt = f"""历史对话内容：{conversation}\n当前对话内容：{now_content}\n当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        system_prompt = worker.get("system_prompt", "")
-        messages = []
-        messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-    except Exception as e:
-        logger.warning("构建衔接记忆提示时发生错误：%s", e)
-        return None
-    try:
-        result = await call_ai_direct(messages=messages, model=worker.get("ai_model"), api_url=worker.get("ai_api_url"), api_key=worker.get("ai_api_key"), temperature=worker.get("ai_temperature", 1.2), api_format=worker.get("ai_api_format"), **get_thinking_config(role_data=worker))
-        if result["success"] and result["content"]:
-            if result["content"].strip().lower() == "none":
-                return "noneed"
-            new_memory = result["content"].strip()
-            append_short_term(role_id, "user", "system:触发衔接记忆生成", origin="system", sender="system")
-            append_short_term(role_id, "assistant", f"衔接记忆内容：{new_memory}", origin="system", sender="sequential_memory")
-            # 将衔接记忆存入向量记忆库（工具角色跳过）
-            if not is_tool_role_id(role_id):
-                _spawn_background(
-                    embed_and_store(
-                        role_id, new_memory, role="assistant",
-                        source="sequential", min_text_length=5
-                    ),
-                    description=f"embed_and_store(sequential, role={role_id})",
-                )
-            return new_memory
-        else:
-            logger.warning("衔接记忆生成失败：%s", result)
-    except Exception as e:
-        logger.warning("调用 AI 生成衔接记忆时发生错误：%s", e)
-        return None
-
 async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]:
+    """Serialize core-memory summaries for a role across the whole workflow."""
+    lock = _get_core_memory_lock(role_id)
+    if lock.locked():
+        return "noneed"
+    async with lock:
+        return await _trigger_memory_summary(role_id, role_data)
+
+
+async def _trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]:
     """
     触发记忆总结（内部调用，不暴露给前端）
     
@@ -1441,25 +1433,26 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
     """
     try:
         if not should_summarize(
-            role_data.get("id", role_id),
+            role_id,
             role_data.get("max_context_rounds"),
             get_effective_context_length(role_data),
         ):
             return "noneed"
     except Exception as e:
-        logger.warning("检查是否需要总结核心记忆时发生错误：%s", e)
+        logger.warning("summary eligibility check failed: %s", e)
         return None
     # 导入 AI 服务
     from services.ai_service import call_ai_direct
     try:
-        memory = load_memory(role_data.get("id", role_id))
+        memory = load_memory(role_id)
         short_term = memory.get("short_term", [])
         current_core = memory.get("core_memory", "")
-        role_need_change = role_data.get("id", role_id)
         
         # 构建总结提示
         summary_rows = [
-            (m.get("role"), m.get("content", "")) for m in short_term
+            (m.get("role"), _extract_semantic_text(m.get("content", "")), m.get("timestamp"))
+            for m in short_term
+            if m.get("sender") not in {"system", "memory_summary"}
         ]
         summary_rows = _tail_within_limits(
             summary_rows,
@@ -1467,16 +1460,24 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
             get_effective_context_length(role_data),
         )
         conversation = "\n".join(str(row[1]) for row in summary_rows)
-        
+        summary_timestamp = next((row[2] for row in reversed(summary_rows) if row[2]), None)
         prompt = f"""
     当前已有的核心记忆：
     {current_core if current_core else '（暂无）'}
     最近对话：
     {conversation}
     """
+        prompt += (
+            "\nReturn only a JSON array of facts. Each item must contain "
+            "category, fact, confidence (high/medium/low), and status (active/obsolete)."
+        )
         from routers.roles import load_role
-        role_data = load_role(role_id)
-        system_prompt = role_data.get("system_prompt", "")
+        worker_data = load_role(CORE_MEMORY_SUMMARY_WORKER_ID) or {}
+        system_prompt = worker_data.get("system_prompt", "")
+        system_prompt += (
+            "\n\n输出协议优先于旧格式要求：只返回 JSON 数组；每项必须包含 "
+            "category、fact、confidence（high/medium/low）和 status（active/obsolete）。"
+        )
         messages = []
         messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
@@ -1484,19 +1485,39 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
         logger.warning("构建记忆总结提示时发生错误：%s", e)
         return None
     try:
-        result = await call_ai_direct(messages=messages, model=role_data.get("ai_model"), api_url=role_data.get("ai_api_url"), api_key=role_data.get("ai_api_key"), temperature=role_data.get("ai_temperature", 0.1), api_format=role_data.get("ai_api_format"), **get_thinking_config(role_data=role_data))
+        result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1), api_format=worker_data.get("ai_api_format"), **get_thinking_config(role_data=worker_data))
         if result["success"] and result["content"]:
-            new_core = result["content"].strip()
-            update_core_memory(role_need_change, new_core)
-            # 将核心记忆存入向量记忆库（工具角色跳过）
+            parsed_facts = _parse_core_memory_facts(result["content"])
+            if not parsed_facts and not _core_memory_result_is_valid(result["content"]):
+                logger.warning("Core memory summary was empty or invalid; preserving existing memory")
+                return None
+            new_core = _format_core_memory_facts(parsed_facts)
+            # Prepare all embeddings before mutating either store.  The summary
+            # lock then covers the complete replacement, preventing stale
+            # background tasks from reintroducing an older summary.
             if not is_tool_role_id(role_id):
-                _spawn_background(
-                    embed_and_store(
-                        role_id, new_core, role="assistant",
-                        source="core_summary", min_text_length=5
-                    ),
-                    description=f"embed_and_store(core_summary, role={role_id})",
+                from services.ai_service import generate_embedding
+                vector_items = []
+                for fact in _core_memory_vector_facts(new_core):
+                    embedding_result = await generate_embedding(fact)
+                    if not embedding_result.get("success") or not embedding_result.get("embedding"):
+                        logger.warning("Core memory embedding failed; preserving previous summary")
+                        return None
+                    vector_items.append({
+                        "text": fact,
+                        "embedding": embedding_result["embedding"],
+                        "role": "assistant",
+                        "timestamp": summary_timestamp,
+                        "source": CORE_MEMORY_VECTOR_SOURCE,
+                    })
+                store = VectorMemoryStore(role_id)
+                await _run_db(
+                    role_id,
+                    store.replace_source_batch,
+                    CORE_MEMORY_VECTOR_SOURCE,
+                    vector_items,
                 )
+            update_core_memory(role_id, new_core)
             return new_core
         else:
             logger.warning("记忆总结失败：%s", result)

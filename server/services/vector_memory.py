@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -179,7 +179,23 @@ class VectorMemoryStore:
                     "score": round(score, 4),
                 })
 
-        scored.sort(key=lambda x: x["score"], reverse=True)
+        # Keep semantic relevance primary, but prefer newer event memories when
+        # scores are effectively tied. Invalid/missing event times fall back to
+        # the record creation time.
+        def _time_key(item: Dict[str, Any]) -> float:
+            value = item.get("timestamp") or item.get("created_at") or ""
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc).timestamp()
+            except (TypeError, ValueError):
+                return float("-inf")
+
+        scored.sort(
+            key=lambda x: (float(x["score"]), _time_key(x), int(x["id"])),
+            reverse=True,
+        )
         return scored[:top_k]
 
     def count(self) -> int:
@@ -258,6 +274,36 @@ class VectorMemoryStore:
         conn.commit()
         return cursor.rowcount > 0
 
+    def delete_by_source(self, source: str) -> int:
+        """Delete all vectors belonging to a logical source."""
+        conn = self._get_conn()
+        cursor = conn.execute("DELETE FROM vector_embeddings WHERE source = ?", (source,))
+        conn.commit()
+        return cursor.rowcount
+
+    def replace_source_batch(self, source: str, items: List[Dict[str, Any]]) -> None:
+        """Atomically replace all vectors belonging to a logical source."""
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN")
+            conn.execute("DELETE FROM vector_embeddings WHERE source = ?", (source,))
+            now = datetime.now().isoformat()
+            for item in items:
+                conn.execute(
+                    """INSERT INTO vector_embeddings
+                       (text, embedding, role, timestamp, source, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        item["text"], json.dumps(item["embedding"]),
+                        item.get("role", "assistant"), item.get("timestamp") or now,
+                        source, now,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
     def update_text(self, memory_id: int, new_text: str,
                     new_embedding: List[float]) -> bool:
         """更新单条向量记忆的文本与嵌入向量，返回是否更新成功。"""
@@ -331,7 +377,7 @@ async def embed_and_store(
         content: 消息内容（可以是结构化格式）
         role: 消息角色
         timestamp: 时间戳
-        source: 来源（chat/memory_summary/sequential）
+        source: 来源（chat/core_summary）
         min_text_length: 最小文本长度，低于此长度不生成向量
 
     Returns:

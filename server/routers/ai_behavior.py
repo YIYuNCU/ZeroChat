@@ -44,10 +44,6 @@ def _role_dir(role_id: str) -> Path:
         raise HTTPException(status_code=400, detail="invalid role_id") from exc
 
 
-def _emoji_root(role_id: str) -> Path:
-    return ensure_direct_child_path(_role_dir(role_id), "emojis", "emoji root")
-
-
 def _vision_upload_dir(upload_id: str) -> Path:
     safe_id = ensure_simple_path_segment(upload_id, "upload_id")
     if len(safe_id) > 80 or not re.fullmatch(r"[A-Za-z0-9_-]+", safe_id):
@@ -347,110 +343,6 @@ def _build_moments_chat_context(role_id: str, max_items: int = 4) -> str:
 
     return "\n\n".join(parts).strip()
 
-
-def _get_available_emoji_categories(role_id: str) -> List[str]:
-    """Scan role emoji folders and return categories that contain at least one image."""
-    emoji_root = _emoji_root(role_id)
-    if not emoji_root.exists() or not emoji_root.is_dir():
-        return []
-
-    image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-    categories: List[str] = []
-
-    for entry in emoji_root.iterdir():
-        try:
-            category_dir = ensure_direct_child_path(
-                emoji_root, entry.name, "category"
-            )
-        except ValueError:
-            continue
-        if not category_dir.is_dir():
-            continue
-        has_image = any(
-            f.is_file() and f.suffix.lower() in image_extensions
-            for f in category_dir.iterdir()
-        )
-        if has_image:
-            category_name = category_dir.name.strip()
-            if category_name:
-                categories.append(category_name)
-
-    # Keep stable order and avoid duplicates caused by inconsistent folder naming.
-    return sorted(set(categories))
-
-async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) -> Optional[str]:
-    """
-    检测文本情绪并返回对应表情包路径
-    
-    表情包目录结构: roles/{role_id}/emojis/{emotion}/
-    支持的情绪: happy, sad, angry, suprised, love, confused, excited, tired
-    """
-    rand = random.random()
-    if rand > 0.25:  # 75% 概率跳过情绪检测
-        logger.debug("情绪检测随机跳过：%.2f > 0.25", rand)
-        return None
-    from services.ai_service import call_ai_direct
-
-    role_data = load_role(worker_id) or {}
-    model = role_data.get("ai_model")
-    api_url = role_data.get("ai_api_url")
-    api_key = role_data.get("ai_api_key")
-    temperature = role_data.get("ai_temperature", 0.1)
-    if not model or not api_url or not api_key:
-        return None
-
-    configured_categories = _get_available_emoji_categories(role_id)
-    fallback_categories = ["happy", "sad", "angry", "surprised", "love", "confused", "excited", "tired"]
-    candidate_categories = configured_categories if configured_categories else fallback_categories
-    category_text = ", ".join(candidate_categories)
-
-    system_prompt = role_data.get("system_prompt", "")
-    emotion_prompt = (
-        f"你是情绪分类器。根据给定文本判断最主要的情绪。\n可选标签: {category_text}, none。\n"
-        "要求: 只输出一个标签, 不要解释, 不要多余文本。\n如果没有明显情绪, 输出 none。"
-    )
-    messages = [{"role": "system", "content": emotion_prompt}]
-    messages.append({"role": "user", "content": text})
-
-    result = await call_ai_direct(
-        messages=messages,
-        model=model,
-        api_url=api_url,
-        api_key=api_key,
-        temperature=temperature,
-        api_format=role_data.get("ai_api_format"),
-        **settings_service.get_thinking_config(role_data=role_data),
-    )
-    if not result.get("success"):
-        return None
-
-    raw_detected = (result.get("content") or "").strip().lower()
-    detected_emotion = (raw_detected.split()[0] if raw_detected else "").strip("`'\"[](){}<>.,，。!！?？:：;；")
-
-    category_map = {c.lower(): c for c in candidate_categories}
-    if detected_emotion == "none" or detected_emotion not in category_map:
-        return None
-
-    selected_category = category_map[detected_emotion]
-
-    # 检查对应表情包目录
-    safe_category = ensure_simple_path_segment(selected_category, "category")
-    emoji_root = _emoji_root(role_id)
-    emoji_dir = ensure_direct_child_path(emoji_root, safe_category, "category")
-    if not emoji_dir.exists():
-        return None
-    
-    # 获取目录中的图片文件
-    image_extensions = (".png", ".jpg", ".jpeg", ".gif", ".webp")
-    emoji_files = [f for f in emoji_dir.iterdir() if f.suffix.lower() in image_extensions]
-    
-    if not emoji_files:
-        return None
-    
-    # 随机选择一个
-    selected = random.choice(emoji_files)
-    return selected_category
-    # return f"/api/emojis/{role_id}/{selected_category}/{selected.name}"
 
 # ========== 统一入口 ==========
 
@@ -761,7 +653,7 @@ async def _run_memory_ai_pipeline(
 
     new_core = None
     if trigger_summary_after_reply:
-        new_core = await trigger_memory_summary("1000000000000", role)
+        new_core = await trigger_memory_summary(role_id, role)
 
     return {
         "success": True,
@@ -838,7 +730,6 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     """处理用户聊天消息"""
     from services.memory_service import (
         _get_memory_length, _get_menstruation_status,
-        sequential_memory_generation,
     )
     
     role_id = event.role_id
@@ -860,25 +751,6 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         scheduler_service.cancel_followup(role_id)
 
     search_context = ""
-    enable_connection = role.get("enable_connection", False)
-    if enable_connection:
-        seq_origin = str(event_context.get("origin") or "zerochat").strip() or "zerochat"
-        seq_sender_id = str(event_context.get("sender_id") or "").strip()
-        seq_group_id = str(event_context.get("onebot_group_id") or event_context.get("group_id") or "").strip()
-        result = await sequential_memory_generation(
-            role_id, "1000000000003", user_message,
-            conv_origin=seq_origin,
-            conv_group_id=seq_group_id,
-            conv_sender_id=seq_sender_id,
-        )
-    else:
-        result = "noneed"
-    if result != "noneed" and result is not None:
-        logger.info("衔接事件生成：角色 %s 生成了新的衔接事件记忆: %s", role.get("name"), result)
-    elif result == "noneed":
-        pass
-    else:
-        logger.info("衔接事件生成：角色 %s 没有生成新的衔接事件记忆", role.get("name"))
     # 合并额外上下文
     extra_parts: List[str] = []
     backend_moments_context = _build_moments_chat_context(role_id)

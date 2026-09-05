@@ -1403,8 +1403,8 @@ async def generate_with_role(
         active_tools.extend(_SEND_EMOTION_EMOJI_TOOL)
     active_tools.extend(_WEB_SEARCH_TOOL)
     active_tools.extend(_WRITE_MEMORY_TOOL)
-    # set_alarm 作用于用户设备的系统闹钟/日历，仅对有设备的 ZeroChat 场景开放
-    # continue_if_no_reply（无回复续写）同样仅对 ZeroChat 场景开放
+    # set_alarm 作用于用户设备的系统闹钟/日历，仅对有设备的场景开放
+    # continue_if_no_reply（无回复续写）同样仅对有设备的场景开放
     if not is_onebot:
         active_tools.extend(_SET_ALARM_TOOL)
         active_tools.extend(_CONTINUE_IF_NO_REPLY_TOOL)

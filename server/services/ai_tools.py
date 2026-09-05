@@ -35,7 +35,7 @@ def _emoji_dir(role_id: str, emotion: str) -> Path:
 
 """
 定时任务工具：允许 AI 在对话中主动创建定时提醒。
-对所有场景开放（ZeroChat + OneBot）。
+对所有场景开放。
 """
 _SCHEDULE_TASK_TOOL = [{
     "type": "function",
@@ -69,7 +69,7 @@ _SCHEDULE_TASK_TOOL = [{
 """
 系统闹钟/日历工具：允许 AI 请求在用户设备上设置系统闹钟或写入日历事件。
 与 schedule_task 不同：schedule_task 是应用内的定时消息提醒；set_alarm 会
-落到用户手机的系统闹钟 App 或系统日历，由客户端执行。仅对有设备的 ZeroChat 场景开放。
+落到用户手机的系统闹钟 App 或系统日历，由客户端执行。仅对有设备的场景开放。
 """
 _SET_ALARM_TOOL = [{
     "type": "function",
@@ -107,7 +107,7 @@ _SET_ALARM_TOOL = [{
 """
 无回复续写工具：允许 AI 在说完话后设置一个「若用户在指定时长内没有回复就继续说」的计时器。
 用户一旦回复，续写会自动取消。支持链式续写，但受角色配置的最大续写次数限制。
-仅对有设备的 ZeroChat 场景开放。
+仅对有设备的场景开放。
 """
 _CONTINUE_IF_NO_REPLY_TOOL = [{
     "type": "function",

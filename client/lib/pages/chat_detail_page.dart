@@ -68,6 +68,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   DateTime? _lastLoadMoreConfirmTime;
   bool _showTyping = false;
   bool _isEmojiPanelVisible = false;
+  bool _initialScrollPending = true;
+  bool _initialScrollScheduled = false;
   late Role _currentRole;
   int _pageSession = 0;
   final Set<String> _scheduledPlaceholderRepairs = <String>{};
@@ -701,6 +703,24 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                           ),
                         ),
                       );
+                    }
+
+                    // The first non-empty stream event can arrive after the
+                    // initialization callback. Scroll only once, after the
+                    // list has been laid out, so opening a chat lands at the
+                    // newest message even when loading is asynchronous.
+                    if (_initialScrollPending && !_initialScrollScheduled) {
+                      _initialScrollScheduled = true;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted) return;
+                        if (!_scrollController.hasClients) {
+                          _initialScrollScheduled = false;
+                          return;
+                        }
+                        _scrollToBottom(animate: false);
+                        _initialScrollPending = false;
+                        _initialScrollScheduled = false;
+                      });
                     }
 
                     // Defer network-backed repairs until after this frame.

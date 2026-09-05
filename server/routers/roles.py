@@ -394,7 +394,11 @@ def load_role(role_id: str) -> Optional[Dict]:
     profile_file = get_role_dir(role_id) / "profile.json"
     if profile_file.exists():
         with open(profile_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        if is_tool_role_id(role_id):
+            from services.tool_prompts import get_tool_prompt
+            data["system_prompt"] = get_tool_prompt(role_id, data.get("system_prompt", ""))
+        return data
     return None
 
 def _get_role_avatar_path(role_id: str) -> Optional[Path]:
