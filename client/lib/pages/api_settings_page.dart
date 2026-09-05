@@ -644,93 +644,138 @@ Future<ModelApiProfile?> _showProfileEditor(
   final reasoningEffort = TextEditingController(
     text: existing?.reasoningEffort ?? '',
   );
+  final budget = TextEditingController(
+    text: existing?.thinkingBudget?.toString() ?? '',
+  );
+  bool? thinkingEnabled = existing == null ? true : existing.thinkingEnabled;
+  final formKey = GlobalKey<FormState>();
   bool? stream = existing?.stream;
   var capabilities = {...?existing?.capabilities};
-  final result = await showDialog<ModelApiProfile>(
+  final route = DialogRoute<ModelApiProfile>(
     context: context,
     builder: (context) => StatefulBuilder(
       builder: (context, setState) => AlertDialog(
         title: Text(existing == null ? '新建模型档案' : '编辑模型档案'),
         content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: name,
-                decoration: const InputDecoration(labelText: '档案名称'),
-              ),
-              TextField(
-                controller: url,
-                decoration: const InputDecoration(labelText: 'API 地址'),
-              ),
-              TextField(
-                controller: key,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'API Key'),
-              ),
-              TextField(
-                controller: model,
-                decoration: const InputDecoration(labelText: '模型'),
-              ),
-              TextField(
-                controller: timeout,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: '超时时间（秒，留空继承全局）'),
-              ),
-              TextField(
-                controller: reasoningEffort,
-                decoration: const InputDecoration(labelText: '思考强度（留空继承全局）'),
-              ),
-              CheckboxListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('使用流式传输（未选中继承全局）'),
-                value: stream ?? false,
-                tristate: true,
-                onChanged: (value) => setState(() => stream = value),
-              ),
-              DropdownButtonFormField<String>(
-                initialValue: format,
-                decoration: const InputDecoration(labelText: '协议格式'),
-                items: const [
-                  DropdownMenuItem(value: 'auto', child: Text('自动识别')),
-                  DropdownMenuItem(
-                    value: 'openai_compatible',
-                    child: Text('OpenAI 兼容'),
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: '档案名称'),
+                ),
+                TextField(
+                  controller: url,
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(labelText: 'API 地址'),
+                ),
+                TextField(
+                  controller: key,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'API Key'),
+                ),
+                TextField(
+                  controller: model,
+                  decoration: const InputDecoration(labelText: '模型'),
+                ),
+                TextField(
+                  controller: timeout,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '超时时间（秒，留空继承全局）',
                   ),
-                  DropdownMenuItem(
-                    value: 'gemini_native',
-                    child: Text('Gemini 原生'),
-                  ),
-                ],
-                onChanged: (value) => setState(() => format = value ?? 'auto'),
-              ),
-              const SizedBox(height: 8),
-              for (final capability in ModelProfileCapability.values)
+                ),
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: Text(_capabilityLabel(capability)),
-                  value: capabilities.contains(capability),
-                  onChanged: (selected) => setState(() {
-                    if (selected == true) {
-                      capabilities.add(capability);
-                    } else {
-                      capabilities.remove(capability);
-                    }
-                  }),
+                  title: const Text('启用模型思考'),
+                  subtitle: Text(
+                    thinkingEnabled == null
+                        ? '继承全局'
+                        : thinkingEnabled!
+                        ? '已启用'
+                        : '已关闭',
+                  ),
+                  tristate: true,
+                  value: thinkingEnabled,
+                  onChanged: (value) => setState(() => thinkingEnabled = value),
                 ),
-              if (capabilities.contains(ModelProfileCapability.vision))
+                _ReasoningEffortSelector(
+                  value: reasoningEffort.text,
+                  inherit: true,
+                  enabled: thinkingEnabled != false,
+                  onChanged: (value) =>
+                      setState(() => reasoningEffort.text = value),
+                ),
+                if (supportsThinkingBudget(url.text, format, model.text))
+                  TextFormField(
+                    controller: budget,
+                    enabled: thinkingEnabled != false,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '思考预算（tokens）',
+                    ),
+                    validator: _validateThinkingBudget,
+                  ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('使用流式传输（未选中继承全局）'),
+                  value: stream ?? false,
+                  tristate: true,
+                  onChanged: (value) => setState(() => stream = value),
+                ),
                 DropdownButtonFormField<String>(
-                  initialValue: visionMode,
-                  decoration: const InputDecoration(labelText: '视觉运行模式'),
+                  initialValue: format,
+                  decoration: const InputDecoration(labelText: '协议格式'),
                   items: const [
-                    DropdownMenuItem(value: 'standalone', child: Text('独立识图')),
-                    DropdownMenuItem(value: 'pre_model', child: Text('预处理模型')),
-                    DropdownMenuItem(value: 'tool', child: Text('工具调用')),
+                    DropdownMenuItem(value: 'auto', child: Text('自动识别')),
+                    DropdownMenuItem(
+                      value: 'openai_compatible',
+                      child: Text('OpenAI 兼容'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'gemini_native',
+                      child: Text('Gemini 原生'),
+                    ),
                   ],
                   onChanged: (value) =>
-                      setState(() => visionMode = value ?? 'standalone'),
+                      setState(() => format = value ?? 'auto'),
                 ),
-            ],
+                const SizedBox(height: 8),
+                for (final capability in ModelProfileCapability.values)
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(_capabilityLabel(capability)),
+                    value: capabilities.contains(capability),
+                    onChanged: (selected) => setState(() {
+                      if (selected == true) {
+                        capabilities.add(capability);
+                      } else {
+                        capabilities.remove(capability);
+                      }
+                    }),
+                  ),
+                if (capabilities.contains(ModelProfileCapability.vision))
+                  DropdownButtonFormField<String>(
+                    initialValue: visionMode,
+                    decoration: const InputDecoration(labelText: '视觉运行模式'),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'standalone',
+                        child: Text('独立识图'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'pre_model',
+                        child: Text('预处理模型'),
+                      ),
+                      DropdownMenuItem(value: 'tool', child: Text('工具调用')),
+                    ],
+                    onChanged: (value) =>
+                        setState(() => visionMode = value ?? 'standalone'),
+                  ),
+              ],
+            ),
           ),
         ),
         actions: [
@@ -740,6 +785,7 @@ Future<ModelApiProfile?> _showProfileEditor(
           ),
           FilledButton(
             onPressed: () {
+              if (!formKey.currentState!.validate()) return;
               if (name.text.trim().isEmpty ||
                   url.text.trim().isEmpty ||
                   model.text.trim().isEmpty ||
@@ -768,6 +814,11 @@ Future<ModelApiProfile?> _showProfileEditor(
                   reasoningEffort: reasoningEffort.text.trim().isEmpty
                       ? null
                       : reasoningEffort.text.trim(),
+                  thinkingEnabled: thinkingEnabled,
+                  thinkingBudget:
+                      supportsThinkingBudget(url.text, format, model.text)
+                      ? normalizeThinkingBudget(budget.text.trim())
+                      : null,
                   stream: stream,
                 ),
               );
@@ -778,13 +829,63 @@ Future<ModelApiProfile?> _showProfileEditor(
       ),
     ),
   );
+  final result = await Navigator.of(context, rootNavigator: true).push(route);
+  await route.completed;
   name.dispose();
   url.dispose();
   key.dispose();
   model.dispose();
   timeout.dispose();
   reasoningEffort.dispose();
+  budget.dispose();
   return result;
+}
+
+String? _validateThinkingBudget(String? value) {
+  if (value == null || value.trim().isEmpty) return null;
+  return normalizeThinkingBudget(value.trim()) == null ? '请输入正整数' : null;
+}
+
+class _ReasoningEffortSelector extends StatelessWidget {
+  final String value;
+  final bool inherit;
+  final bool enabled;
+  final ValueChanged<String> onChanged;
+
+  const _ReasoningEffortSelector({
+    required this.value,
+    required this.onChanged,
+    this.inherit = false,
+    this.enabled = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final choices = <String, String>{
+      '': inherit ? '继承全局' : '供应商默认',
+      'minimal': '最低（minimal）',
+      'low': '低（low）',
+      'medium': '中（medium）',
+      'high': '高（high）',
+      'xhigh': '最高（xhigh）',
+      if (value.isNotEmpty &&
+          !const {'minimal', 'low', 'medium', 'high', 'xhigh'}.contains(value))
+        value: value,
+    };
+    return DropdownButtonFormField<String>(
+      key: ValueKey(value),
+      initialValue: value,
+      isExpanded: true,
+      decoration: const InputDecoration(labelText: '思考强度'),
+      items: choices.entries
+          .map(
+            (entry) =>
+                DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+          )
+          .toList(),
+      onChanged: enabled ? (value) => onChanged(value ?? '') : null,
+    );
+  }
 }
 
 Future<String?> _askProfileName(BuildContext context, String initial) async {
@@ -1308,6 +1409,7 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
   String _visionMode = 'standalone';
   late final TextEditingController _timeout;
   late final TextEditingController _reasoningEffort;
+  late final TextEditingController _thinkingBudget;
   bool _stream = false;
   bool _thinkingEnabled = true;
   List<String> _models = [];
@@ -1354,7 +1456,24 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
     );
     _stream = settings.chatStream;
     _thinkingEnabled = settings.thinkingEnabled;
+    final thinking = settings.thinkingSettingsFor(widget.kind.name);
+    if (widget.kind != ModelSettingsKind.chat) {
+      _thinkingEnabled =
+          thinking['thinking_enabled'] as bool? ?? settings.thinkingEnabled;
+      _reasoningEffort.text = thinking['reasoning_effort'] as String? ?? '';
+    }
+    _thinkingBudget = TextEditingController(
+      text:
+          (widget.kind == ModelSettingsKind.chat
+                  ? settings.thinkingBudget
+                  : thinking['thinking_budget'])
+              ?.toString() ??
+          '',
+    );
+    _url.addListener(_refreshThinkingProvider);
   }
+
+  void _refreshThinkingProvider() => setState(() {});
 
   @override
   void dispose() {
@@ -1363,6 +1482,7 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
     _model.dispose();
     _timeout.dispose();
     _reasoningEffort.dispose();
+    _thinkingBudget.dispose();
     super.dispose();
   }
 
@@ -1462,6 +1582,11 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
   }
 
   Future<void> _save() async {
+    if (supportsThinkingBudget(_url.text, _format, _model.text) &&
+        _validateThinkingBudget(_thinkingBudget.text) != null) {
+      _showMessage(context, '思考预算请输入正整数');
+      return;
+    }
     setState(() => _saving = true);
     try {
       final settings = SettingsService.instance;
@@ -1475,6 +1600,10 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
             timeoutSeconds: int.tryParse(_timeout.text.trim()),
             reasoningEffort: _reasoningEffort.text.trim(),
             thinkingEnabled: _thinkingEnabled,
+            thinkingBudget: normalizeThinkingBudget(
+              _thinkingBudget.text.trim(),
+            ),
+            clearThinkingBudget: true,
             stream: _stream,
           );
         case ModelSettingsKind.intent:
@@ -1502,6 +1631,15 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
             model: _model.text.trim(),
           );
       }
+      if (widget.kind == ModelSettingsKind.intent ||
+          widget.kind == ModelSettingsKind.vision) {
+        await settings.updateModelThinkingSettings(
+          widget.kind.name,
+          enabled: _thinkingEnabled,
+          effort: _reasoningEffort.text.trim(),
+          budget: normalizeThinkingBudget(_thinkingBudget.text.trim()),
+        );
+      }
       final synced = await settings.syncApiSettingsToBackend();
       if (!mounted) return;
       if (!synced) {
@@ -1517,6 +1655,10 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
   }
 
   Future<void> _saveAsProfile() async {
+    if (_validateThinkingBudget(_thinkingBudget.text) != null) {
+      _showMessage(context, '思考预算请输入正整数');
+      return;
+    }
     final name = await _askProfileName(context, _model.text.trim());
     if (name == null || name.isEmpty) return;
     final id = 'model_profile_${DateTime.now().microsecondsSinceEpoch}';
@@ -1536,6 +1678,8 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
         reasoningEffort: _reasoningEffort.text.trim().isEmpty
             ? null
             : _reasoningEffort.text.trim(),
+        thinkingEnabled: _thinkingEnabled,
+        thinkingBudget: normalizeThinkingBudget(_thinkingBudget.text.trim()),
         stream: _stream,
       ),
     );
@@ -1559,6 +1703,9 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
           settings.chatTimeoutSeconds.toString();
       _reasoningEffort.text =
           profile.reasoningEffort ?? settings.chatReasoningEffort;
+      _thinkingEnabled = profile.thinkingEnabled ?? settings.thinkingEnabled;
+      _thinkingBudget.text =
+          (profile.thinkingBudget ?? settings.thinkingBudget)?.toString() ?? '';
       _stream = profile.stream ?? settings.chatStream;
       if (profile.visionMode != null) _visionMode = profile.visionMode!;
     });
@@ -1627,22 +1774,48 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
                   hint: '1-3600',
                 ),
                 const Divider(height: 1),
-                _FieldRow(
-                  label: '思考强度',
-                  controller: _reasoningEffort,
-                  hint: '如 low / medium / high',
-                ),
-                const Divider(height: 1),
                 SwitchListTile(
                   title: const Text('使用流式传输'),
                   value: _stream,
                   onChanged: (value) => setState(() => _stream = value),
                 ),
+              ],
+              if (widget.kind != ModelSettingsKind.embedding) ...[
                 SwitchListTile(
                   title: const Text('启用模型思考'),
                   value: _thinkingEnabled,
-                  onChanged: (value) => setState(() => _thinkingEnabled = value),
+                  onChanged: (value) =>
+                      setState(() => _thinkingEnabled = value),
                 ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  child: _ReasoningEffortSelector(
+                    value: _reasoningEffort.text,
+                    enabled: _thinkingEnabled,
+                    onChanged: (value) =>
+                        setState(() => _reasoningEffort.text = value),
+                  ),
+                ),
+                if (supportsThinkingBudget(_url.text, _format, _model.text))
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    child: TextFormField(
+                      controller: _thinkingBudget,
+                      enabled: _thinkingEnabled,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: '思考预算（tokens）',
+                      ),
+                      autovalidateMode: AutovalidateMode.onUserInteraction,
+                      validator: _validateThinkingBudget,
+                    ),
+                  ),
               ],
               const Divider(height: 1),
               _ActionRow(

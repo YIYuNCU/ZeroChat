@@ -228,6 +228,7 @@ async def call_vision_api(
         return None
     try:
         from services.ai_service import _post_chat, _uses_native_gemini
+        from services.settings_service import get_thinking_config
 
         model = str(body.get("model") or "")
         messages = await _prepare_deepseek_file_messages(
@@ -243,6 +244,7 @@ async def call_vision_api(
             max_tokens=int(body.get("max_tokens", 1024)),
             tools=None,
             api_format=api_format,
+            **get_thinking_config("vision"),
         )
         if result.get("success"):
             return str(result.get("content") or "").strip() or None

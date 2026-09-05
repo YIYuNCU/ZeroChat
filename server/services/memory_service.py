@@ -14,6 +14,7 @@ import uuid
 
 from core.utils import ensure_direct_child_path, is_tool_role_id
 from services.vector_memory import VectorMemoryStore, embed_and_store, _extract_semantic_text
+from services.settings_service import get_thinking_config
 
 logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -950,7 +951,7 @@ async def trigger_chat_summary(
         logger.warning("构建记忆总结提示时发生错误：%s", e)
         return None
     try:
-        result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1))
+        result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1), api_format=worker_data.get("ai_api_format"), **get_thinking_config(role_data=worker_data))
         if result["success"] and result["content"]:
             new_memory = result["content"].strip()
             append_short_term(role_id, "user", "system:触发记忆总结",
@@ -1275,7 +1276,7 @@ async def sequential_memory_generation(
         logger.warning("构建衔接记忆提示时发生错误：%s", e)
         return None
     try:
-        result = await call_ai_direct(messages=messages, model=worker.get("ai_model"), api_url=worker.get("ai_api_url"), api_key=worker.get("ai_api_key"), temperature=worker.get("ai_temperature", 1.2))
+        result = await call_ai_direct(messages=messages, model=worker.get("ai_model"), api_url=worker.get("ai_api_url"), api_key=worker.get("ai_api_key"), temperature=worker.get("ai_temperature", 1.2), api_format=worker.get("ai_api_format"), **get_thinking_config(role_data=worker))
         if result["success"] and result["content"]:
             if result["content"].strip().lower() == "none":
                 return "noneed"
@@ -1341,7 +1342,7 @@ async def trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str]
         logger.warning("构建记忆总结提示时发生错误：%s", e)
         return None
     try:
-        result = await call_ai_direct(messages=messages, model=role_data.get("ai_model"), api_url=role_data.get("ai_api_url"), api_key=role_data.get("ai_api_key"), temperature=role_data.get("ai_temperature", 0.1))
+        result = await call_ai_direct(messages=messages, model=role_data.get("ai_model"), api_url=role_data.get("ai_api_url"), api_key=role_data.get("ai_api_key"), temperature=role_data.get("ai_temperature", 0.1), api_format=role_data.get("ai_api_format"), **get_thinking_config(role_data=role_data))
         if result["success"] and result["content"]:
             new_core = result["content"].strip()
             update_core_memory(role_need_change, new_core)

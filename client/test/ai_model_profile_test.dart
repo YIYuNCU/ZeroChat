@@ -3,6 +3,66 @@ import 'package:zerochat/models/ai_model_profile.dart';
 import 'package:zerochat/models/role.dart';
 
 void main() {
+  test('thinking overrides round trip and legacy quotas migrate', () {
+    final profile = ModelApiProfile.fromJson({
+      'id': 'thinking',
+      'thinking_enabled': false,
+      'thinking_budget': 4096,
+      'reasoning_effort': 'high',
+    });
+    final restored = ModelApiProfile.fromJson(profile.toJson());
+    expect(restored.thinkingEnabled, isFalse);
+    expect(restored.thinkingBudget, 4096);
+    expect(restored.reasoningEffort, 'high');
+    final legacy = ModelApiProfile.fromJson({'reasoning_effort': '8192'});
+    expect(legacy.reasoningEffort, isNull);
+    expect(legacy.thinkingBudget, 8192);
+    expect(ModelApiProfile.fromJson({}).thinkingEnabled, isNull);
+  });
+
+  test('switching profiles clears role thinking overrides', () {
+    final role = Role(
+      id: 'role',
+      name: 'Role',
+      systemPrompt: '',
+      aiThinkingEnabled: false,
+      aiThinkingBudget: 4096,
+      aiReasoningEffort: 'high',
+    );
+    final inherited = Role.fromJson(
+      role.copyWith(clearThinkingOverrides: true).toJson(),
+    );
+    expect(inherited.aiThinkingEnabled, isNull);
+    expect(inherited.aiThinkingBudget, isNull);
+    expect(inherited.aiReasoningEffort, isNull);
+    final restored = Role.fromJson(role.toJson());
+    expect(restored.aiThinkingEnabled, isFalse);
+    expect(restored.aiThinkingBudget, 4096);
+  });
+
+  test('budget is offered only for supported protocols', () {
+    expect(
+      supportsThinkingBudget('https://api.siliconflow.cn/v1', 'auto', ''),
+      isTrue,
+    );
+    expect(
+      supportsThinkingBudget(
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        'auto',
+        '',
+      ),
+      isTrue,
+    );
+    expect(
+      supportsThinkingBudget('https://gateway.example', 'gemini_native', ''),
+      isTrue,
+    );
+    expect(
+      supportsThinkingBudget('https://api.deepseek.com/v1', 'auto', ''),
+      isFalse,
+    );
+  });
+
   test('chat profile defaults legacy protocol to auto', () {
     final profile = AiModelProfile.fromJson({
       'id': 'chat-1',

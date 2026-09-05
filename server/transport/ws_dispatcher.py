@@ -438,6 +438,14 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
         updates["ai_reasoning_effort"] = str(update.ai_reasoning_effort).strip()
     if update.ai_stream is not None:
         updates["ai_stream"] = update.ai_stream
+    if update.thinking_enabled is not None:
+        updates["thinking_enabled"] = update.thinking_enabled
+    if update.ai_thinking_budget is not None:
+        updates["ai_thinking_budget"] = update.ai_thinking_budget
+    if update.model_thinking_settings is not None:
+        updates["model_thinking_settings"] = {
+            kind: value.model_dump() for kind, value in update.model_thinking_settings.items()
+        }
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
     if update.intent_api_url is not None:
@@ -528,6 +536,9 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
     previous_archived = bool((existing or {}).get("archived", False))
 
     if existing:
+        for key in ("ai_thinking_enabled", "ai_thinking_budget", "ai_reasoning_effort"):
+            if key in role_model.model_fields_set:
+                existing[key] = getattr(role_model, key)
         # Only apply fields sent by the client. RoleCreate has defaults for
         # creation, and applying those defaults during an upsert would reset
         # server-owned or older-client fields.
@@ -568,6 +579,8 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
             ),
             "ai_timeout_seconds": role_model.ai_timeout_seconds,
             "ai_reasoning_effort": role_model.ai_reasoning_effort,
+            "ai_thinking_enabled": role_model.ai_thinking_enabled,
+            "ai_thinking_budget": role_model.ai_thinking_budget,
             "ai_stream": role_model.ai_stream,
             "personality": (
                 role_model.personality.model_dump()

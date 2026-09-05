@@ -51,6 +51,8 @@ class SettingsService extends ChangeNotifier {
   int _chatTimeoutSeconds = 60;
   String _chatReasoningEffort = '';
   bool _thinkingEnabled = true;
+  int? _thinkingBudget;
+  Map<String, dynamic> _modelThinkingSettings = {};
   bool _chatStream = false;
   List<ModelApiProfile> _modelProfiles = [];
   Map<String, String> _roleModelProfileSelections = {};
@@ -105,6 +107,44 @@ class SettingsService extends ChangeNotifier {
   int get chatTimeoutSeconds => _chatTimeoutSeconds;
   String get chatReasoningEffort => _chatReasoningEffort;
   bool get thinkingEnabled => _thinkingEnabled;
+  int? get thinkingBudget => _thinkingBudget;
+  Map<String, dynamic> thinkingSettingsFor(String kind) =>
+      Map<String, dynamic>.from(_modelThinkingSettings[kind] as Map? ?? {});
+
+  Future<void> updateModelThinkingSettings(
+    String kind, {
+    required bool enabled,
+    required String effort,
+    int? budget,
+  }) async {
+    _modelThinkingSettings[kind] = {
+      'thinking_enabled': enabled,
+      'reasoning_effort': effort,
+      'thinking_budget': budget,
+    };
+    await StorageService.setJson(
+      'model_thinking_settings',
+      _modelThinkingSettings,
+    );
+    notifyListeners();
+  }
+
+  Future<void> _restoreThinkingSettings(Map<String, dynamic> server) async {
+    _thinkingEnabled = server['thinking_enabled'] as bool? ?? _thinkingEnabled;
+    _thinkingBudget =
+        normalizeThinkingBudget(server['ai_thinking_budget']) ??
+        normalizeThinkingBudget(server['ai_reasoning_effort']);
+    _modelThinkingSettings = Map<String, dynamic>.from(
+      server['model_thinking_settings'] as Map? ?? {},
+    );
+    await StorageService.setBool('thinking_enabled', _thinkingEnabled);
+    await StorageService.setInt('ai_thinking_budget', _thinkingBudget ?? 0);
+    await StorageService.setJson(
+      'model_thinking_settings',
+      _modelThinkingSettings,
+    );
+  }
+
   bool get chatStream => _chatStream;
   List<AiModelProfile> get modelProfiles => List.unmodifiable(
     _modelProfiles.where(
@@ -196,6 +236,12 @@ class SettingsService extends ChangeNotifier {
     _chatReasoningEffort =
         StorageService.getString('chat_reasoning_effort') ?? '';
     _thinkingEnabled = StorageService.getBool('thinking_enabled') ?? true;
+    _thinkingBudget =
+        normalizeThinkingBudget(StorageService.getInt('ai_thinking_budget')) ??
+        normalizeThinkingBudget(_chatReasoningEffort);
+    if (int.tryParse(_chatReasoningEffort) != null) _chatReasoningEffort = '';
+    _modelThinkingSettings =
+        StorageService.getJson('model_thinking_settings') ?? {};
     _chatStream = StorageService.getBool('chat_stream') ?? false;
     await _loadModelProfiles();
     _loadRoleModelProfileSelections();
@@ -367,6 +413,8 @@ class SettingsService extends ChangeNotifier {
     int? timeoutSeconds,
     String? reasoningEffort,
     bool? thinkingEnabled,
+    int? thinkingBudget,
+    bool clearThinkingBudget = false,
     bool? stream,
   }) async {
     _chatApiUrl = url;
@@ -378,6 +426,14 @@ class SettingsService extends ChangeNotifier {
     }
     if (reasoningEffort != null) _chatReasoningEffort = reasoningEffort.trim();
     if (thinkingEnabled != null) _thinkingEnabled = thinkingEnabled;
+    if (thinkingBudget != null || clearThinkingBudget) {
+      _thinkingBudget = normalizeThinkingBudget(thinkingBudget);
+    }
+    final legacyBudget = normalizeThinkingBudget(_chatReasoningEffort);
+    if (legacyBudget != null) {
+      _thinkingBudget ??= legacyBudget;
+      _chatReasoningEffort = '';
+    }
     if (stream != null) _chatStream = stream;
     await StorageService.setString('chat_api_url', url);
     await SecureStorageService.setString('chat_api_key', key);
@@ -390,6 +446,7 @@ class SettingsService extends ChangeNotifier {
     );
     await StorageService.setBool('thinking_enabled', _thinkingEnabled);
     await StorageService.setBool('chat_stream', _chatStream);
+    await StorageService.setInt('ai_thinking_budget', _thinkingBudget ?? 0);
     notifyListeners();
   }
 
@@ -695,6 +752,8 @@ class SettingsService extends ChangeNotifier {
             'ai_timeout_seconds': _chatTimeoutSeconds,
             'ai_reasoning_effort': _chatReasoningEffort,
             'thinking_enabled': _thinkingEnabled,
+            'ai_thinking_budget': _thinkingBudget ?? 0,
+            'model_thinking_settings': _modelThinkingSettings,
             'ai_stream': _chatStream,
             'intent_enabled': _intentEnabled,
             'intent_api_url': _intentApiUrl,
@@ -742,6 +801,7 @@ class SettingsService extends ChangeNotifier {
       }
 
       final server = Map<String, dynamic>.from(settings);
+      await _restoreThinkingSettings(server);
 
       final chatUrl = (server['ai_api_url']?.toString() ?? '').trim();
       final chatKey = (server['ai_api_key']?.toString() ?? '').trim();
@@ -866,6 +926,7 @@ class SettingsService extends ChangeNotifier {
       }
 
       final server = Map<String, dynamic>.from(settings);
+      await _restoreThinkingSettings(server);
 
       final chatUrl = (server['ai_api_url']?.toString() ?? '').trim();
       final chatModel =

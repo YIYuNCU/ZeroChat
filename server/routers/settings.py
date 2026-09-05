@@ -6,7 +6,7 @@ import hashlib
 import re
 from typing import List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, HTTPException, Query
 
 import logging
@@ -104,6 +104,13 @@ def _model_ids(payload: dict, native_gemini: bool) -> list[str]:
             result.append(model_id)
     return sorted(set(result))
 
+class ModelThinkingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    thinking_enabled: Optional[bool] = None
+    reasoning_effort: str = ""
+    thinking_budget: Optional[int] = Field(default=None, gt=0)
+
+
 class SettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -113,6 +120,9 @@ class SettingsUpdate(BaseModel):
     ai_api_format: Optional[str] = None
     ai_timeout_seconds: Optional[int] = None
     ai_reasoning_effort: Optional[str] = None
+    thinking_enabled: Optional[bool] = None
+    ai_thinking_budget: Optional[int] = Field(default=None, ge=0)
+    model_thinking_settings: Optional[dict[str, ModelThinkingSettings]] = None
     ai_stream: Optional[bool] = None
     intent_enabled: Optional[bool] = None
     intent_api_url: Optional[str] = None
@@ -167,6 +177,14 @@ async def update_settings(update: SettingsUpdate):
         updates["ai_reasoning_effort"] = update.ai_reasoning_effort.strip()
     if update.ai_stream is not None:
         updates["ai_stream"] = update.ai_stream
+    if update.thinking_enabled is not None:
+        updates["thinking_enabled"] = update.thinking_enabled
+    if update.ai_thinking_budget is not None:
+        updates["ai_thinking_budget"] = update.ai_thinking_budget
+    if update.model_thinking_settings is not None:
+        updates["model_thinking_settings"] = {
+            kind: value.model_dump() for kind, value in update.model_thinking_settings.items()
+        }
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
     if update.intent_api_url is not None:

@@ -620,6 +620,55 @@ async def _post_chat_stream(client, endpoint, headers, payload, timeout_seconds,
     return result
 
 
+def _apply_thinking_config(
+    payload: Dict[str, Any], model: str, api_url: str, native_gemini: bool,
+    enabled: Optional[bool], effort: str, budget: Optional[int],
+) -> None:
+    explicit_enabled = enabled
+    if enabled is None:
+        enabled = bool(settings_service.load_settings().get("thinking_enabled", True))
+    try:
+        budget = int(budget) if budget is not None else None
+    except (TypeError, ValueError):
+        budget = None
+    if budget is not None and budget <= 0:
+        budget = None
+    if native_gemini:
+        config = {}
+        if not enabled:
+            config["thinkingBudget"] = 0
+        elif budget is not None:
+            config["thinkingBudget"] = budget
+        elif effort and "gemini-3" in model.lower():
+            config["thinkingLevel"] = effort
+        if config:
+            payload["generationConfig"]["thinkingConfig"] = config
+    elif _is_thinking_quota_provider(api_url):
+        # Hosted DeepSeek models use the hosting provider's request schema.
+        payload.pop("thinking", None)
+        payload["enable_thinking"] = enabled
+        if enabled:
+            if budget is None:
+                try:
+                    budget = max(1, int(effort))
+                except (TypeError, ValueError):
+                    pass
+            if budget is not None:
+                payload["thinking_budget"] = budget
+    elif _is_deepseek_model(model) or _is_mimo_provider(model, api_url):
+        if _is_mimo_provider(model, api_url) and explicit_enabled is None:
+            enabled = False
+        payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
+        if enabled and effort:
+            payload["reasoning_effort"] = effort
+    elif enabled and effort:
+        payload["reasoning_effort"] = effort
+    elif not enabled and explicit_enabled is not None and re.fullmatch(
+        r"gpt-5\.(?:1|2|3|4)(?:-\d{4}-\d{2}-\d{2})?", model.lower(),
+    ):
+        payload["reasoning_effort"] = "none"
+
+
 async def _post_chat(
     messages: List[Dict[str, str]],
     api_url: str,
@@ -633,6 +682,8 @@ async def _post_chat(
     timeout_seconds: int = 60,
     reasoning_effort: str = "",
     stream: bool = False,
+    thinking_enabled: Optional[bool] = None,
+    thinking_budget: Optional[int] = None,
 ) -> Dict[str, Any]:
     try:
         api_format = _normalize_api_format(api_format)
@@ -650,22 +701,8 @@ async def _post_chat(
             tools,
             api_format,
         )
-        thinking_enabled = bool(settings_service.load_settings().get("thinking_enabled", True))
-        if reasoning_effort and thinking_enabled and not native_gemini:
-            if _is_thinking_quota_provider(api_url):
-                # SiliconFlow and DashScope use an integer thinking quota.
-                try:
-                    payload["thinking_budget"] = max(1, int(reasoning_effort))
-                except ValueError:
-                    payload["enable_thinking"] = True
-            else:
-                payload["reasoning_effort"] = reasoning_effort
-        elif not thinking_enabled and not native_gemini:
-            if _is_thinking_quota_provider(api_url):
-                payload["enable_thinking"] = False
-            # DeepSeek is handled below; Grok/OpenAI use absence of the field.
-        if _is_deepseek_model(model) and not native_gemini:
-            payload["thinking"] = {"type": "enabled" if thinking_enabled else "disabled"}
+        _apply_thinking_config(payload, model, api_url, native_gemini,
+                               thinking_enabled, reasoning_effort, thinking_budget)
         if stream and not native_gemini:
             payload["stream"] = True
         client = _get_http_client()
@@ -752,6 +789,8 @@ async def call_ai(
     timeout_seconds: Optional[int] = None,
     reasoning_effort: Optional[str] = None,
     stream: Optional[bool] = None,
+    thinking_enabled: Optional[bool] = None,
+    thinking_budget: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     统一 AI API 调用
@@ -772,6 +811,7 @@ async def call_ai(
     timeout_seconds = config_timeout if timeout_seconds is None else max(1, min(3600, int(timeout_seconds)))
     reasoning_effort = config_effort if reasoning_effort is None else reasoning_effort.strip()
     stream = config_stream if stream is None else bool(stream)
+    thinking = settings_service.get_thinking_config()
     if not resolved_url or not resolved_key:
         return {"success": False, "content": None, "error": "AI API 未配置"}
 
@@ -788,6 +828,8 @@ async def call_ai(
         timeout_seconds=timeout_seconds,
         reasoning_effort=reasoning_effort,
         stream=stream,
+        thinking_enabled=thinking["thinking_enabled"] if thinking_enabled is None else thinking_enabled,
+        thinking_budget=thinking["thinking_budget"] if thinking_budget is None else thinking_budget,
     )
 
 async def call_ai_direct(
@@ -798,6 +840,9 @@ async def call_ai_direct(
     temperature: float = 0.7,
     max_tokens: int = 1000,
     api_format: Optional[str] = None,
+    thinking_enabled: Optional[bool] = None,
+    thinking_budget: Optional[int] = None,
+    reasoning_effort: str = "",
 ) -> Dict[str, Any]:
     """
     独立调用 AI（不依赖全局配置）
@@ -813,6 +858,9 @@ async def call_ai_direct(
         temperature=temperature,
         max_tokens=max_tokens,
         api_format=api_format,
+        thinking_enabled=thinking_enabled,
+        thinking_budget=thinking_budget,
+        reasoning_effort=reasoning_effort,
     )
 
 async def generate_embedding(
@@ -1224,6 +1272,7 @@ async def _call_with_role_config(
     """Call AI using role-specific model configuration."""
     model_override, url_override, key_override, temp_override, format_override, timeout_seconds, reasoning_effort, stream = _get_role_ai_config(role_data)
     stats_role_id = str(role_data.get("id") or "").strip() if isinstance(role_data, dict) else ""
+    thinking = settings_service.get_thinking_config(role_data=role_data)
     return await call_ai(
         messages,
         model=model_override,
@@ -1236,6 +1285,8 @@ async def _call_with_role_config(
         timeout_seconds=timeout_seconds,
         reasoning_effort=reasoning_effort,
         stream=stream,
+        thinking_enabled=thinking["thinking_enabled"],
+        thinking_budget=thinking["thinking_budget"],
     )
 
 

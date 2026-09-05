@@ -417,7 +417,9 @@ async def detect_emotion_and_get_emoji(role_id: str,worker_id:str, text: str) ->
         model=model,
         api_url=api_url,
         api_key=api_key,
-        temperature=temperature
+        temperature=temperature,
+        api_format=role_data.get("ai_api_format"),
+        **settings_service.get_thinking_config(role_data=role_data),
     )
     if not result.get("success"):
         return None
@@ -538,6 +540,7 @@ async def detect_intent(request: IntentDetectRequest):
           max_tokens=200,
           direct=True,
           api_format=api_format,
+          thinking_config=settings_service.get_thinking_config("intent"),
       )
 
       if not result.get("success"):

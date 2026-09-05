@@ -38,6 +38,8 @@ def get_default_settings() -> Dict[str, Any]:
         "ai_timeout_seconds": 60,
         "ai_reasoning_effort": "",
         "thinking_enabled": True,
+        "ai_thinking_budget": 0,
+        "model_thinking_settings": {},
         "ai_stream": False,
         "intent_enabled": False,
         "intent_api_url": "",
@@ -120,6 +122,27 @@ def get_ai_config() -> Dict[str, Any]:
         "reasoning_effort": str(settings.get("ai_reasoning_effort") or "").strip(),
         "stream": bool(settings.get("ai_stream", False)),
     }
+
+
+def get_thinking_config(kind: str = "chat", role_data: Optional[Dict] = None) -> Dict[str, Any]:
+    settings = load_settings()
+    options = {
+        "thinking_enabled": bool(settings.get("thinking_enabled", True)),
+        "thinking_budget": settings.get("ai_thinking_budget") or None,
+        "reasoning_effort": str(settings.get("ai_reasoning_effort") or "").strip(),
+    }
+    if kind != "chat":
+        overrides = (settings.get("model_thinking_settings") or {}).get(kind) or {}
+        options.update({key: value for key, value in overrides.items() if value is not None})
+    if role_data:
+        metadata = role_data.get("metadata") or {}
+        for key in options:
+            value = role_data.get(f"ai_{key}")
+            if value is None:
+                value = metadata.get(f"ai_{key}")
+            if value is not None:
+                options[key] = value
+    return options
 
 
 def get_intent_config() -> Dict[str, Any]:

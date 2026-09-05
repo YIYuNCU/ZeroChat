@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -211,6 +211,8 @@ class RoleCreate(BaseModel):
     ai_temperature: Optional[float] = None
     ai_timeout_seconds: Optional[int] = None
     ai_reasoning_effort: Optional[str] = None
+    ai_thinking_enabled: Optional[bool] = None
+    ai_thinking_budget: Optional[int] = Field(default=None, gt=0)
     ai_stream: Optional[bool] = None
 
     # 性别与生理周期
@@ -278,6 +280,8 @@ class RoleUpdate(BaseModel):
     ai_temperature: Optional[float] = None
     ai_timeout_seconds: Optional[int] = None
     ai_reasoning_effort: Optional[str] = None
+    ai_thinking_enabled: Optional[bool] = None
+    ai_thinking_budget: Optional[int] = Field(default=None, gt=0)
     ai_stream: Optional[bool] = None
     gender: Optional[str] = None
     menstruation_cycle: Optional[MenstruationCycle] = None
@@ -618,6 +622,8 @@ async def create_role(role: RoleCreate, request: Request):
         "ai_temperature": role.ai_temperature if role.ai_temperature is not None else 0.7,
         "ai_timeout_seconds": role.ai_timeout_seconds,
         "ai_reasoning_effort": role.ai_reasoning_effort,
+        "ai_thinking_enabled": role.ai_thinking_enabled,
+        "ai_thinking_budget": role.ai_thinking_budget,
         "ai_stream": role.ai_stream,
         "personality": role.personality.model_dump() if role.personality else {
             "openness": 50, "conscientiousness": 50, "extraversion": 50,
@@ -673,6 +679,9 @@ async def update_role(role_id: str, update: RoleUpdate, request: Request):
     
     for key, value in update.model_dump(exclude_none=True).items():
         role[key] = value
+    for key in ("ai_thinking_enabled", "ai_thinking_budget", "ai_reasoning_effort"):
+        if key in update.model_fields_set:
+            role[key] = getattr(update, key)
 
     save_role(role_id, role)
     if update.proactive_config is not None:

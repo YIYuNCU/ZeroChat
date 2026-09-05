@@ -34,6 +34,8 @@ class ModelApiProfile {
   final String? visionMode;
   final int? timeoutSeconds;
   final String? reasoningEffort;
+  final bool? thinkingEnabled;
+  final int? thinkingBudget;
   final bool? stream;
 
   const ModelApiProfile({
@@ -47,6 +49,8 @@ class ModelApiProfile {
     this.visionMode,
     this.timeoutSeconds,
     this.reasoningEffort,
+    this.thinkingEnabled,
+    this.thinkingBudget,
     this.stream,
   });
 
@@ -75,6 +79,10 @@ class ModelApiProfile {
       visionMode: _normalizeVisionMode(json['vision_mode']),
       timeoutSeconds: _normalizeTimeout(json['timeout_seconds']),
       reasoningEffort: _normalizeReasoningEffort(json['reasoning_effort']),
+      thinkingEnabled: json['thinking_enabled'] as bool?,
+      thinkingBudget:
+          normalizeThinkingBudget(json['thinking_budget']) ??
+          normalizeThinkingBudget(json['reasoning_effort']),
       stream: json['stream'] is bool ? json['stream'] as bool : null,
     );
   }
@@ -90,6 +98,8 @@ class ModelApiProfile {
     if (timeoutSeconds != null) 'timeout_seconds': timeoutSeconds,
     if (reasoningEffort != null && reasoningEffort!.trim().isNotEmpty)
       'reasoning_effort': reasoningEffort,
+    if (thinkingEnabled != null) 'thinking_enabled': thinkingEnabled,
+    if (thinkingBudget != null) 'thinking_budget': thinkingBudget,
     if (stream != null) 'stream': stream,
   };
 }
@@ -157,5 +167,24 @@ int? _normalizeTimeout(Object? value) {
 
 String? _normalizeReasoningEffort(Object? value) {
   final text = value?.toString().trim();
-  return text == null || text.isEmpty ? null : text;
+  return text == null || text.isEmpty || int.tryParse(text) != null
+      ? null
+      : text;
+}
+
+int? normalizeThinkingBudget(Object? value) {
+  final parsed = int.tryParse('${value ?? ''}');
+  return parsed != null && parsed > 0 ? parsed : null;
+}
+
+bool supportsThinkingBudget(String apiUrl, String apiFormat, String model) {
+  final uri = Uri.tryParse(apiUrl.trim());
+  final host = uri?.host.toLowerCase() ?? '';
+  return host.contains('siliconflow') ||
+      host.contains('dashscope') ||
+      host.contains('aliyuncs') ||
+      apiFormat == 'gemini_native' ||
+      (host == 'generativelanguage.googleapis.com' &&
+          apiFormat != 'openai_compatible' &&
+          !(uri?.path.contains('/openai') ?? false));
 }

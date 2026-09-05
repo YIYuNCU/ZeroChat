@@ -32,6 +32,9 @@ class Role {
   final double aiTemperature;
   final int? aiTimeoutSeconds;
   final String? aiReasoningEffort;
+  final bool? aiThinkingEnabled;
+  final String? aiApiFormat;
+  final int? aiThinkingBudget;
   final bool? aiStream;
   final String gender;
   final Map<String, dynamic> menstruationCycle;
@@ -95,6 +98,9 @@ class Role {
     this.aiTemperature = 0.7,
     this.aiTimeoutSeconds,
     this.aiReasoningEffort,
+    this.aiThinkingEnabled,
+    this.aiApiFormat,
+    this.aiThinkingBudget,
     this.aiStream,
     this.gender = 'men',
     Map<String, dynamic>? menstruationCycle,
@@ -162,6 +168,10 @@ class Role {
     double? aiTemperature,
     int? aiTimeoutSeconds,
     String? aiReasoningEffort,
+    bool? aiThinkingEnabled,
+    String? aiApiFormat,
+    int? aiThinkingBudget,
+    bool clearThinkingOverrides = false,
     bool? aiStream,
     String? gender,
     Map<String, dynamic>? menstruationCycle,
@@ -200,7 +210,16 @@ class Role {
       aiApiKey: aiApiKey ?? this.aiApiKey,
       aiTemperature: aiTemperature ?? this.aiTemperature,
       aiTimeoutSeconds: aiTimeoutSeconds ?? this.aiTimeoutSeconds,
-      aiReasoningEffort: aiReasoningEffort ?? this.aiReasoningEffort,
+      aiReasoningEffort: clearThinkingOverrides
+          ? aiReasoningEffort
+          : (aiReasoningEffort ?? this.aiReasoningEffort),
+      aiApiFormat: aiApiFormat ?? this.aiApiFormat,
+      aiThinkingEnabled: clearThinkingOverrides
+          ? aiThinkingEnabled
+          : (aiThinkingEnabled ?? this.aiThinkingEnabled),
+      aiThinkingBudget: clearThinkingOverrides
+          ? aiThinkingBudget
+          : (aiThinkingBudget ?? this.aiThinkingBudget),
       aiStream: aiStream ?? this.aiStream,
       gender: gender ?? this.gender,
       menstruationCycle: menstruationCycle ?? this.menstruationCycle,
@@ -282,6 +301,9 @@ class Role {
       aiReasoningEffort: _normalizeAiReasoningEffort(
         json['ai_reasoning_effort'],
       ),
+      aiThinkingEnabled: json['ai_thinking_enabled'] as bool?,
+      aiApiFormat: json['ai_api_format'] as String?,
+      aiThinkingBudget: int.tryParse('${json['ai_thinking_budget'] ?? ''}'),
       aiStream: json['ai_stream'] is bool ? json['ai_stream'] as bool : null,
       gender: json['gender'] as String? ?? 'men',
       menstruationCycle:
@@ -353,8 +375,10 @@ class Role {
       'ai_api_key': aiApiKey,
       'ai_temperature': aiTemperature,
       if (aiTimeoutSeconds != null) 'ai_timeout_seconds': aiTimeoutSeconds,
-      if (aiReasoningEffort != null && aiReasoningEffort!.trim().isNotEmpty)
-        'ai_reasoning_effort': aiReasoningEffort,
+      'ai_reasoning_effort': aiReasoningEffort,
+      'ai_thinking_enabled': aiThinkingEnabled,
+      if (aiApiFormat != null) 'ai_api_format': aiApiFormat,
+      'ai_thinking_budget': aiThinkingBudget,
       if (aiStream != null) 'ai_stream': aiStream,
       'gender': gender,
       'menstruation_cycle': menstruationCycle,

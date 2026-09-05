@@ -29,6 +29,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _aiTemperatureController;
   int? _aiTimeoutSeconds;
   String? _aiReasoningEffort;
+  bool? _aiThinkingEnabled;
+  String? _aiApiFormat;
+  int? _aiThinkingBudget;
   bool? _aiStream;
   late TextEditingController _cycleLengthController;
   late TextEditingController _periodLengthController;
@@ -69,6 +72,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _aiApiKeyController = TextEditingController(text: widget.role.aiApiKey);
     _aiTimeoutSeconds = widget.role.aiTimeoutSeconds;
     _aiReasoningEffort = widget.role.aiReasoningEffort;
+    _aiThinkingEnabled = widget.role.aiThinkingEnabled;
+    _aiApiFormat = widget.role.aiApiFormat;
+    _aiThinkingBudget = widget.role.aiThinkingBudget;
     _aiStream = widget.role.aiStream;
     final savedProfileId = SettingsService.instance
         .selectedModelProfileIdForRole(widget.role.id);
@@ -1058,6 +1064,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _aiApiKeyController.text = profile.apiKey;
     _aiTimeoutSeconds = profile.timeoutSeconds;
     _aiReasoningEffort = profile.reasoningEffort;
+    _aiThinkingEnabled = profile.thinkingEnabled;
+    _aiApiFormat = profile.apiFormat;
+    _aiThinkingBudget = profile.thinkingBudget;
     _aiStream = profile.stream;
     _isApplyingModelProfile = false;
     setState(() => _selectedModelProfileId = profile.id);
@@ -1211,6 +1220,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       aiTemperature: parsedAiTemperature,
       aiTimeoutSeconds: _aiTimeoutSeconds,
       aiReasoningEffort: _aiReasoningEffort,
+      aiThinkingEnabled: _aiThinkingEnabled,
+      aiApiFormat: _aiApiFormat,
+      aiThinkingBudget: _aiThinkingBudget,
+      clearThinkingOverrides: true,
       aiStream: _aiStream,
       gender: _gender,
       menstruationCycle: {
