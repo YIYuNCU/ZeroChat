@@ -1309,6 +1309,7 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
   late final TextEditingController _timeout;
   late final TextEditingController _reasoningEffort;
   bool _stream = false;
+  bool _thinkingEnabled = true;
   List<String> _models = [];
   bool _fetching = false;
   bool _testing = false;
@@ -1352,6 +1353,7 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
       text: settings.chatReasoningEffort,
     );
     _stream = settings.chatStream;
+    _thinkingEnabled = settings.thinkingEnabled;
   }
 
   @override
@@ -1472,6 +1474,7 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
             apiFormat: _format,
             timeoutSeconds: int.tryParse(_timeout.text.trim()),
             reasoningEffort: _reasoningEffort.text.trim(),
+            thinkingEnabled: _thinkingEnabled,
             stream: _stream,
           );
         case ModelSettingsKind.intent:
@@ -1634,6 +1637,11 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
                   title: const Text('使用流式传输'),
                   value: _stream,
                   onChanged: (value) => setState(() => _stream = value),
+                ),
+                SwitchListTile(
+                  title: const Text('启用模型思考'),
+                  value: _thinkingEnabled,
+                  onChanged: (value) => setState(() => _thinkingEnabled = value),
                 ),
               ],
               const Divider(height: 1),

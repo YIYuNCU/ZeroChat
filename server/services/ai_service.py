@@ -287,6 +287,11 @@ def _is_gemini_model(model: Optional[str]) -> bool:
     return "gemini" in str(model or "").lower()
 
 
+def _is_thinking_quota_provider(api_url: Optional[str]) -> bool:
+    host = (urlsplit(str(api_url or "")).hostname or "").lower()
+    return "siliconflow" in host or "dashscope" in host or "aliyuncs" in host
+
+
 def _is_meta_key_line(line_text: str) -> bool:
     """Check if line is a structured metadata field."""
     stripped = line_text.strip().lower()
@@ -498,8 +503,7 @@ def _build_deepseek_chat_request(
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """Build a DeepSeek-compatible request, including its thinking extension."""
     payload = _build_base_chat_payload(messages, model, temperature, max_tokens, tools)
-    if not settings_service.load_settings().get("thinking_enabled", False):
-        payload["thinking"] = {"type": "disabled"}
+    payload["thinking"] = {"type": "enabled" if settings_service.load_settings().get("thinking_enabled", True) else "disabled"}
     return payload, {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
 
@@ -646,8 +650,22 @@ async def _post_chat(
             tools,
             api_format,
         )
-        if reasoning_effort:
-            payload["reasoning_effort"] = reasoning_effort
+        thinking_enabled = bool(settings_service.load_settings().get("thinking_enabled", True))
+        if reasoning_effort and thinking_enabled and not native_gemini:
+            if _is_thinking_quota_provider(api_url):
+                # SiliconFlow and DashScope use an integer thinking quota.
+                try:
+                    payload["thinking_budget"] = max(1, int(reasoning_effort))
+                except ValueError:
+                    payload["enable_thinking"] = True
+            else:
+                payload["reasoning_effort"] = reasoning_effort
+        elif not thinking_enabled and not native_gemini:
+            if _is_thinking_quota_provider(api_url):
+                payload["enable_thinking"] = False
+            # DeepSeek is handled below; Grok/OpenAI use absence of the field.
+        if _is_deepseek_model(model) and not native_gemini:
+            payload["thinking"] = {"type": "enabled" if thinking_enabled else "disabled"}
         if stream and not native_gemini:
             payload["stream"] = True
         client = _get_http_client()

@@ -37,6 +37,7 @@ def get_default_settings() -> Dict[str, Any]:
         "ai_api_format": "auto",
         "ai_timeout_seconds": 60,
         "ai_reasoning_effort": "",
+        "thinking_enabled": True,
         "ai_stream": False,
         "intent_enabled": False,
         "intent_api_url": "",

@@ -50,6 +50,7 @@ class SettingsService extends ChangeNotifier {
   String _chatApiFormat = 'auto';
   int _chatTimeoutSeconds = 60;
   String _chatReasoningEffort = '';
+  bool _thinkingEnabled = true;
   bool _chatStream = false;
   List<ModelApiProfile> _modelProfiles = [];
   Map<String, String> _roleModelProfileSelections = {};
@@ -103,6 +104,7 @@ class SettingsService extends ChangeNotifier {
   String get chatApiFormat => _chatApiFormat;
   int get chatTimeoutSeconds => _chatTimeoutSeconds;
   String get chatReasoningEffort => _chatReasoningEffort;
+  bool get thinkingEnabled => _thinkingEnabled;
   bool get chatStream => _chatStream;
   List<AiModelProfile> get modelProfiles => List.unmodifiable(
     _modelProfiles.where(
@@ -193,6 +195,7 @@ class SettingsService extends ChangeNotifier {
     );
     _chatReasoningEffort =
         StorageService.getString('chat_reasoning_effort') ?? '';
+    _thinkingEnabled = StorageService.getBool('thinking_enabled') ?? true;
     _chatStream = StorageService.getBool('chat_stream') ?? false;
     await _loadModelProfiles();
     _loadRoleModelProfileSelections();
@@ -363,6 +366,7 @@ class SettingsService extends ChangeNotifier {
     String? apiFormat,
     int? timeoutSeconds,
     String? reasoningEffort,
+    bool? thinkingEnabled,
     bool? stream,
   }) async {
     _chatApiUrl = url;
@@ -373,6 +377,7 @@ class SettingsService extends ChangeNotifier {
       _chatTimeoutSeconds = _normalizeTimeout(timeoutSeconds);
     }
     if (reasoningEffort != null) _chatReasoningEffort = reasoningEffort.trim();
+    if (thinkingEnabled != null) _thinkingEnabled = thinkingEnabled;
     if (stream != null) _chatStream = stream;
     await StorageService.setString('chat_api_url', url);
     await SecureStorageService.setString('chat_api_key', key);
@@ -383,6 +388,7 @@ class SettingsService extends ChangeNotifier {
       'chat_reasoning_effort',
       _chatReasoningEffort,
     );
+    await StorageService.setBool('thinking_enabled', _thinkingEnabled);
     await StorageService.setBool('chat_stream', _chatStream);
     notifyListeners();
   }
@@ -688,6 +694,7 @@ class SettingsService extends ChangeNotifier {
             'ai_api_format': _chatApiFormat,
             'ai_timeout_seconds': _chatTimeoutSeconds,
             'ai_reasoning_effort': _chatReasoningEffort,
+            'thinking_enabled': _thinkingEnabled,
             'ai_stream': _chatStream,
             'intent_enabled': _intentEnabled,
             'intent_api_url': _intentApiUrl,
@@ -749,6 +756,9 @@ class SettingsService extends ChangeNotifier {
       final chatReasoningEffort =
           (server['ai_reasoning_effort']?.toString() ?? _chatReasoningEffort)
               .trim();
+      final thinkingEnabled = server['thinking_enabled'] is bool
+          ? server['thinking_enabled'] as bool
+          : _thinkingEnabled;
       final chatStream = server['ai_stream'] is bool
           ? server['ai_stream'] as bool
           : _chatStream;
@@ -810,6 +820,7 @@ class SettingsService extends ChangeNotifier {
         apiFormat: chatApiFormat,
         timeoutSeconds: chatTimeoutSeconds,
         reasoningEffort: chatReasoningEffort,
+        thinkingEnabled: thinkingEnabled,
         stream: chatStream,
       );
       await updateIntentApi(
