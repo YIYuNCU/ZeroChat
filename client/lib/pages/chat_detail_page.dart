@@ -710,17 +710,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                     // list has been laid out, so opening a chat lands at the
                     // newest message even when loading is asynchronous.
                     if (_initialScrollPending && !_initialScrollScheduled) {
-                      _initialScrollScheduled = true;
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (!mounted) return;
-                        if (!_scrollController.hasClients) {
-                          _initialScrollScheduled = false;
-                          return;
-                        }
-                        _scrollToBottom(animate: false);
-                        _initialScrollPending = false;
-                        _initialScrollScheduled = false;
-                      });
+                      _scheduleInitialScroll();
                     }
 
                     // Defer network-backed repairs until after this frame.
@@ -1040,6 +1030,21 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       return true;
     }
     return RoleService.getRoleById(message.senderId)?.showNoReply ?? false;
+  }
+
+  void _scheduleInitialScroll([int remainingFrames = 4]) {
+    if (!mounted || !_initialScrollPending || _initialScrollScheduled) return;
+    _initialScrollScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initialScrollScheduled = false;
+      if (!mounted || !_initialScrollPending) return;
+      if (_scrollController.hasClients) _scrollToBottom(animate: false);
+      if (remainingFrames > 1) {
+        _scheduleInitialScroll(remainingFrames - 1);
+      } else {
+        _initialScrollPending = false;
+      }
+    });
   }
 
   void _schedulePlaceholderRepair(List<Message> visibleMessages) {
