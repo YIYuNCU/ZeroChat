@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 from services.memory_service import (
     _core_memory_result_is_valid,
-    _core_memory_vector_facts,
     _format_core_memory_facts,
     _parse_core_memory_facts,
 )
@@ -17,7 +16,7 @@ class CoreMemoryParsingTests(unittest.TestCase):
         facts = _parse_core_memory_facts("[preference][high] tea; [goal][low] travel")
         self.assertEqual([item["fact"] for item in facts], ["tea", "travel"])
         self.assertEqual(facts[0]["confidence"], "high")
-        self.assertEqual(_core_memory_vector_facts(_format_core_memory_facts(facts)), ["tea", "travel"])
+        self.assertEqual(_format_core_memory_facts(facts), "[preference][high] tea\n[goal][low] travel")
 
     def test_valid_empty_json_allows_forgetting_everything(self):
         self.assertEqual(_parse_core_memory_facts("[]"), [])

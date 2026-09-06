@@ -429,8 +429,9 @@ async def execute_search_memory(role_data: Dict, query: str) -> str:
             source = r.get("source", "chat")
             occurred_at = r.get("timestamp") or "未知"
             recorded_at = r.get("created_at") or "未知"
+            time_label = "事件/参考时间" if source == "memory_summary" else "发生时间"
             lines.append(
-                f"- {text[:200]}（发生时间:{occurred_at}, "
+                f"- {text[:200]}（{time_label}:{occurred_at}, "
                 f"记录时间:{recorded_at}, 来源:{source}, 相关度:{score:.2f}）"
             )
         return "找到以下相关记忆：\n" + "\n".join(lines)

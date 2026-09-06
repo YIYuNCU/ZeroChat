@@ -15,7 +15,7 @@ import uuid
 import re
 
 from core.utils import ensure_direct_child_path, is_tool_role_id
-from services.vector_memory import VectorMemoryStore, embed_and_store, _extract_semantic_text
+from services.vector_memory import VectorMemoryStore, _extract_semantic_text
 from services.settings_service import get_thinking_config
 
 logger = logging.getLogger(__name__)
@@ -26,10 +26,10 @@ DEFAULT_MAX_CONTEXT_ROUNDS = 60
 DEFAULT_MAX_CONTEXT_LENGTH = 12000
 CORE_MEMORY_MAX_ITEMS = 10
 CORE_MEMORY_MAX_ITEM_LENGTH = 240
-CORE_MEMORY_VECTOR_SOURCE = "core_summary"
 CORE_MEMORY_SUMMARY_WORKER_ID = "1000000000000"
 _CORE_MEMORY_LOCKS: Dict[str, asyncio.Lock] = {}
 _CORE_MEMORY_LOCKS_GUARD = threading.Lock()
+_CHAT_SUMMARY_LOCKS: Dict[tuple, asyncio.Lock] = {}
 
 
 def _role_dir(role_id: str) -> Path:
@@ -266,6 +266,8 @@ def _parse_core_memory_facts(raw: Any) -> List[Dict[str, str]]:
         else:
             return []
     except (TypeError, ValueError, json.JSONDecodeError):
+        if text.startswith(("{", "[")) and not re.match(r"^\[[^\]]+\]\[[^\]]+\]\s*\S", text):
+            return []
         # Backward-compatible fallback for legacy line/semicolon summaries.
         if text.casefold() in {"已有核心记忆", "none", "noneed"}:
             return []
@@ -310,9 +312,16 @@ def _core_memory_result_is_valid(raw: Any) -> bool:
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
-            parsed = parsed.get("facts", parsed.get("items", []))
-        return isinstance(parsed, list)
+            parsed = parsed.get("facts", parsed.get("items"))
+        return isinstance(parsed, list) and all(
+            (isinstance(item, str) and bool(item.strip()))
+            or (isinstance(item, dict) and isinstance(item.get("fact"), str)
+                and bool(item["fact"].strip()))
+            for item in parsed
+        )
     except (TypeError, ValueError, json.JSONDecodeError):
+        if text.startswith(("{", "[")) and not re.match(r"^\[[^\]]+\]\[[^\]]+\]\s*\S", text):
+            return False
         return bool(text) and text.casefold() not in {"已有核心记忆", "none", "noneed"}
 
 
@@ -320,10 +329,6 @@ def _format_core_memory_facts(facts: List[Dict[str, str]]) -> str:
     return "\n".join(
         f"[{item['category']}][{item['confidence']}] {item['fact']}" for item in facts
     )
-
-
-def _core_memory_vector_facts(core_text: str) -> List[str]:
-    return [item["fact"] for item in _parse_core_memory_facts(core_text)]
 
 
 def _get_core_memory_lock(role_id: str) -> asyncio.Lock:
@@ -1064,7 +1069,127 @@ def append_short_term(
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端仅保证 request_id 在 DB 记录中可用。
 
+def _summary_message_text(content: str) -> str:
+    """Unwrap stored message envelopes without truncating multiline dialogue."""
+    text = str(content or "")
+    for _ in range(3):
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            break
+        if not isinstance(payload, dict) or not isinstance(payload.get("message"), str):
+            break
+        text = payload["message"]
+    return text.strip()
+
+
+def _parse_chat_summary(raw: str, discussed_at: str) -> tuple[str, List[Dict[str, Any]]]:
+    if not isinstance(raw, str):
+        return "", []
+    text = raw.strip()
+    structured_output = text.startswith(("{", "[", "```"))
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text,
+                      flags=re.IGNORECASE | re.DOTALL).strip()
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        if structured_output:
+            logger.warning("Invalid JSON from event summary model; preserving existing context")
+            return "", []
+        # Older providers may still return the previous plain-text summary format.
+        return text, []
+    if not isinstance(payload, dict):
+        return "", []
+    summary = payload.get("summary", "")
+    summary = summary.strip() if isinstance(summary, str) else ""
+    events = payload.get("events", [])
+    if not isinstance(events, list):
+        return summary, []
+    items = []
+    seen = set()
+    statuses = {"occurred": "已发生", "ongoing": "进行中", "upcoming": "即将发生"}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        content = event.get("event")
+        status = event.get("status")
+        if (not isinstance(content, str) or not content.strip()
+                or not isinstance(status, str) or status not in statuses):
+            continue
+        content = re.sub(r"\s+", " ", content).strip()[:500]
+        event_time = event.get("event_time")
+        try:
+            if not isinstance(event_time, str):
+                raise ValueError("missing event time")
+            datetime.fromisoformat(event_time.replace("Z", "+00:00"))
+        except ValueError:
+            event_time = None
+        key = (content.casefold(), status, event_time)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({
+            "text": f"[{statuses[status]}] {content}（事件时间：{event_time or '未明确'}；提及时间：{discussed_at}）",
+            "timestamp": event_time or discussed_at,
+            "role": "assistant",
+            "source": "memory_summary",
+        })
+        if len(items) >= 10:
+            break
+    if not summary:
+        summary = "\n".join(item["text"] for item in items)
+    return summary, items
+
+
+async def _store_summary_events(role_id: str, items: List[Dict[str, Any]]) -> None:
+    from services.ai_service import generate_embedding
+
+    for item in items:
+        try:
+            result = await generate_embedding(item["text"])
+            if not result.get("success") or not result.get("embedding"):
+                logger.warning("Event memory embedding failed for role %s", role_id)
+                continue
+            await _run_db(
+                role_id, VectorMemoryStore(role_id).store,
+                item["text"], result["embedding"], item["role"],
+                item["timestamp"], item["source"],
+            )
+        except Exception:
+            logger.warning("Event memory storage failed for role %s", role_id, exc_info=True)
+
+
+def _chat_summary_scope(origin: str, group_id: Optional[str], sender_id: Optional[str]) -> str:
+    if origin == "onebot_group" and group_id:
+        return f"group:{group_id}"
+    if origin == "onebot_private" and sender_id:
+        return f"private:{sender_id}"
+    return "default"
+
+
 async def trigger_chat_summary(
+    worker_id: str,
+    role_id: str,
+    conv_origin: str = "system",
+    conv_group_id: Optional[str] = None,
+    conv_sender_id: Optional[str] = None,
+    max_context_rounds: Optional[int] = None,
+    max_context_length: Optional[int] = None,
+) -> Optional[str]:
+    key = (role_id, _chat_summary_scope(conv_origin, conv_group_id, conv_sender_id))
+    with _CORE_MEMORY_LOCKS_GUARD:
+        lock = _CHAT_SUMMARY_LOCKS.setdefault(key, asyncio.Lock())
+    if lock.locked():
+        return None
+    async with lock:
+        return await _trigger_chat_summary(
+            worker_id, role_id, conv_origin, conv_group_id, conv_sender_id,
+            max_context_rounds, max_context_length,
+        )
+
+
+async def _trigger_chat_summary(
     worker_id: str,
     role_id: str,
     conv_origin: str = "system",
@@ -1082,7 +1207,7 @@ async def trigger_chat_summary(
         conv_sender_id: 发送者 ID（onebot_private 时使用）
 
     Returns:
-        新的核心记忆内容，或 None（如果不需要总结）
+        新的上下文摘要，或 None（如果总结失败或没有新内容）
     """
     # 导入 AI 服务
     from services.ai_service import call_ai_direct
@@ -1100,19 +1225,39 @@ async def trigger_chat_summary(
             summary_where = "WHERE origin IN ('zerochat', 'proactive', 'system') OR (origin LIKE 'onebot%' AND sender = 'user')"
             summary_params = []
 
+        checkpoint_key = f"event_summary_last_id:{_chat_summary_scope(conv_origin, conv_group_id, conv_sender_id)}"
         with _get_connection(role_id) as conn:
-            count = conn.execute(f"SELECT COUNT(*) FROM short_term {summary_where}", summary_params).fetchone()[0]
-            offset = max(0, count - effective_limit)
+            scoped_query = f"SELECT role, content, timestamp, sender, id FROM short_term {summary_where}"
+            previous = conn.execute(
+                f"SELECT content, id FROM ({scoped_query}) WHERE sender = 'memory_summary' ORDER BY id DESC LIMIT 1",
+                summary_params,
+            ).fetchone()
+            checkpoint = _get_meta(conn, checkpoint_key)
+            try:
+                last_id = int(checkpoint) if checkpoint is not None else (previous[1] if previous else 0)
+            except (TypeError, ValueError):
+                last_id = 0
             rows = conn.execute(
-                f"SELECT content FROM short_term {summary_where} ORDER BY id ASC LIMIT ? OFFSET ?",
-                summary_params + [effective_limit, offset]
+                f"SELECT * FROM ({scoped_query}) ORDER BY id DESC LIMIT ?",
+                summary_params + [effective_limit],
             ).fetchall()
+        rows = [row for row in reversed(rows)
+                if row[3] not in {"system", "memory_summary"}
+                and row[4] > last_id]
         rows = _tail_within_limits(rows, effective_limit, effective_context_length)
-        conversation = "\n".join(
-            str((row[1] if len(row) > 1 else row[0]) or "") for row in rows
+        if not rows:
+            return None
+        discussed_at = next((row[2] for row in reversed(rows) if row[2]), datetime.now().isoformat())
+        conversation = [
+            {"time": row[2], "speaker": row[3] or row[0],
+             "message": _summary_message_text(row[1])}
+            for row in rows
+        ]
+        prompt = json.dumps(
+            {"previous_summary": previous[0] if previous else "",
+             "current_conversation": conversation},
+            ensure_ascii=False,
         )
-
-        prompt = f"最近对话：{conversation}"
         from routers.roles import load_role
         worker_data = load_role(worker_id)
         system_prompt = worker_data.get("system_prompt", "")
@@ -1125,13 +1270,20 @@ async def trigger_chat_summary(
     try:
         result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1), api_format=worker_data.get("ai_api_format"), **get_thinking_config(role_data=worker_data))
         if result["success"] and result["content"]:
-            new_memory = result["content"].strip()
+            new_memory, event_items = _parse_chat_summary(result["content"], discussed_at)
+            if not new_memory:
+                return None
             append_short_term(role_id, "user", "system:触发记忆总结",
                               origin=conv_origin, sender="system",
                               group_id=conv_group_id, sender_id=conv_sender_id)
             append_short_term(role_id, "assistant", f"记忆总结结果：{new_memory}",
                               origin=conv_origin, sender="memory_summary",
                               group_id=conv_group_id, sender_id=conv_sender_id)
+            # Track the input snapshot, not the later summary row: messages may
+            # arrive while the model is running and still need the next summary.
+            with _get_connection(role_id) as conn:
+                _set_meta(conn, checkpoint_key, str(rows[-1][4]))
+            await _store_summary_events(role_id, event_items)
             return new_memory
         else:
             logger.warning("记忆总结失败：%s", result)
@@ -1226,12 +1378,13 @@ async def get_context_messages(
             total_local = len(all_rows)
             if total_local == 0:
                 _set_meta(conn, virtual_start_key, "0")
-                return 0, 0, False
+                return 0, 0, False, 0
             try:
                 vstart = int(_get_meta(conn, virtual_start_key, "0"))
             except (TypeError, ValueError):
                 vstart = 0
             vstart = min(max(vstart, 0), total_local)
+            previous_start = vstart
             pending_rows = all_rows[vstart:]
             pending_length = sum(_content_length(row[0]) for row in pending_rows)
             trigger = False
@@ -1252,14 +1405,14 @@ async def get_context_messages(
                     retained += 1
                     retained_length += row_length
                 vstart = total_local - retained
-                _set_meta(conn, virtual_start_key, str(vstart))
                 trigger = True
-            return total_local, vstart, trigger
+            return total_local, vstart, trigger, previous_start
 
-    total, virtual_start, need_trigger_summary = await _run_db(role_id, _compute_virtual_start)
+    total, virtual_start, need_trigger_summary, previous_start = await _run_db(role_id, _compute_virtual_start)
     if total == 0:
         return []
 
+    summary_failed = False
     if need_trigger_summary:
         conv_origin = "system"
         conv_group_id = None
@@ -1280,10 +1433,23 @@ async def get_context_messages(
         )
         if not content:
             logger.error(f"触发对话总结失败，无法获取新的上下文消息")
+            virtual_start = previous_start
+            summary_failed = True
+        else:
+            with _get_connection(role_id) as conn:
+                _set_meta(conn, virtual_start_key, str(virtual_start))
 
     query_offset = virtual_start
     def _fetch_context():
         with _get_connection(role_id) as conn:
+            if summary_failed:
+                latest_rows = conn.execute(
+                    f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id DESC LIMIT ?",
+                    where_params + [effective_limit],
+                ).fetchall()
+                return _tail_within_limits(
+                    list(reversed(latest_rows)), effective_limit, effective_context_length,
+                )
             query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?"
             candidate_rows = conn.execute(
                 query_sql, where_params + [effective_limit, query_offset]
@@ -1450,7 +1616,7 @@ async def _trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str
         
         # 构建总结提示
         summary_rows = [
-            (m.get("role"), _extract_semantic_text(m.get("content", "")), m.get("timestamp"))
+            (m.get("role"), _summary_message_text(m.get("content", "")), m.get("timestamp"))
             for m in short_term
             if m.get("sender") not in {"system", "memory_summary"}
         ]
@@ -1460,7 +1626,6 @@ async def _trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str
             get_effective_context_length(role_data),
         )
         conversation = "\n".join(str(row[1]) for row in summary_rows)
-        summary_timestamp = next((row[2] for row in reversed(summary_rows) if row[2]), None)
         prompt = f"""
     当前已有的核心记忆：
     {current_core if current_core else '（暂无）'}
@@ -1492,31 +1657,6 @@ async def _trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str
                 logger.warning("Core memory summary was empty or invalid; preserving existing memory")
                 return None
             new_core = _format_core_memory_facts(parsed_facts)
-            # Prepare all embeddings before mutating either store.  The summary
-            # lock then covers the complete replacement, preventing stale
-            # background tasks from reintroducing an older summary.
-            if not is_tool_role_id(role_id):
-                from services.ai_service import generate_embedding
-                vector_items = []
-                for fact in _core_memory_vector_facts(new_core):
-                    embedding_result = await generate_embedding(fact)
-                    if not embedding_result.get("success") or not embedding_result.get("embedding"):
-                        logger.warning("Core memory embedding failed; preserving previous summary")
-                        return None
-                    vector_items.append({
-                        "text": fact,
-                        "embedding": embedding_result["embedding"],
-                        "role": "assistant",
-                        "timestamp": summary_timestamp,
-                        "source": CORE_MEMORY_VECTOR_SOURCE,
-                    })
-                store = VectorMemoryStore(role_id)
-                await _run_db(
-                    role_id,
-                    store.replace_source_batch,
-                    CORE_MEMORY_VECTOR_SOURCE,
-                    vector_items,
-                )
             update_core_memory(role_id, new_core)
             return new_core
         else:

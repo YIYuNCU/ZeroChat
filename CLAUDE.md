@@ -205,11 +205,11 @@ server/
 
 ### Vector Memory Behavior
 
-- **Auto-embedding**: Every user message (≥10 chars) is asynchronously embedded and stored in the SQLite `vector_embeddings` table on the backend
-- **Semantic retrieval**: During chat, `get_context_messages()` also queries vector memory for semantically similar past conversations (top-3, min similarity 0.35), injected as system context
-- **Summary storage**: AI-generated memory summaries (`trigger_chat_summary`, `trigger_memory_summary`, `sequential_memory_generation`) are also embedded and stored
-- **Sources**: `chat` (user messages), `memory_summary` (chat summaries), `sequential` (bridging memories), `core_summary` (core memory updates)
-- **Backend-only**: Vector memory is managed entirely on the backend; the frontend only sees the count and can trigger a clear
+- **Core memory**: Included directly in chat context. `trigger_memory_summary` updates the core text without requesting embeddings or writing vectors. Existing `core_summary` records are retained for compatibility.
+- **Event summaries**: `trigger_chat_summary` produces a context summary and up to 10 core events in one model call. Events are appended as `memory_summary` vectors, covering occurred, ongoing, and upcoming events from new messages in the current channel; prior summaries are supplied separately.
+- **Event times**: The model resolves relative dates against message timestamps. Event text includes its status, event time (or explicitly unknown), and discussion time. The vector timestamp uses the event time when known, otherwise the discussion time; `created_at` is the storage time.
+- **Semantic retrieval**: The AI calls `search_memory` to retrieve the top 3 matches with minimum similarity 0.35. Raw chat messages are not automatically embedded. The `write_memory` tool can also store vectors with source `ai_tool`.
+- **Management**: The frontend can list, edit, delete, and clear vector memories. Ordinary vector writes retain the latest 2000 records per role.
 
 ### Settings Config
 
