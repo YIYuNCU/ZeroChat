@@ -28,6 +28,14 @@ def _is_google_gemini_url(api_url: str) -> bool:
         return False
 
 
+def _is_zhipu_url(api_url: str) -> bool:
+    try:
+        host = (urlsplit(str(api_url or "")).hostname or "").lower()
+    except (TypeError, ValueError):
+        return False
+    return host in {"open.bigmodel.cn", "api.z.ai"} or host.endswith(".bigmodel.cn")
+
+
 def _with_gemini_api_key(api_url: str, api_key: str) -> str:
     parsed = urlsplit(api_url)
     query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "key"]
@@ -79,6 +87,8 @@ def _models_request(
         path = path[:-len("/chat/completions")]
     if not path.endswith("/models"):
         if _is_google_gemini_url(value) and path.endswith("/openai"):
+            path = f"{path}/models"
+        elif (_is_zhipu_url(value) or normalized_format == "zhipu_compatible") and (path.lower().endswith("/v4") or "/api/paas/" in path.lower()):
             path = f"{path}/models"
         else:
             path = f"{path}/models" if path.endswith("/v1") else f"{path}/v1/models"
@@ -170,7 +180,7 @@ async def update_settings(update: SettingsUpdate):
         updates["ai_model"] = update.ai_model
     if update.ai_api_format is not None:
         value = update.ai_api_format.strip().lower()
-        updates["ai_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+        updates["ai_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible", "zhipu_compatible"} else "auto"
     if update.ai_timeout_seconds is not None:
         updates["ai_timeout_seconds"] = max(1, min(3600, update.ai_timeout_seconds))
     if update.ai_reasoning_effort is not None:
@@ -195,7 +205,7 @@ async def update_settings(update: SettingsUpdate):
         updates["intent_model"] = update.intent_model
     if update.intent_api_format is not None:
         value = update.intent_api_format.strip().lower()
-        updates["intent_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+        updates["intent_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible", "zhipu_compatible"} else "auto"
     if update.vision_enabled is not None:
         updates["vision_enabled"] = update.vision_enabled
     if update.vision_api_url is not None:
@@ -209,7 +219,7 @@ async def update_settings(update: SettingsUpdate):
         updates["vision_mode"] = mode if mode in {"standalone", "pre_model", "tool"} else "standalone"
     if update.vision_api_format is not None:
         value = update.vision_api_format.strip().lower()
-        updates["vision_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+        updates["vision_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible", "zhipu_compatible"} else "auto"
     if update.embedding_enabled is not None:
         updates["embedding_enabled"] = update.embedding_enabled
     if update.embedding_api_url is not None:

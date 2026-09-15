@@ -175,7 +175,7 @@ def get_vision_config() -> Dict[str, Any]:
 
 def _normalize_api_format(value: Any) -> str:
     value = str(value or "auto").strip().lower()
-    return value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+    return value if value in {"auto", "gemini_native", "openai_compatible", "zhipu_compatible"} else "auto"
 
 
 def _normalize_timeout(value: Any) -> int:

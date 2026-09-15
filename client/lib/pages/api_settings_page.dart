@@ -766,6 +766,10 @@ Future<ModelApiProfile?> _showProfileEditor(
                       child: Text('OpenAI 兼容'),
                     ),
                     DropdownMenuItem(
+                      value: 'zhipu_compatible',
+                      child: Text('智谱兼容'),
+                    ),
+                    DropdownMenuItem(
                       value: 'gemini_native',
                       child: Text('Gemini 原生'),
                     ),
@@ -1104,10 +1108,14 @@ class _FormatSelector extends StatelessWidget {
               isExpanded: true,
               items: const [
                 DropdownMenuItem(value: 'auto', child: Text('自动识别')),
-                DropdownMenuItem(
-                  value: 'openai_compatible',
-                  child: Text('OpenAI 兼容'),
-                ),
+                  DropdownMenuItem(
+                      value: 'openai_compatible',
+                      child: Text('OpenAI 兼容'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'zhipu_compatible',
+                      child: Text('智谱兼容'),
+                    ),
                 DropdownMenuItem(
                   value: 'gemini_native',
                   child: Text('Gemini 原生'),
@@ -1282,6 +1290,13 @@ _buildModelsRequest(String apiUrl, String apiKey, String apiFormat) {
   path = path.replaceFirst(RegExp(r'/chat/completions$'), '');
   if (!path.endsWith('/models')) {
     path = path.endsWith('/v1') ? '$path/models' : '$path/v1/models';
+    if ((uri.host.toLowerCase() == 'open.bigmodel.cn' ||
+            uri.host.toLowerCase() == 'api.z.ai' ||
+            uri.host.toLowerCase().endsWith('.bigmodel.cn')) &&
+        (path.toLowerCase().contains('/api/paas/') ||
+            path.toLowerCase().endsWith('/v4/v1/models'))) {
+      path = path.replaceFirst(RegExp(r'/v4/v1/models$'), '/v4/models');
+    }
   }
   return (
     url: uri.replace(path: path, query: null).toString(),
@@ -1409,7 +1424,10 @@ String _chatEndpoint(String value) {
   if (!path.endsWith('/chat/completions')) {
     path = path.endsWith('/v1')
         ? '$path/chat/completions'
-        : '$path/v1/chat/completions';
+        : ((uri.host.toLowerCase() == 'open.bigmodel.cn' || uri.host.toLowerCase() == 'api.z.ai' || uri.host.toLowerCase().endsWith('.bigmodel.cn')) &&
+                (path.toLowerCase().endsWith('/v4') || path.toLowerCase().contains('/api/paas/'))
+            ? '$path/chat/completions'
+            : '$path/v1/chat/completions');
   }
   return uri.replace(path: path, query: '', fragment: '').toString();
 }

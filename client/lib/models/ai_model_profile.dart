@@ -1,6 +1,6 @@
 String normalizeApiFormat(Object? value) {
   final format = value?.toString().trim().toLowerCase() ?? 'auto';
-  return const {'auto', 'gemini_native', 'openai_compatible'}.contains(format)
+  return const {'auto', 'gemini_native', 'openai_compatible', 'zhipu_compatible'}.contains(format)
       ? format
       : 'auto';
 }
@@ -194,6 +194,6 @@ bool supportsThinkingBudget(String apiUrl, String apiFormat, String model) {
       host.contains('aliyuncs') ||
       apiFormat == 'gemini_native' ||
       (host == 'generativelanguage.googleapis.com' &&
-          apiFormat != 'openai_compatible' &&
+          apiFormat != 'openai_compatible' && apiFormat != 'zhipu_compatible' &&
           !(uri?.path.contains('/openai') ?? false));
 }

@@ -431,7 +431,7 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
         updates["ai_model"] = update.ai_model
     if update.ai_api_format is not None:
         value = str(update.ai_api_format).strip().lower()
-        updates["ai_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+        updates["ai_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible", "zhipu_compatible"} else "auto"
     if update.ai_timeout_seconds is not None:
         updates["ai_timeout_seconds"] = max(1, min(3600, update.ai_timeout_seconds))
     if update.ai_reasoning_effort is not None:
@@ -456,7 +456,7 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
         updates["intent_model"] = update.intent_model
     if update.intent_api_format is not None:
         value = str(update.intent_api_format).strip().lower()
-        updates["intent_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+        updates["intent_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible", "zhipu_compatible"} else "auto"
     if update.vision_enabled is not None:
         updates["vision_enabled"] = update.vision_enabled
     if update.vision_api_url is not None:
@@ -470,7 +470,7 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
         updates["vision_mode"] = mode if mode in {"standalone", "pre_model", "tool"} else "standalone"
     if update.vision_api_format is not None:
         value = str(update.vision_api_format).strip().lower()
-        updates["vision_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible"} else "auto"
+        updates["vision_api_format"] = value if value in {"auto", "gemini_native", "openai_compatible", "zhipu_compatible"} else "auto"
     if update.embedding_enabled is not None:
         updates["embedding_enabled"] = update.embedding_enabled
     if update.embedding_api_url is not None:

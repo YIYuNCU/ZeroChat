@@ -1177,7 +1177,13 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       var modelsUrl = url.replaceFirst(RegExp(r'/chat/completions/?$'), '');
       modelsUrl = modelsUrl.replaceFirst(RegExp(r'/models/?$'), '');
       modelsUrl = modelsUrl.endsWith('/') ? modelsUrl : '$modelsUrl/';
-      if (!modelsUrl.endsWith('v1/')) modelsUrl += 'v1/';
+      final parsedModelsUrl = Uri.parse(modelsUrl);
+      final zhipu = parsedModelsUrl.host.toLowerCase() == 'open.bigmodel.cn' ||
+          parsedModelsUrl.host.toLowerCase() == 'api.z.ai' ||
+          parsedModelsUrl.host.toLowerCase().endsWith('.bigmodel.cn');
+      if (!modelsUrl.endsWith('v1/') && !(zhipu && modelsUrl.toLowerCase().contains('/api/paas/v4/'))) {
+        modelsUrl += 'v1/';
+      }
       modelsUrl += 'models';
       final response = await SecureBackendClient.getRaw(
         modelsUrl,

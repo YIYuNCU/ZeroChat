@@ -132,7 +132,16 @@ def _is_google_gemini_endpoint(api_url: Optional[str]) -> bool:
         return False
 
 
-_API_FORMATS = {"auto", "gemini_native", "openai_compatible"}
+def _is_zhipu_endpoint(api_url: Optional[str]) -> bool:
+    """智谱开放平台（BigModel/Z.ai）的 OpenAI 兼容端点。"""
+    try:
+        host = (urlsplit(str(api_url or "")).hostname or "").lower()
+    except (TypeError, ValueError):
+        return False
+    return host in {"open.bigmodel.cn", "api.z.ai"} or host.endswith(".bigmodel.cn")
+
+
+_API_FORMATS = {"auto", "gemini_native", "openai_compatible", "zhipu_compatible"}
 
 
 def _normalize_api_format(value: Optional[str]) -> str:
@@ -147,7 +156,7 @@ def _uses_native_gemini(
     api_format = _normalize_api_format(api_format)
     if api_format == "gemini_native":
         return True
-    if api_format == "openai_compatible" or not _is_google_gemini_endpoint(api_url):
+    if api_format in {"openai_compatible", "zhipu_compatible"} or not _is_google_gemini_endpoint(api_url):
         return False
     return _is_gemini_model(model) and "/openai" not in urlsplit(str(api_url or "")).path.lower()
 
@@ -194,6 +203,11 @@ def _normalize_api_url(
     value = str(api_url or "").strip().rstrip("/")
     if value.endswith("/chat/completions"):
         return value
+    # 智谱 API uses /api/paas/v4 as its compatibility root (without /v1).
+    if _is_zhipu_endpoint(value) or _normalize_api_format(api_format) == "zhipu_compatible":
+        path = urlsplit(value).path.rstrip("/")
+        if path.lower().endswith("/v4") or "/api/paas/" in path.lower():
+            return f"{value}/chat/completions"
     # Gemini's compatibility endpoint is rooted at /v1beta/openai, not /v1.
     if _is_google_gemini_endpoint(value):
         if _normalize_api_format(api_format) == "openai_compatible" and "/openai" not in urlsplit(value).path.lower():
@@ -285,6 +299,11 @@ def _uses_conservative_tool_prompt_policy(model: Optional[str]) -> bool:
 def _is_gemini_model(model: Optional[str]) -> bool:
     """Identify Gemini models served through the OpenAI-compatible endpoint."""
     return "gemini" in str(model or "").lower()
+
+
+def _is_zhipu_model(model: Optional[str], api_url: Optional[str] = None) -> bool:
+    text = str(model or "").lower()
+    return "glm-" in text or _is_zhipu_endpoint(api_url)
 
 
 def _is_thinking_quota_provider(api_url: Optional[str]) -> bool:
@@ -529,6 +548,16 @@ def _build_mimo_chat_request(
     }
 
 
+def _build_zhipu_chat_request(
+    messages: List[Dict[str, Any]], api_key: str, model: str,
+    temperature: float, max_tokens: int, tools: Optional[List[Dict]],
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Build 智谱's OpenAI-compatible request."""
+    return _build_base_chat_payload(messages, model, temperature, max_tokens, tools), {
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+    }
+
+
 def _build_generic_chat_request(
     messages: List[Dict[str, Any]], api_key: str, model: str,
     temperature: float, max_tokens: int, tools: Optional[List[Dict]],
@@ -546,12 +575,14 @@ def _build_chat_request(
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     if _uses_native_gemini(model, api_url, api_format):
         return _build_native_gemini_request(messages, api_key, model, temperature, max_tokens, tools)
-    if _normalize_api_format(api_format) == "openai_compatible":
+    if _normalize_api_format(api_format) in {"openai_compatible", "zhipu_compatible"}:
         return _build_generic_chat_request(messages, api_key, model, temperature, max_tokens, tools)
     if _is_deepseek_model(model):
         return _build_deepseek_chat_request(messages, api_key, model, temperature, max_tokens, tools)
     if _is_mimo_provider(model, api_url):
         return _build_mimo_chat_request(messages, api_key, model, temperature, max_tokens, tools)
+    if _is_zhipu_model(model, api_url):
+        return _build_zhipu_chat_request(messages, api_key, model, temperature, max_tokens, tools)
     if _is_gemini_model(model):
         return _build_gemini_chat_request(messages, api_key, model, temperature, max_tokens, tools)
     return _build_generic_chat_request(messages, api_key, model, temperature, max_tokens, tools)
@@ -661,6 +692,8 @@ def _apply_thinking_config(
         payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
         if enabled and effort:
             payload["reasoning_effort"] = effort
+    elif _is_zhipu_model(model, api_url) and ("glm-4.5" in model.lower() or "glm-4.6" in model.lower()):
+        payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
     elif enabled and effort:
         payload["reasoning_effort"] = effort
     elif not enabled and explicit_enabled is not None and re.fullmatch(
