@@ -1166,46 +1166,57 @@ class _VisionModeSelector extends StatelessWidget {
 class _ModelRow extends StatelessWidget {
   final TextEditingController controller;
   final List<String> models;
-  const _ModelRow({required this.controller, required this.models});
+  final ValueChanged<String> onChanged;
+  const _ModelRow({
+    required this.controller,
+    required this.models,
+    required this.onChanged,
+  });
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-    child: Row(
-      children: [
-        const SizedBox(width: 82, child: Text('模型')),
-        Expanded(
-          child: models.isEmpty
-              ? TextField(
-                  controller: controller,
-                  decoration: const InputDecoration(
-                    border: InputBorder.none,
-                    hintText: '输入模型名称',
+  Widget build(BuildContext context) {
+    final current = controller.text.trim();
+    // 已配置但不在拉取列表中的模型（例如套用模型档案后）也要显示出来，
+    // 否则下拉框会退回到提示文案。
+    final options = current.isEmpty || models.contains(current)
+        ? models
+        : <String>[current, ...models];
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          const SizedBox(width: 82, child: Text('模型')),
+          Expanded(
+            child: options.isEmpty
+                ? TextField(
+                    controller: controller,
+                    decoration: const InputDecoration(
+                      border: InputBorder.none,
+                      hintText: '输入模型名称',
+                    ),
+                  )
+                : DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: options.contains(current) ? current : null,
+                      hint: const Text('选择模型'),
+                      isExpanded: true,
+                      items: options
+                          .map(
+                            (item) => DropdownMenuItem(
+                              value: item,
+                              child: Text(item, overflow: TextOverflow.ellipsis),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) onChanged(value);
+                      },
+                    ),
                   ),
-                )
-              : DropdownButtonHideUnderline(
-                  child: DropdownButton<String>(
-                    value: models.contains(controller.text)
-                        ? controller.text
-                        : null,
-                    hint: const Text('选择模型'),
-                    isExpanded: true,
-                    items: models
-                        .map(
-                          (item) => DropdownMenuItem(
-                            value: item,
-                            child: Text(item, overflow: TextOverflow.ellipsis),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (value) {
-                      if (value != null) controller.text = value;
-                    },
-                  ),
-                ),
-        ),
-      ],
-    ),
-  );
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ProfileSelector extends StatelessWidget {
@@ -1548,6 +1559,15 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
     return null;
   }
 
+  /// 选中模型后必须重建页面，否则下拉框仍显示上一个模型，
+  /// 需要其它操作（切换开关、重进页面等）才会刷新。
+  void _applyModel(String model) {
+    setState(() {
+      _model.text = model;
+      _profileId = _matchingProfile()?.id;
+    });
+  }
+
   Future<void> _fetchModels() async {
     if (_url.text.trim().isEmpty || _key.text.trim().isEmpty) {
       _showMessage(context, '请先填写 API 地址和 API Key');
@@ -1574,6 +1594,7 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
         if (models.isNotEmpty && !models.contains(_model.text)) {
           _model.text = models.first;
         }
+        _profileId = _matchingProfile()?.id;
       });
       _showMessage(context, '获取到 ${models.length} 个模型');
     } catch (error) {
@@ -1816,7 +1837,11 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
                 obscure: true,
               ),
               const Divider(height: 1),
-              _ModelRow(controller: _model, models: _models),
+              _ModelRow(
+                controller: _model,
+                models: _models,
+                onChanged: _applyModel,
+              ),
               if (widget.kind == ModelSettingsKind.chat) ...[
                 const Divider(height: 1),
                 _FieldRow(
