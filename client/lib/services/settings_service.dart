@@ -6,6 +6,7 @@ import 'secure_backend_client.dart';
 import 'secure_websocket_client.dart';
 import '../models/ai_model_profile.dart';
 import '../models/provider_quiet_rule.dart';
+import '../models/summary_config.dart';
 
 /// 全局设置服务。
 class SettingsService extends ChangeNotifier {
@@ -59,6 +60,16 @@ class SettingsService extends ChangeNotifier {
 
   // 供应商+模型级安静规则（以服务端 settings.json `quiet_rules` 为准）
   List<ProviderQuietRule> _providerQuietRules = [];
+
+  // 记忆总结（事件总结 / 核心记忆总结）不再绑定角色，各自独立配置
+  SummaryApiConfig _contextSummaryConfig = SummaryApiConfig();
+  SummaryApiConfig _coreMemorySummaryConfig = SummaryApiConfig();
+
+  // 可配置系统提示词：全局默认覆盖，按档案微调由 model profile 携带
+  Map<String, Map<String, String>> _promptOverrides = {};
+  Map<String, Map<String, Map<String, String>>> _remoteModelPromptOverrides =
+      {};
+  Map<String, ConfigurablePrompt> _promptRegistry = {};
 
   // 意图识别 API
   bool _intentEnabled = false;
@@ -145,6 +156,64 @@ class SettingsService extends ChangeNotifier {
     );
   }
 
+  /// 从服务端设置恢复两个记忆总结配置与全局提示词覆盖。
+  Future<void> _restoreSummaryAndPromptSettings(
+    Map<String, dynamic> server, {
+    required bool includeSecrets,
+  }) async {
+    await _restoreSummaryConfig(
+      SummaryFeature.context,
+      server['context_summary_config'],
+      includeSecrets: includeSecrets,
+    );
+    await _restoreSummaryConfig(
+      SummaryFeature.coreMemory,
+      server['core_memory_summary_config'],
+      includeSecrets: includeSecrets,
+    );
+
+    final rawOverrides = server['prompt_overrides'];
+    if (rawOverrides is Map) {
+      await updatePromptOverrides(normalizePromptOverrides(rawOverrides));
+    }
+    final rawModelOverrides = server['model_prompt_overrides'];
+    if (rawModelOverrides is Map) {
+      _remoteModelPromptOverrides = _normalizeModelPromptOverrides(
+        rawModelOverrides,
+      );
+      await StorageService.setJson(
+        'remote_model_prompt_overrides',
+        _remoteModelPromptOverrides,
+      );
+    }
+  }
+
+  Future<void> _restoreSummaryConfig(
+    SummaryFeature feature,
+    Object? raw, {
+    required bool includeSecrets,
+  }) async {
+    if (raw is! Map) return;
+    SummaryApiConfig stored = SummaryApiConfig.fromJson(
+      Map<String, dynamic>.from(raw),
+    );
+    final existing = summaryConfigFor(feature);
+    // 档案绑定只存在于本机：服务端存的是上一次同步派生出的地址/模型，
+    // 只要绑定的档案还在就继续沿用（并重新派生一次，跟上档案的最新改动）。
+    stored.profileId = _boundProfile(existing.profileId) == null
+        ? null
+        : existing.profileId;
+    if (!includeSecrets && stored.apiKeyMasked.isNotEmpty) {
+      // 公开同步只返回掩码，保留本地已保存的密钥。
+      stored.apiKey = existing.apiKey;
+    }
+    if (stored.apiKey.isNotEmpty) {
+      stored.apiKeyMasked = '';
+    }
+    stored = applyBoundProfile(stored);
+    await updateSummaryConfig(feature, stored);
+  }
+
   bool get chatStream => _chatStream;
   List<AiModelProfile> get modelProfiles => List.unmodifiable(
     _modelProfiles.where(
@@ -157,6 +226,149 @@ class SettingsService extends ChangeNotifier {
       );
   List<ProviderQuietRule> get providerQuietRules =>
       List.unmodifiable(_providerQuietRules);
+
+  SummaryApiConfig get contextSummaryConfig => _contextSummaryConfig;
+
+  SummaryApiConfig get coreMemorySummaryConfig => _coreMemorySummaryConfig;
+
+  SummaryApiConfig summaryConfigFor(SummaryFeature feature) =>
+      feature == SummaryFeature.context
+      ? _contextSummaryConfig
+      : _coreMemorySummaryConfig;
+
+  Map<String, Map<String, String>> get promptOverrides =>
+      Map.unmodifiable(_promptOverrides);
+
+  Map<String, ConfigurablePrompt> get promptRegistry =>
+      Map.unmodifiable(_promptRegistry);
+
+  /// 按服务端 key（`api_url|model`，均为小写）汇总各模型档案的提示词微调。
+  Map<String, Map<String, Map<String, String>>> modelPromptOverridesForSync() {
+    final result = _copyModelPromptOverrides(_remoteModelPromptOverrides);
+    for (final profile in _modelProfiles) {
+      final key = modelPromptTargetKey(profile.apiUrl, profile.model);
+      if (key.isEmpty) continue;
+      // A local profile is authoritative for its own provider/model target,
+      // including an empty override map used to clear an old customization.
+      result.remove(key);
+      if (profile.promptOverrides.isNotEmpty) {
+        result[key] = _copyPromptOverrides(profile.promptOverrides);
+      }
+    }
+    return result;
+  }
+
+  Future<void> updateContextSummaryConfig(SummaryApiConfig config) =>
+      updateSummaryConfig(SummaryFeature.context, config);
+
+  Future<void> updateCoreMemorySummaryConfig(SummaryApiConfig config) =>
+      updateSummaryConfig(SummaryFeature.coreMemory, config);
+
+  Future<void> updateSummaryConfig(
+    SummaryFeature feature,
+    SummaryApiConfig config,
+  ) async {
+    config = applyBoundProfile(config.copy());
+    await SecureStorageService.setString(
+      _summarySecretKey(feature),
+      config.apiKey,
+      requireSuccess: true,
+    );
+    await StorageService.setJson(
+      'summary_config_${feature.storageValue}',
+      config.toLocalJson(),
+    );
+    if (feature == SummaryFeature.context) {
+      _contextSummaryConfig = config;
+    } else {
+      _coreMemorySummaryConfig = config;
+    }
+    notifyListeners();
+  }
+
+  /// 绑定的模型档案；档案被删除时返回 null，此时沿用配置里手填的 API 参数。
+  ModelApiProfile? _boundProfile(String? profileId) {
+    final id = profileId?.trim() ?? '';
+    if (id.isEmpty) return null;
+    for (final profile in _modelProfiles) {
+      if (profile.id == id) return profile;
+    }
+    return null;
+  }
+
+  /// 把绑定档案的 API 参数写入配置；未绑定或档案已被删除时原样返回。
+  SummaryApiConfig applyBoundProfile(SummaryApiConfig config) {
+    final bound = _boundProfile(config.profileId);
+    if (bound == null) return config;
+    config
+      ..apiUrl = bound.apiUrl
+      ..apiKey = bound.apiKey
+      ..model = bound.model
+      ..apiFormat = bound.apiFormat
+      ..apiKeyMasked = ''
+      ..timeoutSeconds = bound.timeoutSeconds ?? _chatTimeoutSeconds
+      ..reasoningEffort = bound.reasoningEffort ?? ''
+      ..thinkingEnabled = bound.thinkingEnabled
+      ..thinkingBudget = bound.thinkingBudget;
+    return config;
+  }
+
+  /// 总结配置的服务端负载：绑定档案时由档案派生 API 参数，保存即生效，
+  /// 之后修改档案也会在下一次同步时自动跟上。
+  Map<String, dynamic> summaryConfigPayload(SummaryApiConfig config) {
+    final resolved = applyBoundProfile(config.copy());
+    final payload = resolved.toJson();
+    // Public sync intentionally omits secrets. Keep a masked remote key intact
+    // until the user supplies a replacement or explicitly resets this config.
+    if (resolved.apiKey.isEmpty && resolved.apiKeyMasked.isNotEmpty) {
+      payload.remove('api_key');
+    }
+    return payload;
+  }
+
+  Future<void> updatePromptOverrides(
+    Map<String, Map<String, String>> overrides,
+  ) async {
+    _promptOverrides = normalizePromptOverrides(overrides);
+    await StorageService.setJson('prompt_overrides', _promptOverrides);
+    notifyListeners();
+  }
+
+  /// 拉取服务端提示词注册表（内置默认文本 + 注册表元数据），结果缓存在内存中。
+  Future<Map<String, ConfigurablePrompt>> loadPromptRegistry({
+    bool force = false,
+  }) async {
+    if (!force && _promptRegistry.isNotEmpty) return _promptRegistry;
+    try {
+      final payload = await SecureWebSocketClient.instance.request(
+        'settings_prompts_get',
+        const <String, dynamic>{},
+      );
+      final rawModelOverrides = payload['model_overrides'];
+      if (rawModelOverrides is Map) {
+        _remoteModelPromptOverrides = _normalizeModelPromptOverrides(
+          rawModelOverrides,
+        );
+        await StorageService.setJson(
+          'remote_model_prompt_overrides',
+          _remoteModelPromptOverrides,
+        );
+      }
+      final raw = payload['prompts'];
+      if (raw is! Map) return _promptRegistry;
+      _promptRegistry = {
+        for (final entry in raw.entries)
+          '${entry.key}': ConfigurablePrompt.fromJson({
+            ...Map<String, dynamic>.from(entry.value as Map),
+            'id': '${entry.key}',
+          }),
+      };
+      notifyListeners();
+    } catch (e) {
+      debugPrint('SettingsService: load prompt registry failed: $e');
+    }
+    return _promptRegistry;
+  }
 
   /// Returns the local model profile selected for a role, if one was saved.
   /// Profile associations are device-local because profile API keys are local too.
@@ -251,6 +463,13 @@ class SettingsService extends ChangeNotifier {
     await _loadModelProfiles();
     _loadRoleModelProfileSelections();
     _loadProviderQuietRules();
+    await _loadSummaryConfigs();
+    _promptOverrides = normalizePromptOverrides(
+      StorageService.getJson('prompt_overrides'),
+    );
+    _remoteModelPromptOverrides = _normalizeModelPromptOverrides(
+      StorageService.getJson('remote_model_prompt_overrides'),
+    );
 
     // 意图识别 API
     _intentEnabled = StorageService.getBool('intent_enabled') ?? false;
@@ -632,6 +851,50 @@ class SettingsService extends ChangeNotifier {
     );
   }
 
+  static String _summarySecretKey(SummaryFeature feature) =>
+      'summary_api_key_${feature.storageValue}';
+
+  Future<void> _loadSummaryConfigs() async {
+    _contextSummaryConfig = await _readSummaryConfig(SummaryFeature.context);
+    _coreMemorySummaryConfig = await _readSummaryConfig(
+      SummaryFeature.coreMemory,
+    );
+  }
+
+  Future<SummaryApiConfig> _readSummaryConfig(SummaryFeature feature) async {
+    // 显式声明为 Object? 才能让 `is Map` 完成类型提升（getJson 返回可空 Map）。
+    final Object? raw = StorageService.getJson(
+      'summary_config_${feature.storageValue}',
+    );
+    if (raw is Map) {
+      final config = SummaryApiConfig.fromJson(Map<String, dynamic>.from(raw));
+      final secretKey = _summarySecretKey(feature);
+      if (raw.containsKey('api_key')) {
+        // Migrate the previous plaintext format only after secure storage succeeds.
+        try {
+          if (!SecureStorageService.has(secretKey)) {
+            await SecureStorageService.setString(
+              secretKey,
+              config.apiKey,
+              requireSuccess: true,
+            );
+          }
+          await StorageService.setJson(
+            'summary_config_${feature.storageValue}',
+            config.toLocalJson(),
+          );
+        } catch (_) {
+          // Keep the previous value and retry migration on the next startup.
+          debugPrint('SettingsService: summary secret migration failed');
+          return config;
+        }
+      }
+      config.apiKey = SecureStorageService.getString(secretKey);
+      return config;
+    }
+    return SummaryApiConfig();
+  }
+
   /// 更新意图识别 API
   Future<void> updateIntentApi({
     required bool enabled,
@@ -760,6 +1023,14 @@ class SettingsService extends ChangeNotifier {
             'ai_thinking_budget': _thinkingBudget ?? 0,
             'model_thinking_settings': _modelThinkingSettings,
             'ai_stream': _chatStream,
+            'context_summary_config': summaryConfigPayload(
+              _contextSummaryConfig,
+            ),
+            'core_memory_summary_config': summaryConfigPayload(
+              _coreMemorySummaryConfig,
+            ),
+            'prompt_overrides': _promptOverrides,
+            'model_prompt_overrides': modelPromptOverridesForSync(),
             'intent_enabled': _intentEnabled,
             'intent_api_url': _intentApiUrl,
             'intent_api_key': _intentApiKey,
@@ -807,6 +1078,7 @@ class SettingsService extends ChangeNotifier {
 
       final server = Map<String, dynamic>.from(settings);
       await _restoreThinkingSettings(server);
+      await _restoreSummaryAndPromptSettings(server, includeSecrets: true);
 
       final chatUrl = (server['ai_api_url']?.toString() ?? '').trim();
       final chatKey = (server['ai_api_key']?.toString() ?? '').trim();
@@ -932,6 +1204,7 @@ class SettingsService extends ChangeNotifier {
 
       final server = Map<String, dynamic>.from(settings);
       await _restoreThinkingSettings(server);
+      await _restoreSummaryAndPromptSettings(server, includeSecrets: false);
 
       final chatUrl = (server['ai_api_url']?.toString() ?? '').trim();
       final chatModel =
@@ -1035,4 +1308,32 @@ class SettingsService extends ChangeNotifier {
       return false;
     }
   }
+}
+
+Map<String, Map<String, String>> _copyPromptOverrides(
+  Map<String, Map<String, String>> source,
+) => {
+  for (final entry in source.entries)
+    entry.key: Map<String, String>.of(entry.value),
+};
+
+Map<String, Map<String, Map<String, String>>> _copyModelPromptOverrides(
+  Map<String, Map<String, Map<String, String>>> source,
+) => {
+  for (final entry in source.entries)
+    entry.key: _copyPromptOverrides(entry.value),
+};
+
+Map<String, Map<String, Map<String, String>>> _normalizeModelPromptOverrides(
+  Object? raw,
+) {
+  if (raw is! Map) return {};
+  final result = <String, Map<String, Map<String, String>>>{};
+  for (final entry in raw.entries) {
+    final target = entry.key.toString().trim().toLowerCase();
+    if (target.isEmpty || entry.value is! Map) continue;
+    final overrides = normalizePromptOverrides(entry.value);
+    if (overrides.isNotEmpty) result[target] = overrides;
+  }
+  return result;
 }

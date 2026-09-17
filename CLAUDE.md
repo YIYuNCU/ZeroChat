@@ -187,6 +187,8 @@ server/
 | `roles_memory_get` | `{role_id}` | `{core_memory, short_term, vector_memory_count}` | Fetch all memories for a role |
 | `roles_memory_update` | `{role_id, core_memory?, short_term?}` | `{core_memory, short_term}` | Update memories for a role |
 | `vector_memory_clear` | `{role_id}` | `{success, vector_memory_count}` | Clear vector memory embeddings for a role |
+| `settings_prompts_get` | `{applies_to?}` | `{prompts, overrides, model_overrides, reserved_keys}` | Read the configurable system-prompt registry |
+| `settings_summary_get` | `{}` | `{summaries}` | Read both memory-summary configs (API keys masked) |
 
 ### Memory Response Fields (roles_memory_get)
 
@@ -210,6 +212,18 @@ server/
 - **Event times**: The model resolves relative dates against message timestamps. Event text includes its status, event time (or explicitly unknown), and discussion time. The vector timestamp uses the event time when known, otherwise the discussion time; `created_at` is the storage time.
 - **Semantic retrieval**: The AI calls `search_memory` to retrieve the top 3 matches with minimum similarity 0.35. Raw chat messages are not automatically embedded. The `write_memory` tool can also store vectors with source `ai_tool`.
 - **Management**: The frontend can list, edit, delete, and clear vector memories. Ordinary vector writes retain the latest 2000 records per role.
+
+### Role-independent summaries and configurable prompts
+
+`services/summary_config_service.py` owns `context_summary_config` (event summaries) and `core_memory_summary_config` (core memory). They are **not** tied to any role: the legacy tool roles `1000000000000` / `1000000000002` are read once by a one-time migration (`summary_config_migrated`) to seed the configs, and are never consulted again. Every empty field (`api_url` / `api_key` / `model` / `api_format` / `reasoning_effort` / thinking) falls back to the global chat API; `system_prompt` appends to the built-in prompt.
+
+`services/prompt_config_service.py` is the single source of truth for system-prompt text. Every prompt carries a stable ASCII id (e.g. `chat.format_protocol`, `chat.no_reply`, `onebot.system_directive`, `summary.context_events`) — ids land in `settings.json`, so they must never be derived from the display title. Each definition declares `applies_to` (`chat` / `summary`) and `editable`. **Tool-calling prompts (`chat.tool_rules`, `chat.tool_policy_conservative`) are `editable=False`**: they are coupled to the tools actually registered for the active model/plugin and contain `{...}` placeholders the code substitutes (`{TOOL_POLICY_CONSERVATIVE}`, `{EMOJI_TOOL_RULE}` — the latter swapped to `send_emoji` for cloud-emoji plugins), so they are absent from `registry_snapshot()`, ignore every override, and are dropped by `sanitize_overrides()`. The two summary prompts are `applies_to=summary` and are therefore absent from the chat system prompt and from the 系统提示词 page; they are edited on their own summary pages. For editable prompts precedence is **builtin → global `prompt_overrides` → `model_prompt_overrides["<api_url>|<model>"]` → role metadata**, keyed by phase (`zerochat` / `onebot`), variant (`default` / `cloud_emoji`) or the reserved `__builtin__` key for the whole template. Model-profile overrides stay device-local on the client and are pushed on sync.
+
+Each summary may **bind a model profile** (`profile_id`, device-local, stored in the local summary JSON but never sent to the server). When bound, the client derives `api_url` / `api_key` / `model` / `api_format` / timeout / reasoning / thinking from the profile on every sync, so later profile edits propagate; editing the address or model by hand clears the binding and falls back to the hand-typed values (empty fields inherit the global chat API).
+
+When a summary fails, `get_context_messages` serves a **deterministic degraded window** anchored at the persisted `event_summary_fallback_start:{scope}` and applies a `SUMMARY_FAILURE_COOLDOWN_SECONDS` (120 s) cooldown. The window grows to at most three normal windows, then moves to the latest normal window so new messages remain visible; unchanged retries retain the same prefix. Default-user aliases share an anchor, and concurrent busy readers do not persist failure state. `append_short_term` is idempotent per `(role_id, request_id)` under a SQLite write transaction; the client retry path reuses `msg_<message id>` as the request id.
+
+Summary API keys are stored separately in platform secure storage. Existing plaintext summary keys migrate at startup only after the secure write succeeds; failed migrations retain their data for retry. Local summary JSON contains configuration and profile bindings but no API key.
 
 ### Settings Config
 

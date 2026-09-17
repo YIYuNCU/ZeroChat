@@ -1,3 +1,4 @@
+import '../widgets/prompt_editor.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -5,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../models/ai_model_profile.dart';
 import '../models/provider_quiet_rule.dart';
+import '../models/summary_config.dart';
 import '../services/role_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/secure_websocket_client.dart';
@@ -130,6 +132,41 @@ class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
           _Section(
             children: [
               _NavigationRow(
+                icon: Icons.history_toggle_off,
+                title: SummaryFeature.context.title,
+                subtitle: _summarySummary(settings.contextSummaryConfig),
+                onTap: () => _push(
+                  context,
+                  const SummaryModelSettingsPage(
+                    feature: SummaryFeature.context,
+                  ),
+                ),
+              ),
+              const Divider(height: 1, indent: 56),
+              _NavigationRow(
+                icon: Icons.psychology_alt_outlined,
+                title: SummaryFeature.coreMemory.title,
+                subtitle: _summarySummary(settings.coreMemorySummaryConfig),
+                onTap: () => _push(
+                  context,
+                  const SummaryModelSettingsPage(
+                    feature: SummaryFeature.coreMemory,
+                  ),
+                ),
+              ),
+              const Divider(height: 1, indent: 56),
+              _NavigationRow(
+                icon: Icons.article_outlined,
+                title: '系统提示词',
+                subtitle: _promptsSubtitle(),
+                onTap: () => _push(context, const PromptsPage()),
+              ),
+            ],
+          ),
+          const _SectionGap(),
+          _Section(
+            children: [
+              _NavigationRow(
                 icon: Icons.bookmarks_outlined,
                 title: '模型档案管理',
                 subtitle:
@@ -161,6 +198,14 @@ String _modelSummary(String model, String url) => url.trim().isEmpty
 String _featureSummary(bool enabled, String model, String url) {
   if (!enabled) return '未启用';
   return _modelSummary(model, url);
+}
+
+String _summarySummary(SummaryApiConfig config) {
+  if (!config.enabled) return '未启用';
+  if (config.apiUrl.trim().isEmpty && config.model.trim().isEmpty) {
+    return '使用默认聊天模型';
+  }
+  return _modelSummary(config.model, config.apiUrl);
 }
 
 void _push(BuildContext context, Widget page) {
@@ -642,6 +687,790 @@ class _ProviderQuietRulesPageState extends State<ProviderQuietRulesPage> {
   }
 }
 
+class SummaryModelSettingsPage extends StatefulWidget {
+  final SummaryFeature feature;
+  const SummaryModelSettingsPage({super.key, required this.feature});
+
+  @override
+  State<SummaryModelSettingsPage> createState() =>
+      _SummaryModelSettingsPageState();
+}
+
+class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
+  late final TextEditingController _url;
+  late final TextEditingController _key;
+  late final TextEditingController _model;
+  late final TextEditingController _temperature;
+  late final TextEditingController _timeout;
+  late final TextEditingController _effort;
+  late final TextEditingController _budget;
+  late final TextEditingController _systemPrompt;
+  late bool _enabled;
+  late String _format;
+  bool? _thinkingEnabled;
+  String? _profileId;
+  bool _saving = false;
+
+  SummaryApiConfig get _config =>
+      SettingsService.instance.summaryConfigFor(widget.feature);
+
+  /// 总结是纯文本生成，可选档案复用「聊天」能力档案。
+  List<ModelApiProfile> get _chatProfiles =>
+      SettingsService.instance.modelProfilesFor(ModelProfileCapability.chat);
+
+  ModelApiProfile? _profileById(String? id) {
+    if (id == null || id.isEmpty) return null;
+    for (final profile in _chatProfiles) {
+      if (profile.id == id) return profile;
+    }
+    return null;
+  }
+
+  /// 选中的档案只有在地址/模型仍与表单一致时才算生效，
+  /// 手动改过其中之一即视为脱离档案（与其它模型设置页一致）。
+  String? get _effectiveProfileId {
+    final profile = _profileById(_profileId);
+    if (profile == null) return null;
+    if (profile.apiUrl != _url.text.trim() ||
+        profile.model != _model.text.trim()) {
+      return null;
+    }
+    return profile.id;
+  }
+
+  void _applyProfile(String? id) {
+    final profile = _profileById(id);
+    if (profile == null) return;
+    setState(() {
+      _profileId = profile.id;
+      _url.text = profile.apiUrl;
+      _key.text = profile.apiKey;
+      _model.text = profile.model;
+      _format = profile.apiFormat;
+      _timeout.text =
+          (profile.timeoutSeconds ??
+                  SettingsService.instance.chatTimeoutSeconds)
+              .toString();
+      _effort.text = profile.reasoningEffort ?? '';
+      _thinkingEnabled = profile.thinkingEnabled;
+      _budget.text = profile.thinkingBudget?.toString() ?? '';
+    });
+  }
+
+  Future<void> _saveAsProfile() async {
+    if (_url.text.trim().isEmpty || _model.text.trim().isEmpty) {
+      _showMessage(context, '请先填写 API 地址和模型');
+      return;
+    }
+    final name = await _askProfileName(context, _model.text.trim());
+    if (name == null || name.isEmpty) return;
+    final id = 'model_profile_${DateTime.now().microsecondsSinceEpoch}';
+    await SettingsService.instance.saveApiProfile(
+      ModelApiProfile(
+        id: id,
+        name: name,
+        apiUrl: _url.text.trim(),
+        model: _model.text.trim(),
+        apiKey: _key.text.trim(),
+        apiFormat: _format,
+        capabilities: {ModelProfileCapability.chat},
+        timeoutSeconds: int.tryParse(_timeout.text.trim())?.clamp(1, 3600),
+        reasoningEffort: _effort.text.trim().isEmpty
+            ? null
+            : _effort.text.trim(),
+        thinkingEnabled: _thinkingEnabled,
+        thinkingBudget: normalizeThinkingBudget(_budget.text.trim()),
+      ),
+    );
+    if (mounted) setState(() => _profileId = id);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final config = SettingsService.instance.applyBoundProfile(_config.copy());
+    _enabled = config.enabled;
+    _url = TextEditingController(text: config.apiUrl);
+    _key = TextEditingController(text: config.apiKey);
+    _model = TextEditingController(text: config.model);
+    _format = config.apiFormat;
+    _temperature = TextEditingController(text: '${config.temperature}');
+    _timeout = TextEditingController(text: '${config.timeoutSeconds}');
+    _effort = TextEditingController(text: config.reasoningEffort);
+    _thinkingEnabled = config.thinkingEnabled;
+    _budget = TextEditingController(
+      text: config.thinkingBudget?.toString() ?? '',
+    );
+    _systemPrompt = TextEditingController(text: config.systemPrompt);
+    _profileId = _profileById(config.profileId)?.id;
+    SettingsService.instance.loadPromptRegistry().then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    for (final controller in [
+      _url,
+      _key,
+      _model,
+      _temperature,
+      _timeout,
+      _effort,
+      _budget,
+      _systemPrompt,
+    ]) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  /// 当前功能在提示词注册表里的条目（事件总结 / 核心记忆总结各一条）。
+  ConfigurablePrompt? get _promptDefinition {
+    for (final prompt in SettingsService.instance.promptRegistry.values) {
+      if (!prompt.isSummary) continue;
+      final matchesFeature = widget.feature == SummaryFeature.context
+          ? prompt.id.contains('context')
+          : prompt.id.contains('core_memory');
+      if (matchesFeature) return prompt;
+    }
+    return null;
+  }
+
+  String get _builtinPrompt => _promptDefinition?.builtin ?? '';
+
+  /// 完整覆盖内置提示词：可选全局默认，或只针对当前绑定的模型档案微调
+  /// （与服务端 `model_prompt_overrides["<url>|<model>"]` 对应）。
+  Future<void> _editPrompt() async {
+    final prompt = _promptDefinition;
+    if (prompt == null) {
+      _showMessage(context, '提示词尚未加载，请稍后重试');
+      return;
+    }
+    final profile = _profileById(_effectiveProfileId);
+    final scope = await _askPromptScope(context, profile: profile);
+    if (!mounted) return;
+    if (scope == null) return;
+
+    if (scope == _PromptScope.profile && profile != null) {
+      final overrides = _copyOverrides(profile.promptOverrides);
+      final edited = await showPromptEditor(
+        context,
+        prompt: prompt,
+        current: overrides[prompt.id] ?? const {},
+        scopeLabel: profile.name,
+      );
+      if (!mounted) return;
+      if (edited == null) return;
+      if (edited.isEmpty) {
+        overrides.remove(prompt.id);
+      } else {
+        overrides[prompt.id] = edited;
+      }
+      await SettingsService.instance.saveApiProfile(
+        ModelApiProfile(
+          id: profile.id,
+          name: profile.name,
+          apiUrl: profile.apiUrl,
+          model: profile.model,
+          apiKey: profile.apiKey,
+          apiFormat: profile.apiFormat,
+          capabilities: profile.capabilities,
+          visionMode: profile.visionMode,
+          timeoutSeconds: profile.timeoutSeconds,
+          reasoningEffort: profile.reasoningEffort,
+          thinkingEnabled: profile.thinkingEnabled,
+          thinkingBudget: profile.thinkingBudget,
+          stream: profile.stream,
+          maxContextLength: profile.maxContextLength,
+          promptOverrides: overrides,
+        ),
+      );
+    } else {
+      final overrides = _copyOverrides(
+        SettingsService.instance.promptOverrides,
+      );
+      final edited = await showPromptEditor(
+        context,
+        prompt: prompt,
+        current: overrides[prompt.id] ?? const {},
+        scopeLabel: '全局默认',
+      );
+      if (!mounted) return;
+      if (edited == null) return;
+      if (edited.isEmpty) {
+        overrides.remove(prompt.id);
+      } else {
+        overrides[prompt.id] = edited;
+      }
+      await SettingsService.instance.updatePromptOverrides(overrides);
+    }
+
+    final synced = await SettingsService.instance.syncApiSettingsToBackend();
+    if (mounted) {
+      setState(() {});
+      _showMessage(context, synced ? '提示词已保存' : '已本地保存，后端同步失败');
+    }
+  }
+
+  Future<void> _save() async {
+    final temperature = double.tryParse(_temperature.text.trim()) ?? 0.1;
+    final timeout = int.tryParse(_timeout.text.trim()) ?? 60;
+    final budget = int.tryParse(_budget.text.trim());
+    final apiKey = _key.text.trim();
+    setState(() => _saving = true);
+    try {
+      await SettingsService.instance.updateSummaryConfig(
+        widget.feature,
+        SummaryApiConfig(
+          enabled: _enabled,
+          apiUrl: _url.text.trim(),
+          apiKey: apiKey,
+          apiKeyMasked: apiKey.isEmpty ? _config.apiKeyMasked : '',
+          model: _model.text.trim(),
+          apiFormat: _format,
+          temperature: temperature.clamp(0.0, 2.0).toDouble(),
+          timeoutSeconds: timeout.clamp(1, 3600),
+          reasoningEffort: _effort.text.trim(),
+          thinkingEnabled: _thinkingEnabled,
+          thinkingBudget: budget != null && budget > 0 ? budget : null,
+          systemPrompt: _systemPrompt.text.trim(),
+          profileId: _effectiveProfileId,
+        ),
+      );
+      final synced = await SettingsService.instance.syncApiSettingsToBackend();
+      if (!mounted) return;
+      _showMessage(context, synced ? '已保存' : '已保存到本地，后端同步失败，可稍后重试');
+    } catch (_) {
+      if (mounted) _showMessage(context, '设置保存失败，请重试');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final builtin = _builtinPrompt;
+    return Scaffold(
+      backgroundColor: const Color(0xFFEDEDED),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFEDEDED),
+        elevation: 0,
+        title: Text(widget.feature.title),
+        actions: [
+          TextButton(
+            onPressed: _saving ? null : _save,
+            child: Text(_saving ? '保存中…' : '保存'),
+          ),
+        ],
+      ),
+      body: ListView(
+        children: [
+          _PageHint(
+            '${widget.feature.description}。未绑定模型档案时，留空的 API 配置将回退到默认聊天模型；'
+            '这两个总结功能独立于角色，不再需要配置总结助手角色。',
+          ),
+          _Section(
+            children: [
+              SwitchListTile(
+                title: const Text('启用'),
+                value: _enabled,
+                onChanged: (value) => setState(() => _enabled = value),
+              ),
+            ],
+          ),
+          const _SectionGap(),
+          _Section(
+            children: [
+              _ProfileSelector(
+                value: _profileId,
+                profiles: _chatProfiles,
+                onChanged: _applyProfile,
+              ),
+              const Divider(height: 1),
+              _ActionRow(
+                icon: Icons.bookmark_add_outlined,
+                label: '把当前配置保存为模型档案',
+                onTap: _saveAsProfile,
+              ),
+            ],
+          ),
+          const _SectionGap(),
+          _Section(
+            children: [
+              _FieldRow(
+                label: 'API 地址',
+                controller: _url,
+                hint: '留空使用默认聊天 API',
+              ),
+              _FieldRow(
+                label: 'API Key',
+                controller: _key,
+                hint: '留空使用默认聊天 API',
+                obscure: true,
+              ),
+              _FieldRow(label: '模型', controller: _model, hint: '留空使用默认聊天模型'),
+              _FormatSelector(
+                value: _format,
+                onChanged: (value) => setState(() => _format = value),
+              ),
+              _FieldRow(
+                label: '温度',
+                controller: _temperature,
+                hint: '0 - 2，总结建议 0.1',
+              ),
+              _FieldRow(label: '超时时间（秒）', controller: _timeout, hint: '默认 60'),
+            ],
+          ),
+          const _SectionGap(),
+          _Section(
+            children: [
+              _FieldRow(label: '推理强度', controller: _effort, hint: '留空继承默认聊天模型'),
+              _FieldRow(label: '思考预算', controller: _budget, hint: '留空继承默认聊天模型'),
+            ],
+          ),
+          const _SectionGap(),
+          _PageHint(
+            '系统提示词：留空使用内置提示词。填写后将追加在内置提示词之后，'
+            '便于补充输出格式要求。需要整体改写内置提示词时，用下面的'
+            '「编辑提示词」。',
+          ),
+          _Section(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                child: TextField(
+                  controller: _systemPrompt,
+                  maxLines: 8,
+                  minLines: 4,
+                  decoration: const InputDecoration(
+                    labelText: '附加系统提示词（可选）',
+                    alignLabelWithHint: true,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+              if (builtin.isNotEmpty) ...[
+                const Divider(height: 1),
+                ListTile(
+                  title: const Text('编辑提示词'),
+                  subtitle: Text(
+                    _promptDefinition == null
+                        ? '提示词加载中…'
+                        : '覆盖内置提示词（${_promptDefinition!.id}）',
+                  ),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  onTap: _promptDefinition == null ? null : _editPrompt,
+                ),
+                ListTile(
+                  title: const Text('查看内置提示词'),
+                  subtitle: const Text('只读'),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  onTap: () => _showBuiltinPrompt(context, builtin),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 30),
+        ],
+      ),
+    );
+  }
+}
+
+/// 提示词覆盖的作用域：全局默认，或单个模型档案。
+enum _PromptScope { global, profile }
+
+Future<_PromptScope?> _askPromptScope(
+  BuildContext context, {
+  ModelApiProfile? profile,
+}) async {
+  if (profile == null) return _PromptScope.global;
+  return showDialog<_PromptScope>(
+    context: context,
+    builder: (context) => SimpleDialog(
+      title: const Text('编辑哪一级提示词'),
+      children: [
+        SimpleDialogOption(
+          onPressed: () => Navigator.pop(context, _PromptScope.global),
+          child: const ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text('全局默认'),
+            subtitle: Text('对所有模型生效'),
+          ),
+        ),
+        SimpleDialogOption(
+          onPressed: () => Navigator.pop(context, _PromptScope.profile),
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text('档案：${profile.name}'),
+            subtitle: Text(
+              '只对 ${profile.model} 生效',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 系统提示词入口的摘要：同时反映全局覆盖与按档案微调。
+String _promptsSubtitle() {
+  final settings = SettingsService.instance;
+  final global = settings.promptOverrides.length;
+  final profiles = settings.modelPromptOverridesForSync().length;
+  if (global == 0 && profiles == 0) return '使用内置提示词';
+  return [
+    if (global > 0) '全局 $global 项',
+    if (profiles > 0) '$profiles 个档案微调',
+  ].join('，');
+}
+
+/// 系统提示词的作用域选择器：默认（全局）或某一个模型档案，一次只显示一个。
+class _PromptScopeSelector extends StatelessWidget {
+  final String? value;
+  final List<ModelApiProfile> profiles;
+  final ValueChanged<String?> onChanged;
+
+  const _PromptScopeSelector({
+    required this.value,
+    required this.profiles,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+    child: Row(
+      children: [
+        const SizedBox(width: 82, child: Text('作用范围')),
+        Expanded(
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String?>(
+              value: profiles.any((item) => item.id == value) ? value : null,
+              isExpanded: true,
+              items: [
+                const DropdownMenuItem<String?>(
+                  value: null,
+                  child: Text('默认（全局）'),
+                ),
+                for (final profile in profiles)
+                  DropdownMenuItem<String?>(
+                    value: profile.id,
+                    child: Text(
+                      '档案：${profile.name}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+void _showBuiltinPrompt(BuildContext context, String text) {
+  showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('内置提示词'),
+      content: SingleChildScrollView(child: SelectableText(text)),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 提示词编辑页：全局默认覆盖 + 按模型档案微调。
+class PromptsPage extends StatefulWidget {
+  const PromptsPage({super.key});
+
+  @override
+  State<PromptsPage> createState() => _PromptsPageState();
+}
+
+class _PromptsPageState extends State<PromptsPage> {
+  bool _loading = true;
+  String? _error;
+
+  /// 当前显示的作用域：`null` 表示全局默认，否则是模型档案 id。
+  /// 一次只显示一个作用域，避免全局与其下所有档案的提示词同时铺满页面。
+  String? _scopeProfileId;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      await SettingsService.instance.loadPromptRegistry(force: true);
+      if (mounted) setState(() => _loading = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '$e';
+        });
+      }
+    }
+  }
+
+  List<ModelApiProfile> get _profiles => ModelProfileCapability.values
+      .expand(SettingsService.instance.modelProfilesFor)
+      .toSet()
+      .toList();
+
+  /// 当前选中的档案；未选（全局默认）或档案已被删除时返回 null。
+  ModelApiProfile? get _selectedProfile {
+    final id = _scopeProfileId;
+    if (id == null) return null;
+    for (final profile in _profiles) {
+      if (profile.id == id) return profile;
+    }
+    return null;
+  }
+
+  Widget _scopeSubtitle() {
+    final profile = _selectedProfile;
+    final overrides = profile == null
+        ? SettingsService.instance.promptOverrides
+        : profile.promptOverrides;
+    final count = overrides.length;
+    return ListTile(
+      dense: true,
+      title: Text(
+        profile == null
+            ? '全局默认：未单独配置档案时使用'
+            : '${profile.model} | ${profile.apiUrl}',
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+      ),
+      trailing: count == 0
+          ? null
+          : Text(
+              '已自定义 $count 项',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF07C160)),
+            ),
+    );
+  }
+
+  bool _isOverridden(ConfigurablePrompt prompt) {
+    final profile = _selectedProfile;
+    final overrides = profile == null
+        ? SettingsService.instance.promptOverrides
+        : profile.promptOverrides;
+    return (overrides[prompt.id] ?? const {}).isNotEmpty;
+  }
+
+  Future<void> _editScoped(ConfigurablePrompt prompt) async {
+    final profile = _selectedProfile;
+    if (profile == null) {
+      await _editGlobal(prompt);
+    } else {
+      await _editProfile(profile, prompt);
+    }
+  }
+
+  Future<void> _editGlobal(ConfigurablePrompt prompt) async {
+    final overrides = _copyOverrides(SettingsService.instance.promptOverrides);
+    final edited = await showPromptEditor(
+      context,
+      prompt: prompt,
+      current: overrides[prompt.id] ?? const {},
+      scopeLabel: '全局默认',
+    );
+    if (edited == null) return;
+    if (edited.isEmpty) {
+      overrides.remove(prompt.id);
+    } else {
+      overrides[prompt.id] = edited;
+    }
+    await SettingsService.instance.updatePromptOverrides(overrides);
+    final synced = await SettingsService.instance.syncApiSettingsToBackend();
+    if (mounted) {
+      setState(() {});
+      _showMessage(context, synced ? '提示词已保存' : '已本地保存，后端同步失败');
+    }
+  }
+
+  Future<void> _editProfile(
+    ModelApiProfile profile,
+    ConfigurablePrompt prompt,
+  ) async {
+    final overrides = _copyOverrides(profile.promptOverrides);
+    final edited = await showPromptEditor(
+      context,
+      prompt: prompt,
+      current: overrides[prompt.id] ?? const {},
+      scopeLabel: profile.name,
+    );
+    if (edited == null) return;
+    if (edited.isEmpty) {
+      overrides.remove(prompt.id);
+    } else {
+      overrides[prompt.id] = edited;
+    }
+    await SettingsService.instance.saveApiProfile(
+      ModelApiProfile(
+        id: profile.id,
+        name: profile.name,
+        apiUrl: profile.apiUrl,
+        model: profile.model,
+        apiKey: profile.apiKey,
+        apiFormat: profile.apiFormat,
+        capabilities: profile.capabilities,
+        visionMode: profile.visionMode,
+        timeoutSeconds: profile.timeoutSeconds,
+        reasoningEffort: profile.reasoningEffort,
+        thinkingEnabled: profile.thinkingEnabled,
+        thinkingBudget: profile.thinkingBudget,
+        stream: profile.stream,
+        maxContextLength: profile.maxContextLength,
+        promptOverrides: overrides,
+      ),
+    );
+    final synced = await SettingsService.instance.syncApiSettingsToBackend();
+    if (mounted) {
+      setState(() {});
+      _showMessage(context, synced ? '提示词已保存' : '已本地保存，后端同步失败');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final registry = SettingsService.instance.promptRegistry;
+    // 只列聊天系统提示词：两个记忆总结的提示词属于各自功能页，不在这里重复出现。
+    final prompts =
+        registry.values
+            .where((prompt) => prompt.appliesTo.contains('chat'))
+            .toList()
+          ..sort((a, b) => a.id.compareTo(b.id));
+    return Scaffold(
+      backgroundColor: const Color(0xFFEDEDED),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFFEDEDED),
+        elevation: 0,
+        title: const Text('系统提示词'),
+        actions: [
+          IconButton(
+            tooltip: '重新加载',
+            onPressed: _loading ? null : _load,
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('加载失败：$_error', textAlign: TextAlign.center),
+                    const SizedBox(height: 12),
+                    FilledButton(onPressed: _load, child: const Text('重试')),
+                  ],
+                ),
+              ),
+            )
+          : ListView(
+              children: [
+                const _PageHint(
+                  '提示词按「内置默认 → 全局覆盖 → 模型档案微调」的顺序生效；'
+                  '留空表示沿用上一级内容。修改会同步到服务端并在下一次请求生效。\n'
+                  '用上方「作用范围」切换默认与单个档案，一次只显示一个作用域。\n'
+                  '此处只列聊天所用系统提示词；工具调用规则由程序内置（与实际可用工具'
+                  '和表情插件强绑定，不可修改），事件总结与核心记忆总结的提示词在'
+                  '各自的功能页配置。',
+                ),
+                _Section(
+                  children: [
+                    _PromptScopeSelector(
+                      value: _selectedProfile?.id,
+                      profiles: _profiles,
+                      onChanged: (value) =>
+                          setState(() => _scopeProfileId = value),
+                    ),
+                    const Divider(height: 1),
+                    _scopeSubtitle(),
+                  ],
+                ),
+                const _SectionGap(),
+                _Section(
+                  children: [
+                    for (final prompt in prompts)
+                      _promptRow(
+                        prompt: prompt,
+                        overridden: _isOverridden(prompt),
+                        onTap: () => _editScoped(prompt),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 30),
+              ],
+            ),
+    );
+  }
+
+  Widget _promptRow({
+    required ConfigurablePrompt prompt,
+    required bool overridden,
+    required VoidCallback onTap,
+  }) => ListTile(
+    title: Text(prompt.title),
+    subtitle: Text(
+      prompt.id,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontSize: 12),
+    ),
+    trailing: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (overridden)
+          const Padding(
+            padding: EdgeInsets.only(right: 4),
+            child: Text(
+              '已自定义',
+              style: TextStyle(fontSize: 12, color: Color(0xFF07C160)),
+            ),
+          ),
+        const Icon(Icons.arrow_forward_ios, size: 16),
+      ],
+    ),
+    onTap: onTap,
+  );
+}
+
+/// 深拷贝提示词覆盖表，避免直接修改服务里的不可变视图。
+Map<String, Map<String, String>> _copyOverrides(
+  Map<String, Map<String, String>> source,
+) => {
+  for (final entry in source.entries)
+    entry.key: Map<String, String>.of(entry.value),
+};
+
 Future<ModelApiProfile?> _showProfileEditor(
   BuildContext context, {
   ModelApiProfile? existing,
@@ -856,6 +1685,7 @@ Future<ModelApiProfile?> _showProfileEditor(
                       : null,
                   stream: stream,
                   maxContextLength: int.tryParse(maxContextLength.text.trim()),
+                  promptOverrides: existing?.promptOverrides ?? const {},
                 ),
               );
             },
@@ -1108,14 +1938,14 @@ class _FormatSelector extends StatelessWidget {
               isExpanded: true,
               items: const [
                 DropdownMenuItem(value: 'auto', child: Text('自动识别')),
-                  DropdownMenuItem(
-                      value: 'openai_compatible',
-                      child: Text('OpenAI 兼容'),
-                    ),
-                    DropdownMenuItem(
-                      value: 'zhipu_compatible',
-                      child: Text('智谱兼容'),
-                    ),
+                DropdownMenuItem(
+                  value: 'openai_compatible',
+                  child: Text('OpenAI 兼容'),
+                ),
+                DropdownMenuItem(
+                  value: 'zhipu_compatible',
+                  child: Text('智谱兼容'),
+                ),
                 DropdownMenuItem(
                   value: 'gemini_native',
                   child: Text('Gemini 原生'),
@@ -1203,7 +2033,10 @@ class _ModelRow extends StatelessWidget {
                           .map(
                             (item) => DropdownMenuItem(
                               value: item,
-                              child: Text(item, overflow: TextOverflow.ellipsis),
+                              child: Text(
+                                item,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           )
                           .toList(),
@@ -1435,10 +2268,13 @@ String _chatEndpoint(String value) {
   if (!path.endsWith('/chat/completions')) {
     path = path.endsWith('/v1')
         ? '$path/chat/completions'
-        : ((uri.host.toLowerCase() == 'open.bigmodel.cn' || uri.host.toLowerCase() == 'api.z.ai' || uri.host.toLowerCase().endsWith('.bigmodel.cn')) &&
-                (path.toLowerCase().endsWith('/v4') || path.toLowerCase().contains('/api/paas/'))
-            ? '$path/chat/completions'
-            : '$path/v1/chat/completions');
+        : ((uri.host.toLowerCase() == 'open.bigmodel.cn' ||
+                      uri.host.toLowerCase() == 'api.z.ai' ||
+                      uri.host.toLowerCase().endsWith('.bigmodel.cn')) &&
+                  (path.toLowerCase().endsWith('/v4') ||
+                      path.toLowerCase().contains('/api/paas/'))
+              ? '$path/chat/completions'
+              : '$path/v1/chat/completions');
   }
   return uri.replace(path: path, query: '', fragment: '').toString();
 }

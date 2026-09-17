@@ -19,6 +19,7 @@ router = APIRouter()
 
 # 导入设置服务
 from services import settings_service
+from services import prompt_config_service, summary_config_service
 
 
 def _is_google_gemini_url(api_url: str) -> bool:
@@ -121,8 +122,28 @@ class ModelThinkingSettings(BaseModel):
     thinking_budget: Optional[int] = Field(default=None, gt=0)
 
 
-class SettingsUpdate(BaseModel):
+class SummaryConfigUpdate(BaseModel):
+    """一个记忆总结功能的独立配置（事件总结 / 核心记忆总结）。"""
+
     model_config = ConfigDict(extra="forbid")
+
+    enabled: Optional[bool] = None
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    api_format: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    timeout_seconds: Optional[int] = Field(default=None, ge=1, le=3600)
+    reasoning_effort: Optional[str] = None
+    thinking_enabled: Optional[bool] = None
+    thinking_budget: Optional[int] = Field(default=None, gt=0)
+    system_prompt: Optional[str] = None
+
+
+class SettingsUpdate(BaseModel):
+    # `model_thinking_settings` 以 `model_` 开头，会命中 pydantic 的 protected namespace
+    # 并发 UserWarning。显式清空该配置以消除启动告警，同时保留既有字段名。
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     ai_api_url: Optional[str] = None
     ai_api_key: Optional[str] = None
@@ -134,6 +155,10 @@ class SettingsUpdate(BaseModel):
     ai_thinking_budget: Optional[int] = Field(default=None, ge=0)
     model_thinking_settings: Optional[dict[str, ModelThinkingSettings]] = None
     ai_stream: Optional[bool] = None
+    context_summary_config: Optional[SummaryConfigUpdate] = None
+    core_memory_summary_config: Optional[SummaryConfigUpdate] = None
+    prompt_overrides: Optional[dict[str, dict[str, str]]] = None
+    model_prompt_overrides: Optional[dict[str, dict[str, dict[str, str]]]] = None
     intent_enabled: Optional[bool] = None
     intent_api_url: Optional[str] = None
     intent_api_key: Optional[str] = None
@@ -156,7 +181,7 @@ class SettingsUpdate(BaseModel):
 @router.get("/settings")
 async def get_settings(include_secrets: bool = Query(False)):
     """获取全局设置"""
-    settings = dict(settings_service.load_settings())
+    settings = summary_config_service.load_settings_with_summary_configs()
 
     # 默认隐藏敏感信息，避免泄露；用于新安装客户端全量同步时可显式请求明文
     if not include_secrets:
@@ -165,12 +190,24 @@ async def get_settings(include_secrets: bool = Query(False)):
             if masked is not None:
                 settings[f"{key_name}_masked"] = masked
                 del settings[key_name]
+        for config_key in ("context_summary_config", "core_memory_summary_config"):
+            entry = settings.get(config_key)
+            if not isinstance(entry, dict):
+                continue
+            entry = dict(entry)
+            masked = mask_api_key(entry.get("api_key"))
+            entry.pop("api_key", None)
+            if masked is not None:
+                entry["api_key_masked"] = masked
+            settings[config_key] = entry
     return {"settings": settings}
 
 @router.put("/settings")
 async def update_settings(update: SettingsUpdate):
     """更新全局设置"""
     updates = {}
+    summary_config_changed = False
+    summary_config_saved = True
     
     if update.ai_api_url is not None:
         updates["ai_api_url"] = update.ai_api_url
@@ -195,6 +232,26 @@ async def update_settings(update: SettingsUpdate):
         updates["model_thinking_settings"] = {
             kind: value.model_dump() for kind, value in update.model_thinking_settings.items()
         }
+    if update.context_summary_config is not None:
+        summary_config_changed = True
+        summary_config_saved = summary_config_service.update_summary_config(
+            summary_config_service.CONTEXT_SUMMARY,
+            update.context_summary_config.model_dump(exclude_unset=True),
+        ) and summary_config_saved
+    if update.core_memory_summary_config is not None:
+        summary_config_changed = True
+        summary_config_saved = summary_config_service.update_summary_config(
+            summary_config_service.CORE_MEMORY_SUMMARY,
+            update.core_memory_summary_config.model_dump(exclude_unset=True),
+        ) and summary_config_saved
+    if update.prompt_overrides is not None:
+        updates["prompt_overrides"] = prompt_config_service.sanitize_overrides(
+            update.prompt_overrides
+        )
+    if update.model_prompt_overrides is not None:
+        updates["model_prompt_overrides"] = prompt_config_service.sanitize_model_overrides(
+            update.model_prompt_overrides
+        )
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
     if update.intent_api_url is not None:
@@ -237,6 +294,9 @@ async def update_settings(update: SettingsUpdate):
     if update.port is not None:
         updates["port"] = update.port
     
+    if not summary_config_saved:
+        return {"success": False, "error": "Failed to save settings"}
+
     if updates:
         success = settings_service.save_settings(updates)
         if success:
@@ -244,7 +304,47 @@ async def update_settings(update: SettingsUpdate):
         else:
             return {"success": False, "error": "Failed to save settings"}
     
-    return {"success": True, "message": "No changes"}
+    return {
+        "success": True,
+        "message": "Settings updated" if summary_config_changed else "No changes",
+    }
+
+@router.get("/settings/prompts")
+async def get_prompt_registry(applies_to: Optional[str] = Query(None)):
+    """获取可配置系统提示词注册表（内置默认文本 + 当前覆盖值）。
+
+    `applies_to` 可传 `chat` 或 `summary` 过滤，便于前端分别渲染聊天提示词与总结提示词。
+    """
+    settings = settings_service.load_settings()
+    return {
+        "prompts": prompt_config_service.registry_snapshot(applies_to),
+        "overrides": settings.get("prompt_overrides") or {},
+        "model_overrides": settings.get("model_prompt_overrides") or {},
+        "reserved_keys": {
+            "builtin": prompt_config_service.BUILTIN_OVERRIDE_KEY,
+            "phases": list(prompt_config_service.ORIGIN_PHASES),
+            "variants": list(prompt_config_service.VARIANT_KEYS),
+        },
+    }
+
+
+@router.get("/settings/summary")
+async def get_summary_settings():
+    """获取两个记忆总结功能的独立配置（API Key 以掩码形式返回）。"""
+    result = {}
+    for kind in summary_config_service.SUMMARY_KINDS:
+        stored = summary_config_service.load_summary_config(kind)
+        resolved = summary_config_service.resolve_summary_config(kind)
+        masked = mask_api_key(stored.get("api_key"))
+        entry = dict(stored)
+        entry.pop("api_key", None)
+        if masked is not None:
+            entry["api_key_masked"] = masked
+        entry["configured"] = resolved.get("configured", False)
+        entry["effective_model"] = resolved.get("model", "")
+        result[kind] = entry
+    return {"summaries": result}
+
 
 @router.get("/settings/ai")
 async def get_ai_settings():

@@ -62,12 +62,18 @@ class SecureStorageService {
   static bool has(String key) => (_cache[key] ?? '').isNotEmpty;
 
   /// 写入并更新缓存。
-  static Future<void> setString(String key, String value) async {
-    _cache[key] = value;
+  static Future<void> setString(
+    String key,
+    String value, {
+    bool requireSuccess = false,
+  }) async {
     try {
       await _storage.write(key: key, value: value);
+      _cache[key] = value;
     } catch (e) {
       debugPrint('SecureStorageService: write "$key" failed: $e');
+      if (requireSuccess) rethrow;
+      _cache[key] = value;
     }
   }
 

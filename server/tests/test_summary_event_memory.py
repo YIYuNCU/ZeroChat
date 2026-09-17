@@ -5,13 +5,21 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
-from services import memory_service
+from services import memory_service, settings_service
 from services.tool_prompts import get_tool_prompt
 from services.vector_memory import VectorMemoryStore, close_all_vector_connections
 
 
 class SummaryEventMemoryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.enterContext(patch.object(settings_service, "load_settings", return_value={
+            **settings_service.get_default_settings(),
+            "summary_config_migrated": True,
+            "ai_api_url": "https://summary.example.test",
+            "ai_api_key": "test-key",
+            "ai_model": "test-model",
+        }))
+        self.enterContext(patch.object(settings_service, "save_settings", side_effect=AssertionError("unexpected settings write")))
         temp_dir = TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         roles_dir = Path(temp_dir.name)
@@ -47,9 +55,7 @@ class SummaryEventMemoryTests(unittest.IsolatedAsyncioTestCase):
         }
 
     async def summarize(self, **kwargs):
-        return await memory_service.trigger_chat_summary(
-            "1000000000002", self.role_id, **kwargs,
-        )
+        return await memory_service.trigger_chat_summary(self.role_id, **kwargs)
 
     async def test_core_summary_does_not_call_embedding_or_write_vectors(self):
         self.append("I prefer tea")
@@ -179,11 +185,98 @@ class SummaryEventMemoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(context), 2)
         with memory_service._get_connection(self.role_id) as conn:
             self.assertIsNone(memory_service._get_meta(conn, "virtual_block_start:default"))
+        # 失败后进入冷却期：不再重复调用总结 API，窗口保持稳定。
         self.response([])
         await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+        self.assertEqual(self.ai.await_count, 1)
+        with memory_service._get_connection(self.role_id) as conn:
+            self.assertIsNone(memory_service._get_meta(conn, "virtual_block_start:default"))
+
+    async def test_successful_summary_after_cooldown_advances_the_checkpoint(self):
+        self.append("First message")
+        self.append("Second message")
+        self.ai.return_value = {"success": True, "content": '{"summary":'}
+        await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+        with memory_service._get_connection(self.role_id) as conn:
+            memory_service._set_meta(conn, "event_summary_failed_at:default", None)
+
+        self.response([])
+        await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+
+        self.assertEqual(self.ai.await_count, 2)
         with memory_service._get_connection(self.role_id) as conn:
             self.assertEqual(memory_service._get_meta(conn, "virtual_block_start:default"), "1")
-        self.assertEqual(self.ai.await_count, 2)
+            self.assertIsNone(
+                memory_service._get_meta(conn, "event_summary_fallback_start:default")
+            )
+
+    async def test_failure_after_success_keeps_the_post_summary_anchor(self):
+        self.append("First message")
+        self.append("Second message")
+        self.response([])
+        await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+
+        with memory_service._get_connection(self.role_id) as conn:
+            self.assertEqual(memory_service._get_meta(conn, "virtual_block_start:default"), "1")
+
+        self.append("Third message")
+        self.ai.return_value = {"success": True, "content": '{"summary":'}
+        await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+
+        with memory_service._get_connection(self.role_id) as conn:
+            self.assertEqual(
+                memory_service._get_meta(conn, "event_summary_fallback_start:default"), "1",
+            )
+
+    async def test_failed_summary_uses_a_stable_degraded_window(self):
+        """A misconfigured summary API must not slide the window on every retry.
+
+        The provider prefix cache is only reusable when an unchanged conversation yields
+        the exact same context, so retrying one message must return a byte-identical
+        window and must not re-hit the broken summary API during the failure cooldown.
+        """
+        self.append("Oldest message")
+        self.append("Middle message")
+        self.append("Newest message")
+        self.ai.return_value = {"success": True, "content": '{"summary":'}
+
+        first = await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+        second = await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+
+        texts = [
+            [memory_service._extract_semantic_text(item["content"]) for item in context]
+            for context in (first, second)
+        ]
+        self.assertEqual(texts[0], texts[1])
+        self.assertEqual(
+            texts[0], ["Oldest message", "Middle message", "Newest message"],
+        )
+        self.assertEqual(self.ai.await_count, 1, "失败冷却期内不应重复调用总结 API")
+        with memory_service._get_connection(self.role_id) as conn:
+            self.assertIsNone(memory_service._get_meta(conn, "virtual_block_start:default"))
+            self.assertEqual(
+                memory_service._get_meta(conn, "event_summary_fallback_start:default"), "0",
+            )
+
+    async def test_degraded_window_extends_forward_as_messages_arrive(self):
+        self.append("Oldest message")
+        self.append("Middle message")
+        self.ai.return_value = {"success": True, "content": '{"summary":'}
+        first = await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+
+        self.append("Newest message")
+        second = await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
+
+        self.assertEqual(
+            [memory_service._extract_semantic_text(item["content"]) for item in first],
+            ["Oldest message", "Middle message"],
+        )
+        # 锚点不变，新增消息只是向前扩展读取范围，前缀完全复用。
+        self.assertEqual(
+            [memory_service._extract_semantic_text(item["content"]) for item in second],
+            ["Oldest message", "Middle message", "Newest message"],
+        )
+        self.assertEqual(self.ai.await_count, 1)
 
     async def test_messages_arriving_during_summary_are_included_next_time(self):
         self.append("Initial conversation")
@@ -203,7 +296,7 @@ class SummaryEventMemoryTests(unittest.IsolatedAsyncioTestCase):
             ["Arrived while model was running"],
         )
 
-    async def test_failed_summary_overflow_returns_latest_messages_without_advancing_checkpoint(self):
+    async def test_failed_summary_overflow_uses_deterministic_window_without_checkpoint(self):
         self.append("Oldest message")
         self.append("Middle message")
         self.append("Newest message")
@@ -211,10 +304,11 @@ class SummaryEventMemoryTests(unittest.IsolatedAsyncioTestCase):
         context = await memory_service.get_context_messages(self.role_id, max_context_rounds=1)
         self.assertEqual(
             [memory_service._extract_semantic_text(item["content"]) for item in context],
-            ["Middle message", "Newest message"],
+            ["Oldest message", "Middle message", "Newest message"],
         )
         with memory_service._get_connection(self.role_id) as conn:
             self.assertIsNone(memory_service._get_meta(conn, "virtual_block_start:default"))
+            self.assertIsNone(memory_service._get_meta(conn, "event_summary_last_id:default"))
 
     async def test_summary_preserves_multiline_user_and_assistant_messages(self):
         user_text = "Two important events:\nInterview tomorrow morning\nExam completed today"
@@ -253,7 +347,8 @@ class SummaryEventMemoryTests(unittest.IsolatedAsyncioTestCase):
         first = asyncio.create_task(self.summarize())
         try:
             await asyncio.wait_for(started.wait(), timeout=5)
-            self.assertIsNone(await self.summarize())
+            busy = await self.summarize()
+            self.assertIs(busy, memory_service.SUMMARY_BUSY)
         finally:
             release.set()
             await first

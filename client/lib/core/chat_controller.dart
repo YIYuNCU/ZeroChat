@@ -348,6 +348,9 @@ class ChatController extends ChangeNotifier {
       combinedContent,
       context.isGroup,
       imagePaths: imagePaths,
+      stableRequestId: pendingMessages.length == 1
+          ? pendingMessages.single.messageId
+          : 'batch_${pendingMessages.map((item) => item.messageId).join('_')}',
     );
   }
 
@@ -663,26 +666,50 @@ class ChatController extends ChangeNotifier {
       final aiPrompt = emotionText.isEmpty
           ? '用户发送了一个表情。请结合上下文自然回复。'
           : '用户发送了一个表情，标签是"$emotionText"。请根据这个标签和上下文自然回复。';
-      _processMessageInBackground(chatId, aiPrompt, context.isGroup);
+      _processMessageInBackground(
+        chatId,
+        aiPrompt,
+        context.isGroup,
+        stableRequestId: message.id,
+      );
       return;
     }
 
-    _processMessageInBackground(chatId, message.content, context.isGroup);
+    _processMessageInBackground(
+      chatId,
+      message.content,
+      context.isGroup,
+      stableRequestId: message.id,
+    );
   }
 
   /// 后台处理消息
+  ///
+  /// [stableRequestId] 用于重发同一条消息：服务端据此复用已写入的短期记忆行，
+  /// 避免同一内容在上下文窗口里重复堆叠而破坏前缀缓存。
   void _processMessageInBackground(
     String chatId,
     String content,
     bool isGroup, {
     List<String> imagePaths = const [],
+    String? stableRequestId,
   }) {
     Future(() async {
       try {
         if (isGroup) {
-          await _handleGroupChat(chatId, content, imagePaths: imagePaths);
+          await _handleGroupChat(
+            chatId,
+            content,
+            imagePaths: imagePaths,
+            stableRequestId: stableRequestId,
+          );
         } else {
-          await _handleSingleChat(chatId, content, imagePaths: imagePaths);
+          await _handleSingleChat(
+            chatId,
+            content,
+            imagePaths: imagePaths,
+            stableRequestId: stableRequestId,
+          );
         }
       } catch (e) {
         debugPrint('ChatController: Error processing message: $e');
@@ -886,6 +913,7 @@ class ChatController extends ChangeNotifier {
     String chatId,
     String userMessage, {
     List<String> imagePaths = const [],
+    String? stableRequestId,
   }) async {
     final role =
         RoleService.getRoleById(chatId) ?? RoleService.getCurrentRole();
@@ -967,6 +995,7 @@ class ChatController extends ChangeNotifier {
       userMessage: userMessage,
       isGroup: false,
       imagePaths: imagePaths,
+      stableRequestId: stableRequestId,
     );
 
     if (rawReply != null) {
@@ -988,6 +1017,7 @@ class ChatController extends ChangeNotifier {
     String chatId,
     String userMessage, {
     List<String> imagePaths = const [],
+    String? stableRequestId,
   }) async {
     final context = _contexts[chatId];
     if (context == null) return;
@@ -1051,6 +1081,10 @@ class ChatController extends ChangeNotifier {
           userMessage: lastMessage,
           isGroup: true,
           imagePaths: pendingImagePaths,
+          // 只有用户本轮消息需要稳定 id，AI↔AI 续聊轮次始终是新的内容。
+          stableRequestId: (i == 0 && currentRound == 1)
+              ? stableRequestId
+              : null,
         );
         // 图片已随首个应答角色发出，后续角色/轮次不再重复携带
         pendingImagePaths = const [];
@@ -1527,6 +1561,7 @@ class ChatController extends ChangeNotifier {
     required String userMessage,
     required bool isGroup,
     List<String> imagePaths = const [],
+    String? stableRequestId,
   }) async {
     String? asyncPushError;
     var terminalTaskFailure = false;
@@ -1582,6 +1617,12 @@ class ChatController extends ChangeNotifier {
       'attached_json': attachedJson,
       if (visionUploadIds.isNotEmpty) 'vision_upload_ids': visionUploadIds,
     };
+    // 重发同一条消息时复用稳定的 request_id：服务端据此去重用户短期记忆行，
+    // 上下文窗口不再因重试而滑动，供应商前缀缓存得以命中。
+    final stableRequest = (stableRequestId ?? '').trim();
+    if (stableRequest.isNotEmpty) {
+      requestContext['request_id'] = 'msg_$stableRequest';
+    }
     final clientSubmissionId = _newClientSubmissionId();
     final expectedTaskId = _taskIdForSubmission(clientSubmissionId);
     await _ensurePersistedStateLoaded();

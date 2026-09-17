@@ -3,6 +3,7 @@
 管理角色的短期记忆和核心记忆
 """
 import asyncio
+import functools
 import logging
 import json
 import random
@@ -16,6 +17,7 @@ import re
 
 from core.utils import ensure_direct_child_path, is_tool_role_id
 from services.vector_memory import VectorMemoryStore, _extract_semantic_text
+from services import summary_config_service
 from services.settings_service import get_thinking_config
 
 logger = logging.getLogger(__name__)
@@ -27,9 +29,56 @@ DEFAULT_MAX_CONTEXT_LENGTH = 12000
 CORE_MEMORY_MAX_ITEMS = 10
 CORE_MEMORY_MAX_ITEM_LENGTH = 240
 CORE_MEMORY_SUMMARY_WORKER_ID = "1000000000000"
+SUMMARY_MAX_TOKENS = 2000
+#: After a failed event summary, keep using the deterministic degraded window instead of
+#: re-hitting a broken summary API on every message (which also guarantees prompt-cache
+#: friendly, byte-identical prefixes).
+SUMMARY_FAILURE_COOLDOWN_SECONDS = 120
+#: The degraded (summary-unavailable) window reads this many times the normal window so a
+#: few extra turns stay stable instead of sliding immediately.
+FALLBACK_WINDOW_MULTIPLIER = 3
+
+
+class _SummaryBusy:
+    """Sentinel: another summary for the same conversation is already running."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "SUMMARY_BUSY"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+SUMMARY_BUSY = _SummaryBusy()
+
 _CORE_MEMORY_LOCKS: Dict[str, asyncio.Lock] = {}
 _CORE_MEMORY_LOCKS_GUARD = threading.Lock()
 _CHAT_SUMMARY_LOCKS: Dict[tuple, asyncio.Lock] = {}
+
+
+def _summary_failure_cooldown_active(role_id: str, failure_key: str) -> bool:
+    """Return whether a previous event-summary failure is still within cooldown."""
+    with _get_connection(role_id) as conn:
+        raw = _get_meta(conn, failure_key)
+    if not raw:
+        return False
+    try:
+        failed_at = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return False
+    age = (datetime.now() - failed_at).total_seconds()
+    return 0 <= age < SUMMARY_FAILURE_COOLDOWN_SECONDS
+
+
+def _record_chat_summary_failure(role_id: str, failure_key: str) -> None:
+    """Remember when an event summary failed so repeated messages skip the API."""
+    try:
+        with _get_connection(role_id) as conn:
+            _set_meta(conn, failure_key, datetime.now().isoformat())
+    except Exception:
+        logger.warning("记录事件总结失败时间失败: role=%s", role_id, exc_info=True)
 
 
 def _role_dir(role_id: str) -> Path:
@@ -992,7 +1041,7 @@ def append_short_term(
     sender: Optional[str] = None,
     sender_id: Optional[str] = None,
     group_id: Optional[str] = None,
-):
+) -> Optional[int]:
     """
     追加短期记忆，使用滑动窗口机制
 
@@ -1001,6 +1050,9 @@ def append_short_term(
         role: 消息角色 (user/assistant)
         content: 消息内容
         window_size: 兼容旧参数，当前不再用于写入裁剪
+
+    Returns:
+        新写入（或已存在的同 request_id 行）的 short_term.id；工具角色返回 None。
     """
     if is_tool_role_id(role_id):
         return
@@ -1031,10 +1083,28 @@ def append_short_term(
         )
 
     with _get_connection(role_id) as conn:
-        conn.execute(
+        # 幂等：同一 request_id 重复写入（客户端重发失败消息、推送补偿重放）直接复用
+        # 既有行，避免同一内容在上下文窗口里不断堆叠、破坏前缀稳定性。
+        # Acquire SQLite's write lock before checking: concurrent workers/processes
+        # must observe the first committed insert instead of both inserting a row.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if request_id is not None and str(request_id).strip():
+            existing = conn.execute(
+                "SELECT id FROM short_term WHERE request_id = ? AND role = ? ORDER BY id ASC LIMIT 1",
+                (normalized_request_id, role),
+            ).fetchone()
+            if existing is not None:
+                logger.debug(
+                    "跳过重复的短期记忆写入: role=%s request_id=%s",
+                    role_id, normalized_request_id,
+                )
+                return int(existing[0])
+        row = conn.execute(
             """
             INSERT INTO short_term (role, content, timestamp, task_id, request_id, json_memory, origin, sender, sender_id, group_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
             """,
             (
                 role,
@@ -1048,7 +1118,7 @@ def append_short_term(
                 normalized_sender_id,
                 normalized_group_id,
             )
-        )
+        ).fetchone()
 
         current_count = _get_meta(conn, "message_count_since_summary", "0")
         try:
@@ -1068,6 +1138,7 @@ def append_short_term(
         )
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端仅保证 request_id 在 DB 记录中可用。
+        return int(row[0]) if row else None
 
 def _summary_message_text(content: str) -> str:
     """Unwrap stored message envelopes without truncating multiline dialogue."""
@@ -1169,7 +1240,6 @@ def _chat_summary_scope(origin: str, group_id: Optional[str], sender_id: Optiona
 
 
 async def trigger_chat_summary(
-    worker_id: str,
     role_id: str,
     conv_origin: str = "system",
     conv_group_id: Optional[str] = None,
@@ -1177,20 +1247,25 @@ async def trigger_chat_summary(
     max_context_rounds: Optional[int] = None,
     max_context_length: Optional[int] = None,
 ) -> Optional[str]:
+    """Serialize event summaries for one conversation across the whole workflow.
+
+    Returns ``SUMMARY_BUSY`` (not ``None``) when another summary of the same
+    conversation is already running: the caller must treat that as "keep the previous
+    window", never as "the summary API failed".
+    """
     key = (role_id, _chat_summary_scope(conv_origin, conv_group_id, conv_sender_id))
     with _CORE_MEMORY_LOCKS_GUARD:
         lock = _CHAT_SUMMARY_LOCKS.setdefault(key, asyncio.Lock())
     if lock.locked():
-        return None
+        return SUMMARY_BUSY
     async with lock:
         return await _trigger_chat_summary(
-            worker_id, role_id, conv_origin, conv_group_id, conv_sender_id,
+            role_id, conv_origin, conv_group_id, conv_sender_id,
             max_context_rounds, max_context_length,
         )
 
 
 async def _trigger_chat_summary(
-    worker_id: str,
     role_id: str,
     conv_origin: str = "system",
     conv_group_id: Optional[str] = None,
@@ -1207,10 +1282,27 @@ async def _trigger_chat_summary(
         conv_sender_id: 发送者 ID（onebot_private 时使用）
 
     Returns:
-        新的上下文摘要，或 None（如果总结失败或没有新内容）
+        新的上下文摘要；None 表示总结失败（调用方应使用确定性降级窗口）。
     """
-    # 导入 AI 服务
     from services.ai_service import call_ai_direct
+
+    scope = _chat_summary_scope(conv_origin, conv_group_id, conv_sender_id)
+    failure_key = f"event_summary_failed_at:{scope}"
+    if _summary_failure_cooldown_active(role_id, failure_key):
+        logger.info("事件总结处于失败冷却期，跳过本轮总结: role=%s scope=%s", role_id, scope)
+        return None
+
+    summary_config = summary_config_service.resolve_summary_config(
+        summary_config_service.CONTEXT_SUMMARY
+    )
+    if not summary_config.get("enabled"):
+        logger.info("事件总结已在设置中关闭: role=%s scope=%s", role_id, scope)
+        return None
+    if not summary_config.get("configured"):
+        logger.warning("事件总结 API 未配置完整，跳过总结: role=%s scope=%s", role_id, scope)
+        _record_chat_summary_failure(role_id, failure_key)
+        return None
+
     try:
         # 根据渠道过滤短期记忆，避免跨频道污染总结输入
         effective_limit = _get_memory_length(max_context_rounds)
@@ -1225,7 +1317,7 @@ async def _trigger_chat_summary(
             summary_where = "WHERE origin IN ('zerochat', 'proactive', 'system') OR (origin LIKE 'onebot%' AND sender = 'user')"
             summary_params = []
 
-        checkpoint_key = f"event_summary_last_id:{_chat_summary_scope(conv_origin, conv_group_id, conv_sender_id)}"
+        checkpoint_key = f"event_summary_last_id:{scope}"
         with _get_connection(role_id) as conn:
             scoped_query = f"SELECT role, content, timestamp, sender, id FROM short_term {summary_where}"
             previous = conn.execute(
@@ -1258,20 +1350,32 @@ async def _trigger_chat_summary(
              "current_conversation": conversation},
             ensure_ascii=False,
         )
-        from routers.roles import load_role
-        worker_data = load_role(worker_id)
-        system_prompt = worker_data.get("system_prompt", "")
-        messages = []
-        messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        messages = [
+            {"role": "system", "content": summary_config["system_prompt"]},
+            {"role": "user", "content": prompt},
+        ]
     except Exception as e:
         logger.warning("构建记忆总结提示时发生错误：%s", e)
+        _record_chat_summary_failure(role_id, failure_key)
         return None
     try:
-        result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1), api_format=worker_data.get("ai_api_format"), **get_thinking_config(role_data=worker_data))
+        result = await call_ai_direct(
+            messages=messages,
+            model=summary_config["model"],
+            api_url=summary_config["api_url"],
+            api_key=summary_config["api_key"],
+            temperature=summary_config["temperature"],
+            max_tokens=SUMMARY_MAX_TOKENS,
+            api_format=summary_config["api_format"],
+            timeout_seconds=summary_config["timeout_seconds"],
+            thinking_enabled=summary_config["thinking_enabled"],
+            thinking_budget=summary_config["thinking_budget"],
+            reasoning_effort=summary_config["reasoning_effort"],
+        )
         if result["success"] and result["content"]:
             new_memory, event_items = _parse_chat_summary(result["content"], discussed_at)
             if not new_memory:
+                _record_chat_summary_failure(role_id, failure_key)
                 return None
             append_short_term(role_id, "user", "system:触发记忆总结",
                               origin=conv_origin, sender="system",
@@ -1283,15 +1387,26 @@ async def _trigger_chat_summary(
             # arrive while the model is running and still need the next summary.
             with _get_connection(role_id) as conn:
                 _set_meta(conn, checkpoint_key, str(rows[-1][4]))
+                # 成功推进窗口后清除失败标记与降级锚点，恢复正常滚动窗口。
+                _set_meta(conn, failure_key, None)
+                for key in _fallback_anchor_keys(scope):
+                    _set_meta(conn, key, None)
             await _store_summary_events(role_id, event_items)
             return new_memory
         else:
             logger.warning("记忆总结失败：%s", result)
+            _record_chat_summary_failure(role_id, failure_key)
     except Exception as e:
         logger.warning("调用 AI 进行记忆总结时发生错误：%s", e)
+        _record_chat_summary_failure(role_id, failure_key)
         return None
 
     return None
+
+def _fallback_anchor_keys(scope: str) -> List[str]:
+    scopes = ("default", "default_user", "main_qq") if scope == "default" else (scope,)
+    return [f"event_summary_fallback_start:{value}" for value in scopes]
+
 
 async def get_context_messages(
     role_id: str,
@@ -1412,7 +1527,38 @@ async def get_context_messages(
     if total == 0:
         return []
 
-    summary_failed = False
+    fallback_scope = (
+        "default" if conversation_key in (None, "default", "default_user", "main_qq")
+        else conversation_key
+    )
+    fallback_keys = _fallback_anchor_keys(fallback_scope)
+    fallback_anchor_key = fallback_keys[0]
+
+    def _read_fallback_anchor() -> Optional[int]:
+        with _get_connection(role_id) as conn:
+            raw = _get_meta(conn, fallback_anchor_key)
+            # Adopt anchors persisted by the earlier default_user/main_qq naming.
+            if raw is None:
+                raw = next((_get_meta(conn, key) for key in fallback_keys[1:]
+                            if _get_meta(conn, key) is not None), None)
+        if raw is None:
+            return None
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return None
+
+    def _write_fallback_anchor(value: Optional[int]) -> None:
+        with _get_connection(role_id) as conn:
+            _set_meta(conn, fallback_anchor_key, None if value is None else str(value))
+            for key in fallback_keys[1:]:
+                _set_meta(conn, key, None)
+
+    # A previous failure left a stable anchor: reuse the exact same window instead of
+    # recomputing "latest N", which would slide with every new message and defeat the
+    # provider prompt cache.
+    fallback_anchor = await _run_db(role_id, _read_fallback_anchor)
+
     if need_trigger_summary:
         conv_origin = "system"
         conv_group_id = None
@@ -1424,35 +1570,63 @@ async def get_context_messages(
             conv_origin = "onebot_private"
             conv_sender_id = conversation_key[8:]
         content = await trigger_chat_summary(
-            worker_id="1000000000002", role_id=role_id,
+            role_id=role_id,
             conv_origin=conv_origin,
             conv_group_id=conv_group_id,
             conv_sender_id=conv_sender_id,
             max_context_rounds=max_context_rounds,
             max_context_length=max_context_length,
         )
-        if not content:
-            logger.error(f"触发对话总结失败，无法获取新的上下文消息")
-            virtual_start = previous_start
-            summary_failed = True
-        else:
+        if content is SUMMARY_BUSY:
+            # A concurrent summary is in flight: keep serving the previous window and do
+            # not treat this as a failure.
+            logger.info("事件总结进行中，沿用上一窗口: role=%s", role_id)
+            if fallback_anchor is None:
+                # A busy reader must not persist failure state after the running
+                # summary succeeds. Its previous window is local to this request.
+                fallback_anchor = previous_start
+        elif content:
             with _get_connection(role_id) as conn:
                 _set_meta(conn, virtual_start_key, str(virtual_start))
+            await _run_db(role_id, functools.partial(_write_fallback_anchor, None))
+            fallback_anchor = None
+        else:
+            logger.warning("触发对话总结失败，使用确定性降级窗口: role=%s", role_id)
+            if fallback_anchor is None:
+                # Grow from a stable anchor until the bounded window is full.
+                # Overflow reanchors to recent history without marking it summarized.
+                fallback_anchor = previous_start
+                await _run_db(role_id, functools.partial(_write_fallback_anchor, fallback_anchor))
 
-    query_offset = virtual_start
     def _fetch_context():
         with _get_connection(role_id) as conn:
-            if summary_failed:
-                latest_rows = conn.execute(
-                    f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id DESC LIMIT ?",
-                    where_params + [effective_limit],
+            if fallback_anchor is not None:
+                # Deterministic degraded window: read forward from the persisted anchor.
+                # An unchanged conversation yields a byte-identical prefix, so retrying a
+                # single message no longer invalidates the provider prompt cache; the
+                # length cap keeps the window bounded in either direction.
+                read_limit = max(effective_limit, effective_limit * FALLBACK_WINDOW_MULTIPLIER)
+                current_total = conn.execute(
+                    f"SELECT COUNT(*) FROM short_term {where_clause}", where_params,
+                ).fetchone()[0]
+                start = min(fallback_anchor, max(0, current_total - 1))
+                if current_total - start > read_limit:
+                    start = max(0, current_total - effective_limit)
+                rows_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?"
+                candidate_rows = conn.execute(
+                    rows_sql,
+                    where_params + [read_limit, start],
                 ).fetchall()
+                # Busy readers only use a temporary window; do not resurrect state
+                # that a concurrent successful summary has already cleared.
+                if start != fallback_anchor and _get_meta(conn, fallback_anchor_key) is not None:
+                    _set_meta(conn, fallback_anchor_key, str(start))
                 return _tail_within_limits(
-                    list(reversed(latest_rows)), effective_limit, effective_context_length,
+                    candidate_rows, read_limit, effective_context_length
                 )
             query_sql = f"SELECT role, content, timestamp, origin, sender FROM short_term {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?"
             candidate_rows = conn.execute(
-                query_sql, where_params + [effective_limit, query_offset]
+                query_sql, where_params + [effective_limit, virtual_start]
             ).fetchall()
             return _tail_within_limits(
                 candidate_rows, effective_limit, effective_context_length
@@ -1609,6 +1783,17 @@ async def _trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str
         return None
     # 导入 AI 服务
     from services.ai_service import call_ai_direct
+
+    summary_config = summary_config_service.resolve_summary_config(
+        summary_config_service.CORE_MEMORY_SUMMARY
+    )
+    if not summary_config.get("enabled"):
+        logger.info("核心记忆总结已在设置中关闭: role=%s", role_id)
+        return "noneed"
+    if not summary_config.get("configured"):
+        logger.warning("核心记忆总结 API 未配置完整，跳过总结: role=%s", role_id)
+        return "noneed"
+
     try:
         memory = load_memory(role_id)
         short_term = memory.get("short_term", [])
@@ -1636,21 +1821,27 @@ async def _trigger_memory_summary(role_id: str, role_data: Dict) -> Optional[str
             "\nReturn only a JSON array of facts. Each item must contain "
             "category, fact, confidence (high/medium/low), and status (active/obsolete)."
         )
-        from routers.roles import load_role
-        worker_data = load_role(CORE_MEMORY_SUMMARY_WORKER_ID) or {}
-        system_prompt = worker_data.get("system_prompt", "")
-        system_prompt += (
-            "\n\n输出协议优先于旧格式要求：只返回 JSON 数组；每项必须包含 "
-            "category、fact、confidence（high/medium/low）和 status（active/obsolete）。"
-        )
-        messages = []
-        messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        messages = [
+            {"role": "system", "content": summary_config["system_prompt"]},
+            {"role": "user", "content": prompt},
+        ]
     except Exception as e:
         logger.warning("构建记忆总结提示时发生错误：%s", e)
         return None
     try:
-        result = await call_ai_direct(messages=messages, model=worker_data.get("ai_model"), api_url=worker_data.get("ai_api_url"), api_key=worker_data.get("ai_api_key"), temperature=worker_data.get("ai_temperature", 0.1), api_format=worker_data.get("ai_api_format"), **get_thinking_config(role_data=worker_data))
+        result = await call_ai_direct(
+            messages=messages,
+            model=summary_config["model"],
+            api_url=summary_config["api_url"],
+            api_key=summary_config["api_key"],
+            temperature=summary_config["temperature"],
+            max_tokens=SUMMARY_MAX_TOKENS,
+            api_format=summary_config["api_format"],
+            timeout_seconds=summary_config["timeout_seconds"],
+            thinking_enabled=summary_config["thinking_enabled"],
+            thinking_budget=summary_config["thinking_budget"],
+            reasoning_effort=summary_config["reasoning_effort"],
+        )
         if result["success"] and result["content"]:
             parsed_facts = _parse_core_memory_facts(result["content"])
             if not parsed_facts and not _core_memory_result_is_valid(result["content"]):

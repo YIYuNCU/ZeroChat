@@ -26,6 +26,27 @@ def get_settings_file() -> Path:
     return CONFIG_DIR / "settings.json"
 
 
+def default_summary_config() -> Dict[str, Any]:
+    """默认的单个记忆总结配置（供默认设置与校验共用）。
+
+    具体解析与迁移逻辑见 services/summary_config_service.py；此处的默认值必须与
+    summary_config_service.default_summary_config() 保持一致。
+    """
+    return {
+        "enabled": True,
+        "api_url": "",
+        "api_key": "",
+        "model": "",
+        "api_format": "auto",
+        "temperature": 0.1,
+        "timeout_seconds": 60,
+        "reasoning_effort": "",
+        "thinking_enabled": None,
+        "thinking_budget": None,
+        "system_prompt": "",
+    }
+
+
 def get_default_settings() -> Dict[str, Any]:
     """获取默认设置"""
     return {
@@ -41,6 +62,12 @@ def get_default_settings() -> Dict[str, Any]:
         "ai_thinking_budget": 0,
         "model_thinking_settings": {},
         "ai_stream": False,
+        # 独立于角色的两个记忆总结配置（详见 services/summary_config_service.py）
+        "context_summary_config": default_summary_config(),
+        "core_memory_summary_config": default_summary_config(),
+        # 可配置系统提示词（详见 services/prompt_config_service.py）
+        "prompt_overrides": {},
+        "model_prompt_overrides": {},
         "intent_enabled": False,
         "intent_api_url": "",
         "intent_api_key": "",

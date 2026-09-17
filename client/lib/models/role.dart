@@ -7,7 +7,7 @@ import 'sticker.dart';
 
 int? _normalizeAiTimeout(Object? value) {
   final parsed = value is num ? value.toInt() : int.tryParse('${value ?? ''}');
-  return parsed == null ? null : parsed.clamp(1, 3600);
+  return parsed?.clamp(1, 3600);
 }
 
 String? _normalizeAiReasoningEffort(Object? value) {

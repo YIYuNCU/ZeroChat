@@ -38,6 +38,7 @@ class ModelApiProfile {
   final int? thinkingBudget;
   final bool? stream;
   final int? maxContextLength;
+  final Map<String, Map<String, String>> promptOverrides;
 
   const ModelApiProfile({
     required this.id,
@@ -54,6 +55,7 @@ class ModelApiProfile {
     this.thinkingBudget,
     this.stream,
     this.maxContextLength,
+    this.promptOverrides = const {},
   });
 
   bool supports(ModelProfileCapability capability) =>
@@ -87,6 +89,7 @@ class ModelApiProfile {
           normalizeThinkingBudget(json['reasoning_effort']),
       stream: json['stream'] is bool ? json['stream'] as bool : null,
       maxContextLength: _normalizeContextLength(json['max_context_length']),
+      promptOverrides: normalizePromptOverrides(json['prompt_overrides']),
     );
   }
 
@@ -105,7 +108,27 @@ class ModelApiProfile {
     if (thinkingBudget != null) 'thinking_budget': thinkingBudget,
     if (stream != null) 'stream': stream,
     if (maxContextLength != null) 'max_context_length': maxContextLength,
+    if (promptOverrides.isNotEmpty) 'prompt_overrides': promptOverrides,
   };
+}
+
+/// `{prompt_id: {phase_or_variant: text}}` 的宽松解析，忽略结构不正确的条目。
+Map<String, Map<String, String>> normalizePromptOverrides(Object? raw) {
+  if (raw is! Map) return const {};
+  final result = <String, Map<String, String>>{};
+  for (final entry in raw.entries) {
+    final promptId = entry.key.toString().trim();
+    final value = entry.value;
+    if (promptId.isEmpty || value is! Map) continue;
+    final block = <String, String>{};
+    for (final inner in value.entries) {
+      final key = inner.key.toString().trim();
+      if (key.isEmpty || inner.value is! String) continue;
+      block[key] = inner.value as String;
+    }
+    if (block.isNotEmpty) result[promptId] = block;
+  }
+  return result;
 }
 
 /// Compatibility alias for role settings, which expose chat-capable profiles.

@@ -20,6 +20,7 @@ from core.utils import (
 )
 from routers import roles, settings
 from services import settings_service
+from services import prompt_config_service, summary_config_service
 
 
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -409,7 +410,7 @@ async def _handle_vision_upload_commit(payload: dict, backend_base_url: str) -> 
 
 
 async def _handle_settings_get(payload: dict, backend_base_url: str) -> dict:
-    settings_data = dict(settings_service.load_settings())
+    settings_data = summary_config_service.load_settings_with_summary_configs()
     include_secrets = payload.get("include_secrets") is True
     if not include_secrets:
         for key_name in ("ai_api_key", "intent_api_key", "vision_api_key", "embedding_api_key"):
@@ -417,12 +418,58 @@ async def _handle_settings_get(payload: dict, backend_base_url: str) -> dict:
             if masked is not None:
                 settings_data[f"{key_name}_masked"] = masked
                 del settings_data[key_name]
+        for config_key in ("context_summary_config", "core_memory_summary_config"):
+            entry = settings_data.get(config_key)
+            if not isinstance(entry, dict):
+                continue
+            entry = dict(entry)
+            masked = mask_api_key(entry.get("api_key"))
+            entry.pop("api_key", None)
+            if masked is not None:
+                entry["api_key_masked"] = masked
+            settings_data[config_key] = entry
     return {"settings": settings_data}
+
+
+async def _handle_settings_prompts_get(payload: dict) -> dict:
+    """Return the prompt registry plus current overrides for the prompt editor UI."""
+    settings_data = settings_service.load_settings()
+    applies_to = payload.get("applies_to")
+    applies_to = str(applies_to).strip() if applies_to else None
+    return {
+        "prompts": prompt_config_service.registry_snapshot(applies_to or None),
+        "overrides": settings_data.get("prompt_overrides") or {},
+        "model_overrides": settings_data.get("model_prompt_overrides") or {},
+        "reserved_keys": {
+            "builtin": prompt_config_service.BUILTIN_OVERRIDE_KEY,
+            "phases": list(prompt_config_service.ORIGIN_PHASES),
+            "variants": list(prompt_config_service.VARIANT_KEYS),
+        },
+    }
+
+
+async def _handle_settings_summary_get(payload: dict) -> dict:
+    """Return the independent configuration of both memory summaries."""
+    result = {}
+    for kind in summary_config_service.SUMMARY_KINDS:
+        stored = summary_config_service.load_summary_config(kind)
+        resolved = summary_config_service.resolve_summary_config(kind)
+        masked = mask_api_key(stored.get("api_key"))
+        entry = dict(stored)
+        entry.pop("api_key", None)
+        if masked is not None:
+            entry["api_key_masked"] = masked
+        entry["configured"] = resolved.get("configured", False)
+        entry["effective_model"] = resolved.get("model", "")
+        result[kind] = entry
+    return {"summaries": result}
 
 
 async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
     update = settings.SettingsUpdate(**dict(payload.get("updates") or {}))
     updates = {}
+    summary_config_changed = False
+    summary_config_saved = True
     if update.ai_api_url is not None:
         updates["ai_api_url"] = update.ai_api_url
     if update.ai_api_key is not None:
@@ -446,6 +493,26 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
         updates["model_thinking_settings"] = {
             kind: value.model_dump() for kind, value in update.model_thinking_settings.items()
         }
+    if update.context_summary_config is not None:
+        summary_config_changed = True
+        summary_config_saved = summary_config_service.update_summary_config(
+            summary_config_service.CONTEXT_SUMMARY,
+            update.context_summary_config.model_dump(exclude_unset=True),
+        ) and summary_config_saved
+    if update.core_memory_summary_config is not None:
+        summary_config_changed = True
+        summary_config_saved = summary_config_service.update_summary_config(
+            summary_config_service.CORE_MEMORY_SUMMARY,
+            update.core_memory_summary_config.model_dump(exclude_unset=True),
+        ) and summary_config_saved
+    if update.prompt_overrides is not None:
+        updates["prompt_overrides"] = prompt_config_service.sanitize_overrides(
+            update.prompt_overrides
+        )
+    if update.model_prompt_overrides is not None:
+        updates["model_prompt_overrides"] = prompt_config_service.sanitize_model_overrides(
+            update.model_prompt_overrides
+        )
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
     if update.intent_api_url is not None:
@@ -488,8 +555,13 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
     if update.port is not None:
         updates["port"] = update.port
 
+    if not summary_config_saved:
+        return {"success": False, "error": "Failed to save settings"}
     if not updates:
-        return {"success": True, "message": "No changes"}
+        return {
+            "success": True,
+            "message": "Settings updated" if summary_config_changed else "No changes",
+        }
     if settings_service.save_settings(updates):
         if "quiet_rules" in updates:
             # 供应商级安静规则变更：立即按新规则重排主动消息调度。
@@ -972,6 +1044,12 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
 
     if action == "settings_update":
         return await _handle_settings_update(payload, backend_base_url)
+
+    if action == "settings_prompts_get":
+        return await _handle_settings_prompts_get(payload)
+
+    if action == "settings_summary_get":
+        return await _handle_settings_summary_get(payload)
 
     if action == "settings_avatar_upload":
         return await _handle_settings_avatar_upload(payload, backend_base_url)

@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -189,8 +189,16 @@ class StatsConfig(BaseModel):
     enabled: bool = False
     stats: List[StatItem] = []
 
+# `model_max_context_length` 以 `model_` 开头，会被 pydantic 的 protected namespace
+# 判定为冲突字段并发出 UserWarning（旧版本默认 protected_namespaces=('model_',)）。
+# 显式清空该配置，保持既有 API 字段名不变，并消除启动告警。
+_PROTECTED_NAMESPACE_CONFIG = ConfigDict(protected_namespaces=())
+
+
 class RoleCreate(BaseModel):
     """创建角色"""
+    model_config = _PROTECTED_NAMESPACE_CONFIG
+
     id: str
     name: str
     avatar_url: Optional[str] = ""
@@ -256,6 +264,8 @@ class RoleCreate(BaseModel):
 
 class RoleUpdate(BaseModel):
     """更新角色"""
+    model_config = _PROTECTED_NAMESPACE_CONFIG
+
     name: Optional[str] = None
     avatar_url: Optional[str] = None
     persona: Optional[str] = None
@@ -395,9 +405,9 @@ def load_role(role_id: str) -> Optional[Dict]:
     if profile_file.exists():
         with open(profile_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if is_tool_role_id(role_id):
-            from services.tool_prompts import get_tool_prompt
-            data["system_prompt"] = get_tool_prompt(role_id, data.get("system_prompt", ""))
+        # 工具角色（旧核心记忆/事件总结助手）不再覆盖 system_prompt：这两个功能已改为
+        # 独立配置（详见 services/summary_config_service.py），提示词由
+        # services/prompt_config_service.py 提供，避免出现第三个真值来源。
         return data
     return None
 

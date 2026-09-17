@@ -265,10 +265,10 @@ Future<QuietRule?> _showRuleEditorDialog(
                     trailing: const Icon(Icons.schedule),
                     onTap: pickEnd,
                   ),
-                  if (error != null) ...[
+                  if (error case final message?) ...[
                     const SizedBox(height: 8),
                     Text(
-                      error!,
+                      message,
                       style: TextStyle(
                         color: Theme.of(dialogContext).colorScheme.error,
                         fontSize: 12,
