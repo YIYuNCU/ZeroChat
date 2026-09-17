@@ -173,6 +173,8 @@ async def get_favicon():
     return FileResponse(str(ROOT_DIR / "favicon.ico"), media_type="image/x-icon")
 
 app.websocket("/ws/secure")(create_secure_websocket_endpoint(CONFIG, logger))
+# Alternate path for gateways that incorrectly drop WebSocket upgrade requests.
+app.websocket("/api/v2/realtime")(create_secure_websocket_endpoint(CONFIG, logger))
 
 from routers.onebot import onebot_ws_endpoint
 app.websocket("/onebot/ws/{role_id}")(onebot_ws_endpoint)

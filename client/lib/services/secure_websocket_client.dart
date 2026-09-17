@@ -20,6 +20,8 @@ class SecureWebSocketClient {
   static const Duration _defaultRequestTimeout = Duration(seconds: 15);
   static const Duration _connectTimeout = Duration(seconds: 20);
   static const int _maxRequestRetries = 3;
+  static const String _primaryEndpointPath = '/ws/secure';
+  static const String _fallbackEndpointPath = '/api/v2/realtime';
 
   /// 前台/后台自适应心跳间隔。前台需要实时性，后台延长以省电；
   /// 服务端 WS 端点无应用级空闲超时，延长后台心跳安全。
@@ -62,6 +64,8 @@ class SecureWebSocketClient {
   Completer<void>? _connectingCompleter;
   int _requestSeq = 0;
   int _connectionAttempts = 0;
+  bool _preferFallbackEndpoint = false;
+  String? _endpointBackendUrl;
 
   /// Called after a successful reconnection (not first connect).
   /// Used by ChatController to recover missed pushes.
@@ -113,14 +117,9 @@ class SecureWebSocketClient {
     _connectionAttempts += 1;
 
     try {
-      final wsUri = _buildWsUri(
-        backendUrl: SettingsService.instance.backendUrl,
+      final socket = await _connectWithEndpointFallback(
+        SettingsService.instance.backendUrl,
       );
-
-      final socket = await WebSocket.connect(
-        wsUri.toString(),
-        headers: {'X-Auth-Token': SettingsService.instance.backendAuthToken},
-      ).timeout(_connectTimeout);
 
       _resetBackoff();
       _socket = socket;
@@ -288,7 +287,49 @@ class SecureWebSocketClient {
     return h == 'localhost' || h == '127.0.0.1' || h == '::1';
   }
 
-  Uri _buildWsUri({required String backendUrl}) {
+  Future<WebSocket> _connectWithEndpointFallback(String backendUrl) async {
+    if (_endpointBackendUrl != backendUrl) {
+      _endpointBackendUrl = backendUrl;
+      _preferFallbackEndpoint = false;
+    }
+
+    final endpointPaths = _preferFallbackEndpoint
+        ? const [_fallbackEndpointPath, _primaryEndpointPath]
+        : const [_primaryEndpointPath, _fallbackEndpointPath];
+    Object? firstError;
+
+    for (final endpointPath in endpointPaths) {
+      final wsUri = _buildWsUri(
+        backendUrl: backendUrl,
+        endpointPath: endpointPath,
+      );
+      try {
+        final socket = await WebSocket.connect(
+          wsUri.toString(),
+          headers: {'X-Auth-Token': SettingsService.instance.backendAuthToken},
+        ).timeout(_connectTimeout);
+        _preferFallbackEndpoint = endpointPath == _fallbackEndpointPath;
+        if (_preferFallbackEndpoint) {
+          debugPrint(
+            'SecureWebSocketClient: connected through realtime fallback endpoint',
+          );
+        }
+        return socket;
+      } catch (error) {
+        firstError ??= error;
+        debugPrint(
+          'SecureWebSocketClient: connection to $endpointPath failed: $error',
+        );
+      }
+    }
+
+    throw firstError ?? StateError('No WebSocket endpoint is available');
+  }
+
+  Uri _buildWsUri({
+    required String backendUrl,
+    required String endpointPath,
+  }) {
     final uri = Uri.parse(backendUrl);
     final wsScheme = uri.scheme == 'https' ? 'wss' : 'ws';
 
@@ -305,7 +346,7 @@ class SecureWebSocketClient {
       scheme: wsScheme,
       host: uri.host,
       port: uri.hasPort ? uri.port : null,
-      path: '/ws/secure',
+      path: endpointPath,
     );
   }
 

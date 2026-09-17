@@ -1,5 +1,7 @@
 allprojects {
     repositories {
+        // Google Maven is intermittently unreachable on some networks.
+        maven(url = "https://maven.aliyun.com/repository/google")
         google()
         mavenCentral()
     }

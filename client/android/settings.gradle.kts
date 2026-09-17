@@ -11,6 +11,10 @@ pluginManagement {
     includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
 
     repositories {
+        // Gradle Plugin Portal is intermittently unreachable on some networks.
+        maven(url = "https://maven.aliyun.com/repository/gradle-plugin")
+        // Google Maven is intermittently unreachable on some networks.
+        maven(url = "https://maven.aliyun.com/repository/google")
         google()
         mavenCentral()
         gradlePluginPortal()
