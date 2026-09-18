@@ -49,6 +49,7 @@ class ChatListService extends ChangeNotifier {
 
   /// 加载聊天列表
   Future<void> _loadChatList() async {
+    _chatList.clear();
     _sortedChatList = null;
     final jsonList = StorageService.getJsonList('chat_list');
     if (jsonList != null) {

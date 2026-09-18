@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
+Resource synchronization, cache identity/budgets, memory paging and bandwidth verification are documented in [docs/conditional-sync.md](docs/conditional-sync.md). Client and server must be upgraded together for this protocol.
+
 ZeroChat is an AI chat companion app with a WeChat-like UI. It uses a **Flutter client** + **FastAPI server** architecture. The server handles AI API calls, role management, memory persistence (SQLite), scheduling (proactive messages, moments, tasks), and **OneBot V11 QQ integration**. The client provides the UI, local state management, and background runtime support.
 
 ## Build & Run Commands
@@ -20,7 +22,7 @@ ZeroChat is an AI chat companion app with a WeChat-like UI. It uses a **Flutter 
 - Or use `start.bat` (Windows) / `start.sh` (Linux/Mac) — auto-creates venv and installs deps
 
 ### Test Dependencies
-- No test framework is configured for the Python server
+- Run Python regressions with `cd server && python -m pytest tests -q -p no:cacheprovider`.
 - Flutter tests use `flutter_test` (sdk) with `flutter_lints` for linting
 
 ## Architecture

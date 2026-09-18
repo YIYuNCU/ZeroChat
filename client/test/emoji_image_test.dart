@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:zerochat/widgets/remote_media_image.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zerochat/widgets/emoji_image.dart';
 
@@ -144,7 +145,7 @@ void main() {
     },
   );
 
-  testWidgets('keeps HTTP sources on the authenticated network image path', (
+  testWidgets('routes HTTP sources through the reusable media cache', (
     tester,
   ) async {
     var resolverCalled = false;
@@ -161,6 +162,9 @@ void main() {
     await tester.pump();
 
     expect(resolverCalled, isFalse);
-    expect(tester.widget<Image>(find.byType(Image)).image, isA<NetworkImage>());
+    expect(
+      tester.widget<RemoteMediaImage>(find.byType(RemoteMediaImage)).url,
+      'https://example.com/emoji.png',
+    );
   });
 }

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -80,5 +81,30 @@ void main() {
     expect(await store.loadOlderMessages('r'), 50);
     expect(store.getMessages('r').first.id, '1');
     store.releaseChatWindow('r');
+  });
+
+  test('backend switch drains archive writes before moving namespace', () async {
+    await StorageService.configureNamespace('server-a');
+    await store.ensureLoaded('r');
+    final writing = store.updateMessageSendStatus('r', '250', MessageSendStatus.failed);
+    await Future<void>.delayed(Duration.zero);
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    final switching = store.switchBackend(changeNamespace: () async {
+      entered.complete();
+      await release.future;
+      await StorageService.configureNamespace('server-b');
+    });
+    await entered.future;
+    expect(await writing, isTrue);
+    expect(StorageService.namespace, 'server-a');
+    await expectLater(store.clearAllLocalChatData(), throwsStateError);
+    release.complete();
+    await switching;
+    expect(store.getMessageCount('r'), 0);
+    await store.switchBackend(changeNamespace: () => StorageService.configureNamespace('server-a'));
+    await store.ensureLoaded('r');
+    expect(store.getMessageCount('r'), 251);
+    expect(store.getMessages('r').last.sendStatus, MessageSendStatus.failed);
   });
 }

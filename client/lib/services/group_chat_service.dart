@@ -17,6 +17,7 @@ class GroupChatService {
 
   /// 加载群聊列表
   static Future<void> _loadGroups() async {
+    _groups.clear();
     final jsonList = StorageService.getJsonList('group_chats');
     if (jsonList != null) {
       _groups.clear();

@@ -175,6 +175,8 @@ def _init_db(conn: sqlite3.Connection):
         """
     )
     _ensure_short_term_schema(conn)
+    from services.sync_revision import install_revision
+    install_revision(conn, "short_term")
 
 
 def _table_has_autoincrement(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -830,6 +832,7 @@ def _get_connection(role_id: str) -> sqlite3.Connection:
         # 首次遇到该 DB：跑一次建表/迁移（幂等）。后续线程的冷连接跳过。
         _init_db(conn)
         _maybe_migrate_from_json(role_id, conn)
+        conn.commit()
         with _SCHEMA_READY_LOCK:
             _SCHEMA_READY.add(db_key)
 
@@ -917,6 +920,49 @@ def load_memory(role_id: str) -> Dict:
         "content_length_since_summary": content_length_int,
         "vector_memory_count": _get_vector_memory_count(role_id),
     }
+
+
+def load_memory_sections(role_id: str, sections: list[str], limit: int = 200, before_id: int | None = None, version: str | None = None) -> dict:
+    """Bounded management read; never loads the complete memory database."""
+    allowed = {"core_memory", "short_term", "vector_memory_count"}
+    if not isinstance(sections, list) or any(section not in allowed for section in sections):
+        raise ValueError("Unknown memory section")
+    limit = max(1, min(200, int(limit)))
+    result = {}
+    if is_tool_role_id(role_id):
+        return {key: 0 if key == "vector_memory_count" else [] for key in sections}
+    from services.sync_revision import snapshot
+    conn = _get_connection(role_id)
+    with snapshot(conn, "short_term") as current_version:
+        if before_id is not None and version != current_version:
+            return {"reset_required": True, "version": current_version}
+        if "core_memory" in sections:
+            core = _get_meta(conn, "core_memory", "") or _get_role_core_memory(role_id) or ""
+            result["core_memory"] = [line.strip() for line in str(core).splitlines() if line.strip()]
+        if "short_term" in sections:
+            result["version"] = current_version
+            clause = "WHERE id < ?" if before_id is not None else ""
+            params = [int(before_id)] if before_id is not None else []
+            rows = conn.execute(
+                f"SELECT id, role, content, timestamp, task_id, request_id, json_memory, origin, sender, sender_id, group_id FROM short_term {clause} ORDER BY id DESC LIMIT ?",
+                params + [limit + 1],
+            ).fetchall()
+            result["has_more"] = len(rows) > limit
+            rows = rows[:limit]
+            result["next_before_id"] = rows[-1][0] if rows else None
+            result["next_cursor"] = result["next_before_id"]
+            result["short_term"] = [{
+                "id": row[0], "role": row[1] or "assistant",
+                "content": ensure_structured_memory_message(content=row[2], role=row[1] or "assistant",
+                    timestamp=row[3], origin=row[7] or DEFAULT_MEMORY_ORIGIN, sender=row[8] or row[1] or "assistant"),
+                "timestamp": row[3], "task_id": row[4], "request_id": row[5], "json_memory": row[6],
+                "origin": row[7] or DEFAULT_MEMORY_ORIGIN, "sender": row[8] or row[1] or "assistant",
+                "sender_id": row[9] or "", "group_id": row[10] or "",
+            } for row in reversed(rows)]
+            result["incremental"] = False
+    if "vector_memory_count" in sections:
+        result["vector_memory_count"] = _get_vector_memory_count(role_id)
+    return result
 
 
 def load_short_term_since(role_id: str, since_id: int) -> list:

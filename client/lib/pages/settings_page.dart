@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../widgets/remote_media_image.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/settings_service.dart';
@@ -449,7 +450,7 @@ class _SettingsPageState extends State<SettingsPage> {
     } else {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
+        child: RemoteMediaImage(
           path,
           headers: SecureBackendClient.authHeaders,
           width: 40,

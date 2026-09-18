@@ -14,12 +14,78 @@ import 'storage_service.dart';
 import 'memory_service.dart';
 import 'chat_list_service.dart';
 import 'secure_websocket_client.dart';
+import 'conditional_cache_service.dart';
 
 /// 角色管理服务
 /// 管理 AI 角色的创建、切换和持久化
 class RoleService {
   static final List<Role> _roles = [];
   static String _currentRoleId = 'default';
+  static final Map<String, Map<String, String>> _syncedFields = {};
+  static Future<void> _saveBaselines() => StorageService.setJson(
+    'roles_sync_baselines',
+    _syncedFields,
+  ).then((_) {});
+
+  static Role _mergeRemote(Role remote, Role? local, Iterable<String> fields) {
+    final baseline = _syncedFields[remote.id];
+    final remotePrints = _roleFingerprints(remote);
+    final merged = remote.toJson();
+    if (local != null && baseline != null) {
+      final localPrints = _roleFingerprints(local);
+      final localJson = local.toJson();
+      for (final key in localPrints.keys) {
+        if (baseline[key] != localPrints[key] && localJson.containsKey(key)) {
+          merged[key] = localJson[key];
+        }
+      }
+    }
+    _syncedFields[remote.id] = baseline == null
+        ? remotePrints
+        : {
+            ...baseline,
+            for (final key in fields)
+              if (remotePrints.containsKey(key)) key: remotePrints[key]!,
+          };
+    return Role.fromJson(merged);
+  }
+
+  static String _fingerprint(dynamic value) =>
+      ConditionalCacheService.digest(jsonEncode(value));
+  static Map<String, String> _roleFingerprints(Role role) => {
+    ..._roleUpdatePayload(
+      role,
+    ).map((key, value) => MapEntry(key, _fingerprint(value))),
+    'onebot_config.secret': _fingerprint(role.onebotConfig.secret),
+  };
+
+  static Future<Role> ensureRoleDetails(String roleId) async {
+    final response = await SecureWebSocketClient.instance.request(
+      'roles_detail',
+      {'role_id': roleId},
+    );
+    final raw = Map<String, dynamic>.from(response['role'] as Map);
+    final previous = getRoleById(roleId);
+    final role = _mergeRemote(
+      Role.fromJson({
+        ...?previous?.toJson(),
+        ...raw,
+        'system_prompt': raw['system_prompt'] ?? '',
+      }),
+      previous,
+      raw.keys,
+    );
+    if (raw['onebot_config'] is Map &&
+        (raw['onebot_config'] as Map).containsKey('secret')) {
+      _syncedFields[roleId]!['onebot_config.secret'] = _fingerprint(
+        (raw['onebot_config'] as Map)['secret'] ?? '',
+      );
+    }
+    await updateRoleLocal(role);
+    await _saveBaselines();
+    return role;
+  }
+
   static const String _toolRolePrefix = '1000000000';
   static const String _proactiveConfigMigrationKey =
       'proactive_config_server_sync_v1';
@@ -33,6 +99,10 @@ class RoleService {
 
   /// 上次成功发起角色同步的时间（TTL 节流）
   static DateTime? _lastSyncAt;
+  static void invalidateSync() {
+    _lastSyncAt = null;
+  }
+
   static const Duration _syncThrottle = Duration(seconds: 30);
 
   static String _normalizeAvatarUrl(String value) {
@@ -76,6 +146,18 @@ class RoleService {
     }
     _currentRoleId =
         StorageService.getString(StorageService.keyCurrentRoleId) ?? 'default';
+    _syncedFields.clear();
+    final savedBaselines = StorageService.getJson('roles_sync_baselines');
+    for (final role in _roles) {
+      final stored = savedBaselines?[role.id];
+      if (stored is Map) {
+        _syncedFields[role.id] = stored.map(
+          (key, value) => MapEntry(key.toString(), value.toString()),
+        );
+      } else if (savedBaselines == null) {
+        _syncedFields[role.id] = _roleFingerprints(role);
+      }
+    }
     if (!_roles.any((r) => r.id == _currentRoleId)) {
       _currentRoleId = _roles.isNotEmpty ? _roles.first.id : 'default';
     }
@@ -90,6 +172,7 @@ class RoleService {
   /// 保存角色列表
   /// [backendHash] 若提供（来自后端同步），直接采用；否则本地计算。
   static Future<void> _saveRoles({String? backendHash}) async {
+    await _saveBaselines();
     final jsonList = _roles.map((r) => r.toJson()).toList();
     await StorageService.setJsonList(StorageService.keyRoles, jsonList);
     await StorageService.setString(
@@ -301,6 +384,7 @@ class RoleService {
       );
       _roles.removeWhere((r) => r.id == cloned.id);
       _roles.add(cloned);
+      _syncedFields[cloned.id] = _roleFingerprints(cloned);
       await _saveRoles();
       debugPrint('RoleService: Cloned role ${cloned.id} from $sourceId');
       return cloned;
@@ -342,14 +426,15 @@ class RoleService {
   // ========== 后端同步 ==========
 
   /// 从后端获取角色列表
-  static Future<bool> fetchFromBackend() async {
+  static Future<bool> fetchFromBackend({bool force = false}) async {
     try {
-      final response = await SecureWebSocketClient.instance.request(
-        'roles_list',
-        _localRolesHash.isEmpty || !_hasValidLocalCache
-            ? const <String, dynamic>{}
-            : {'client_hash': _localRolesHash},
-      );
+      final response = await SecureWebSocketClient.instance
+          .request('roles_list', {
+            'summary': true,
+            if (_localRolesHash.isNotEmpty && _hasValidLocalCache)
+              'client_hash': _localRolesHash,
+          }, force: force);
+      _lastSyncAt = DateTime.now();
       if (response['not_modified'] == true) {
         final responseHash = response['hash']?.toString() ?? '';
         if (responseHash.isNotEmpty && responseHash != _localRolesHash) {
@@ -363,6 +448,16 @@ class RoleService {
       }
       if (response['roles'] != null) {
         final List<dynamic> rolesJson = response['roles'];
+        final remoteIds = rolesJson
+            .whereType<Map>()
+            .map((r) => r['id'].toString())
+            .toSet();
+        _roles.removeWhere(
+          (role) =>
+              !remoteIds.contains(role.id) &&
+              _syncedFields[role.id] != null &&
+              mapEquals(_syncedFields[role.id], _roleFingerprints(role)),
+        );
         for (final json in rolesJson) {
           try {
             // 解析 core_memory
@@ -447,40 +542,53 @@ class RoleService {
               final existing = _roles[existingIndex];
               // 合并：用后端的基础信息（名称、描述、头像、系统提示词、核心记忆），
               // 保留本地的所有AI参数和高级配置
-              _roles[existingIndex] = existing.copyWith(
-                name: backendRole.name,
-                description: backendRole.description,
-                systemPrompt: backendRole.systemPrompt,
-                avatarUrl: backendRole.avatarUrl,
-                avatarHash: backendRole.avatarHash,
-                chatBackgroundUrl: backendRole.chatBackgroundUrl.isNotEmpty
-                    ? backendRole.chatBackgroundUrl
-                    : existing.chatBackgroundUrl,
-                coreMemory: backendRole.coreMemory,
-                aiModel: backendRole.aiModel,
-                aiApiUrl: backendRole.aiApiUrl,
-                aiApiKey: backendRole.aiApiKey,
-                aiTemperature: backendRole.aiTemperature,
-                gender: backendRole.gender,
-                menstruationCycle: backendRole.menstruationCycle,
-                temperature: backendRole.temperature,
-                maxContextRounds: backendRole.maxContextRounds,
-                maxContextLength: backendRole.maxContextLength,
-                modelMaxContextLength: backendRole.modelMaxContextLength,
-                clearModelMaxContextLength:
-                    backendRole.modelMaxContextLength == null,
-                onebotConfig: backendRole.onebotConfig,
-                statsConfig: backendRole.statsConfig,
-                showAction: backendRole.showAction,
-                showPsychology: backendRole.showPsychology,
-                showStats: backendRole.showStats,
-                showNoReply: backendRole.showNoReply,
-                archived: backendRole.archived,
-                proactiveConfig: backendRole.proactiveConfig,
-                followupConfig: backendRole.followupConfig,
+              _roles[existingIndex] = _mergeRemote(
+                existing.copyWith(
+                  name: backendRole.name,
+                  description: backendRole.description,
+                  systemPrompt: json.containsKey('system_prompt')
+                      ? backendRole.systemPrompt
+                      : existing.systemPrompt,
+                  avatarUrl: backendRole.avatarUrl,
+                  avatarHash: backendRole.avatarHash,
+                  chatBackgroundUrl: backendRole.chatBackgroundUrl.isNotEmpty
+                      ? backendRole.chatBackgroundUrl
+                      : existing.chatBackgroundUrl,
+                  coreMemory: json.containsKey('core_memory')
+                      ? backendRole.coreMemory
+                      : existing.coreMemory,
+                  aiModel: backendRole.aiModel,
+                  aiApiUrl: backendRole.aiApiUrl,
+                  aiApiKey: json.containsKey('ai_api_key')
+                      ? backendRole.aiApiKey
+                      : existing.aiApiKey,
+                  aiTemperature: backendRole.aiTemperature,
+                  gender: backendRole.gender,
+                  menstruationCycle: backendRole.menstruationCycle,
+                  temperature: backendRole.temperature,
+                  maxContextRounds: backendRole.maxContextRounds,
+                  maxContextLength: backendRole.maxContextLength,
+                  modelMaxContextLength: backendRole.modelMaxContextLength,
+                  clearModelMaxContextLength:
+                      backendRole.modelMaxContextLength == null,
+                  onebotConfig: backendRole.onebotConfig.copyWith(
+                    secret: existing.onebotConfig.secret,
+                  ),
+                  statsConfig: backendRole.statsConfig,
+                  showAction: backendRole.showAction,
+                  showPsychology: backendRole.showPsychology,
+                  showStats: backendRole.showStats,
+                  showNoReply: backendRole.showNoReply,
+                  archived: backendRole.archived,
+                  proactiveConfig: backendRole.proactiveConfig,
+                  followupConfig: backendRole.followupConfig,
+                ),
+                existing,
+                (json as Map).keys.cast<String>(),
               );
             } else {
               _roles.add(backendRole);
+              _syncedFields[backendRole.id] = _roleFingerprints(backendRole);
             }
           } catch (e) {
             debugPrint('RoleService: Error parsing backend role: $e');
@@ -527,68 +635,76 @@ class RoleService {
   }
 
   static Future<bool> _doSyncIfHashMismatch() async {
-    _lastSyncAt = DateTime.now();
-    try {
-      final response = await SecureWebSocketClient.instance.request(
-        'roles_hash',
-        const <String, dynamic>{},
-      );
-      final backendHash = response['hash']?.toString() ?? '';
-      if (backendHash.isNotEmpty && backendHash == _localRolesHash) {
-        debugPrint('RoleService: roles hash matched, skip full fetch');
-        return false;
-      }
-    } catch (e) {
-      // hash 探测失败则退回到全量拉取（保持原有行为）
-      debugPrint(
-        'RoleService: roles_hash probe failed, fallback to full fetch: $e',
-      );
-    }
-    return fetchFromBackend();
+    return fetchFromBackend(force: true);
   }
 
-  /// 同步单个角色到后端
+  static Future<void> reloadLocalCache() async {
+    _roles.clear();
+    _lastSyncAt = null;
+    _inFlightSync = null;
+    await _loadRoles();
+  }
+
+  static Map<String, dynamic> _roleUpdatePayload(Role role) => {
+    'id': role.id,
+    'name': role.name,
+    'description': role.description,
+    'system_prompt': role.systemPrompt,
+    'avatar_url': role.avatarUrl,
+    'chat_background_url': role.chatBackgroundUrl,
+    'persona': role.description,
+    'core_memory': role.coreMemory,
+    'ai_model': role.aiModel,
+    'ai_api_url': role.aiApiUrl,
+    'ai_api_key': role.aiApiKey,
+    'ai_temperature': role.aiTemperature,
+    'ai_timeout_seconds': role.aiTimeoutSeconds,
+    'ai_reasoning_effort': role.aiReasoningEffort,
+    'ai_thinking_enabled': role.aiThinkingEnabled,
+    'ai_api_format': role.aiApiFormat,
+    'ai_thinking_budget': role.aiThinkingBudget,
+    'ai_stream': role.aiStream,
+    'gender': role.gender,
+    'menstruation_cycle': role.menstruationCycle,
+    'temperature': role.temperature,
+    'onebot_config': role.onebotConfig.toJson(),
+    'stats_config': role.statsConfig.toJson(),
+    'show_action': role.showAction,
+    'show_sound': role.showSound,
+    'show_psychology': role.showPsychology,
+    'show_stats': role.showStats,
+    'show_no_reply': role.showNoReply,
+    'archived': role.archived,
+    'max_context_rounds': role.maxContextRounds,
+    'max_context_length': role.maxContextLength,
+    'model_max_context_length': role.modelMaxContextLength,
+    'allow_web_search': role.allowWebSearch,
+    'proactive_config': role.proactiveConfig.toBackendJson(),
+    'followup_config': role.followupConfig.toBackendJson(),
+  };
+
+  /// A summary-only role must never overwrite unloaded detail fields.
   static Future<bool> syncRoleToBackend(Role role) async {
     try {
+      final all = _roleUpdatePayload(role);
+      final baseline = _syncedFields[role.id] ?? {};
+      final changes = <String, dynamic>{
+        for (final entry in all.entries)
+          if (baseline[entry.key] != _fingerprint(entry.value))
+            entry.key: entry.value,
+      };
+      if (changes.isEmpty) return true;
+      if (changes['onebot_config'] is Map &&
+          baseline['onebot_config.secret'] ==
+              _fingerprint(role.onebotConfig.secret)) {
+        (changes['onebot_config'] as Map).remove('secret');
+      }
       await SecureWebSocketClient.instance.request('roles_upsert', {
-        'role': {
-          'id': role.id,
-          'name': role.name,
-          'description': role.description,
-          'system_prompt': role.systemPrompt,
-          'avatar_url': role.avatarUrl,
-          'chat_background_url': role.chatBackgroundUrl,
-          'persona': role.description,
-          'core_memory': role.coreMemory,
-          'ai_model': role.aiModel,
-          'ai_api_url': role.aiApiUrl,
-          'ai_api_key': role.aiApiKey,
-          'ai_temperature': role.aiTemperature,
-          'ai_timeout_seconds': role.aiTimeoutSeconds,
-          'ai_reasoning_effort': role.aiReasoningEffort,
-          'ai_thinking_enabled': role.aiThinkingEnabled,
-          'ai_api_format': role.aiApiFormat,
-          'ai_thinking_budget': role.aiThinkingBudget,
-          'ai_stream': role.aiStream,
-          'gender': role.gender,
-          'menstruation_cycle': role.menstruationCycle,
-          'temperature': role.temperature,
-          'onebot_config': role.onebotConfig.toJson(),
-          'stats_config': role.statsConfig.toJson(),
-          'show_action': role.showAction,
-          'show_sound': role.showSound,
-          'show_psychology': role.showPsychology,
-          'show_stats': role.showStats,
-          'show_no_reply': role.showNoReply,
-          'archived': role.archived,
-          'max_context_rounds': role.maxContextRounds,
-          'max_context_length': role.maxContextLength,
-          'model_max_context_length': role.modelMaxContextLength,
-          'allow_web_search': role.allowWebSearch,
-          'proactive_config': role.proactiveConfig.toBackendJson(),
-          'followup_config': role.followupConfig.toBackendJson(),
-        },
+        'compact_response': true,
+        'role': {'id': role.id, 'name': role.name, ...changes},
       });
+      _syncedFields[role.id] = _roleFingerprints(role);
+      await _saveBaselines();
       return true;
     } catch (e) {
       debugPrint('RoleService: Sync to backend failed: $e');

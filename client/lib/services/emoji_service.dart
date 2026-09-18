@@ -9,6 +9,9 @@ import 'storage_service.dart';
 class EmojiService {
   static EmojiService? _instance;
   static EmojiService get instance => _instance ??= EmojiService._();
+  static void resetLocalCache() {
+    _instance = null;
+  }
 
   EmojiService._();
 

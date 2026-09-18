@@ -100,6 +100,8 @@ class TaskService {
   // ========== 任务管理 ==========
 
   static Future<void> _loadTasks() async {
+    _tasks.clear();
+    _lastFetchAt = null;
     _localHash = StorageService.getString(_hashStorageKey) ?? '';
     final jsonList = StorageService.getJsonList(
       StorageService.keyScheduledTasks,
@@ -293,14 +295,15 @@ class TaskService {
   }
 
   static Future<bool> _doFetchFromBackend() async {
-    _lastFetchAt = DateTime.now();
     try {
       final data = await SecureWebSocketClient.instance.request(
         'tasks_list',
         _localHash.isEmpty || !_hasValidLocalCache
             ? const <String, dynamic>{}
             : {'client_hash': _localHash},
+        force: true,
       );
+      _lastFetchAt = DateTime.now();
       final responseHash = data['hash']?.toString() ?? '';
       if (data['not_modified'] == true) {
         if (responseHash.isNotEmpty && responseHash != _localHash) {

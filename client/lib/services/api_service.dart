@@ -22,10 +22,7 @@ class ApiService {
     if (role.id == 'temp') {
       return ApiResponse.error('后端聊天请求必须使用已保存的角色');
     }
-    return sendChatViaBackend(
-      roleId: role.id,
-      message: message,
-    );
+    return sendChatViaBackend(roleId: role.id, message: message);
   }
 
   // ========== 后端集成 ==========
@@ -107,8 +104,20 @@ class ApiService {
       final mergedContext = Map<String, dynamic>.from(context ?? {});
       mergedContext['client_submission_id'] = clientSubmissionId;
       mergedContext['async'] = true; // 标记使用异步任务机制
+      final fallback = <String, dynamic>{};
+      for (final key in ['history', 'core_memory', 'attached_json']) {
+        final value = mergedContext.remove(key);
+        if (value != null &&
+            value.toString().isNotEmpty &&
+            value.toString() != '[]') {
+          fallback[key] = value;
+        }
+      }
+      mergedContext['compact_context'] = true;
+      mergedContext['fallback_fields'] = fallback.keys.toList();
 
-      final wsData = await SecureWebSocketClient.instance.request(
+      Future<Map<String, dynamic>>
+      submit() => SecureWebSocketClient.instance.request(
         'ai_event',
         {
           'event': {
@@ -121,6 +130,16 @@ class ApiService {
         // Queue response can be delayed by backend load; avoid premature timeout-triggered reconnect.
         timeout: const Duration(seconds: 120),
       );
+      var wsData = await submit();
+      if (wsData['status'] == 'context_required') {
+        for (final key in (wsData['fields'] as List? ?? [])) {
+          if (fallback.containsKey(key)) {
+            mergedContext[key.toString()] = fallback[key];
+          }
+        }
+        mergedContext['context_supplied'] = true;
+        wsData = await submit();
+      }
 
       // 后端接受异步任务，返回 task_id
       if (wsData['status'] == 'queued' && wsData['task_id'] != null) {

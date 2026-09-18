@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'secure_backend_client.dart';
 import 'storage_service.dart';
+import 'settings_service.dart';
 
 class AvatarCacheService {
   static const String _metaStorageKey = 'avatar_cache_meta_v1';
@@ -45,8 +46,8 @@ class AvatarCacheService {
 
   static String _identityFor(String? backendHash, String normalizedUrl) {
     return (backendHash != null && backendHash.isNotEmpty)
-        ? '$normalizedUrl#$backendHash'
-        : normalizedUrl;
+        ? '${SecureBackendClient.cacheIdentity}|$normalizedUrl#$backendHash'
+        : '${SecureBackendClient.cacheIdentity}|$normalizedUrl';
   }
 
   /// 同步查已解析路径：内存命中即返回，供 UI 首帧直接显示、消除闪烁。
@@ -142,7 +143,7 @@ class AvatarCacheService {
         backendHash: backendHash,
         identity: identity,
         epoch: epoch,
-        download: download ?? SecureBackendClient.getRaw,
+        download: download,
         keyGeneration: keyGeneration,
       ).whenComplete(() {
         _inFlight.remove(requestKey);
@@ -156,13 +157,14 @@ class AvatarCacheService {
     required String identity,
     required int epoch,
     String? backendHash,
-    required Future<http.Response> Function(String) download,
+    required Future<http.Response> Function(String)? download,
     required int keyGeneration,
   }) async {
     if (remoteUrl.isEmpty) return null;
     await _mutationTail;
     bool current() =>
         epoch == _epoch &&
+        identity == _identityFor(backendHash, _normalizeUrl(remoteUrl)) &&
         _latestIdentity[cacheKey] == identity &&
         (_keyGenerations[cacheKey] ?? 0) == keyGeneration;
     if (!current()) return null;
@@ -176,6 +178,7 @@ class AvatarCacheService {
     final entryUrl = entry?['remote_url'] as String?;
 
     final hasExistingFile =
+        entry?['scope'] == SecureBackendClient.cacheIdentity &&
         entryPath != null &&
         entryPath.isNotEmpty &&
         await File(entryPath).exists();
@@ -191,7 +194,15 @@ class AvatarCacheService {
         hasExistingFile &&
         urlMatches &&
         (hashMatches ||
-            ((backendHash == null || backendHash.isEmpty) && urlMatches));
+            ((backendHash == null || backendHash.isEmpty) &&
+                urlMatches &&
+                DateTime.now().difference(
+                      DateTime.tryParse(
+                            entry?['validated_at']?.toString() ?? '',
+                          ) ??
+                          DateTime(1970),
+                    ) <
+                    const Duration(minutes: 5)));
 
     if (canReuse) {
       if (!current()) return null;
@@ -209,7 +220,28 @@ class AvatarCacheService {
     }
 
     try {
-      final response = await download(remoteUrl);
+      final response = download != null
+          ? await download(remoteUrl)
+          : await SecureBackendClient.getRaw(
+              remoteUrl,
+              includeAuth:
+                  Uri.parse(remoteUrl).origin ==
+                  Uri.parse(SettingsService.instance.backendUrl).origin,
+              headers: {
+                if (hasExistingFile && urlMatches && entry?['etag'] != null)
+                  'If-None-Match': entry!['etag'].toString(),
+              },
+            );
+      if (response.statusCode == 304 && hasExistingFile && current()) {
+        entry!['validated_at'] = DateTime.now().toIso8601String();
+        entry['backend_hash'] = backendHash ?? '';
+        _resolvedPaths[cacheKey] = _ResolvedEntry(
+          path: entryPath,
+          identity: identity,
+        );
+        _schedulePersist();
+        return entryPath;
+      }
       if (response.statusCode >= 200 &&
           response.statusCode < 300 &&
           response.bodyBytes.isNotEmpty) {
@@ -247,6 +279,9 @@ class AvatarCacheService {
           }
 
           _meta[cacheKey] = {
+            'scope': SecureBackendClient.cacheIdentity,
+            'etag': response.headers['etag'],
+            'validated_at': DateTime.now().toIso8601String(),
             'remote_url': normalizedUrl,
             'backend_hash': backendHash ?? '',
             'local_path': file.path,

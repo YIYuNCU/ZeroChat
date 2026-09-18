@@ -29,6 +29,15 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
   void initState() {
     super.initState();
     _role = widget.role;
+    RoleService.ensureRoleDetails(_role.id)
+        .then((role) {
+          if (mounted) {
+            setState(() {
+              _role = role;
+            });
+          }
+        })
+        .catchError((Object _) {});
   }
 
   @override
@@ -446,6 +455,17 @@ class _RoleDetailPageState extends State<RoleDetailPage> {
   }
 
   void _editRole() async {
+    try {
+      _role = await RoleService.ensureRoleDetails(_role.id);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('角色详情同步失败，请重试')));
+      }
+      return;
+    }
+    if (!mounted) return;
     final result = await Navigator.push<Role>(
       context,
       MaterialPageRoute(builder: (context) => RoleSettingsPage(role: _role)),

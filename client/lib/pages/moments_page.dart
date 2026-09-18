@@ -1,4 +1,5 @@
 import 'dart:io';
+import '../widgets/remote_media_image.dart';
 import 'package:flutter/material.dart';
 import '../models/moment_post.dart';
 import '../services/moments_service.dart';
@@ -213,7 +214,7 @@ class _MomentsPageState extends State<MomentsPage> {
         errorBuilder: (_, _, _) => fallback,
       );
     } else {
-      return Image.network(
+      return RemoteMediaImage(
         coverUrl,
         headers: SecureBackendClient.authHeaders,
         fit: BoxFit.cover,

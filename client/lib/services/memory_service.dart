@@ -5,18 +5,127 @@ import '../models/message.dart';
 import 'storage_service.dart';
 import 'role_service.dart';
 import 'secure_websocket_client.dart';
+import 'secure_backend_client.dart';
+import 'settings_service.dart';
+import 'conditional_cache_service.dart';
+
+class MemoryPageSession {
+  MemoryPageSession(this.roleId, {this.vector = false});
+  final String roleId;
+  final bool vector;
+  List<Map<String, dynamic>> items = [];
+  String? version;
+  int? cursor;
+  bool hasMore = false;
+  bool busy = false;
+  String? error;
+  void Function()? onCached;
+  Future<void> load({bool more = false, bool force = false}) async {
+    if (busy) return;
+    busy = true;
+    try {
+      var page = await MemoryService.readMemoryPage(
+        roleId: roleId,
+        vector: vector,
+        cursor: more ? cursor : null,
+        version: more ? version : null,
+        force: force,
+        onCached: more
+            ? null
+            : (page) {
+                final raw = page[vector ? 'items' : 'short_term'];
+                if (raw is List) {
+                  items =
+                      raw
+                          .whereType<Map>()
+                          .map((row) => Map<String, dynamic>.from(row))
+                          .toList()
+                        ..sort(
+                          (a, b) => (b['id'] as int).compareTo(a['id'] as int),
+                        );
+                  version = page['version']?.toString();
+                  cursor = page['next_cursor'] as int?;
+                  hasMore = page['has_more'] == true;
+                  onCached?.call();
+                }
+              },
+      );
+      if (page['reset_required'] == true) {
+        page = await MemoryService.readMemoryPage(
+          roleId: roleId,
+          vector: vector,
+          force: true,
+        );
+        more = false;
+      }
+      final rows = (page[vector ? 'items' : 'short_term'] as List)
+          .whereType<Map>()
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList();
+      items = [if (more) ...items, ...rows]
+        ..sort((a, b) => (b['id'] as int).compareTo(a['id'] as int));
+      version = page['version']?.toString();
+      cursor = page['next_cursor'] as int?;
+      hasMore = page['has_more'] == true;
+      error = null;
+    } catch (e) {
+      error = '同步失败，已保留现有记忆，可重试';
+    } finally {
+      busy = false;
+    }
+  }
+}
 
 /// 记忆服务
 /// 管理短期记忆和核心记忆
 class MemoryService {
+  static Future<Map<String, dynamic>> readMemoryPage({
+    required String roleId,
+    bool vector = false,
+    int? cursor,
+    String? version,
+    bool force = false,
+    void Function(Map<String, dynamic>)? onCached,
+  }) => SecureWebSocketClient.instance.request(
+    vector ? 'vector_memory_list' : 'roles_memory_get',
+    {
+      'role_id': roleId,
+      if (vector) 'paged': true,
+      if (!vector) 'sections': ['short_term'],
+      'limit': vector ? 100 : 200,
+      if (cursor != null) (vector ? 'offset' : 'before_id'): cursor,
+      if (version != null) 'version': version,
+    },
+    force: force || cursor != null,
+    onCached: onCached,
+  );
+
   /// 短期记忆：按会话ID存储的对话历史
-  static final Map<String, List<Message>> _shortTermMemory = {};
+  static final Map<String, Map<String, List<Message>>> _localShortTermByScope =
+      {};
+  static Map<String, List<Message>> get _shortTermMemory =>
+      _localShortTermByScope.putIfAbsent(_scope, () => {});
 
   /// 核心记忆：重要的长期记忆
-  static List<String> _coreMemory = [];
+  static String get _scope => ConditionalCacheService.digest(
+    '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}',
+  );
+  static String _coreKey(String rid) => 'core_memory_${_scope}_$rid';
+  static final Map<String, List<String>> _coreByRole = {};
+  static List<String> get _coreMemory => _coreByRole.putIfAbsent(
+    _coreKey(RoleService.currentRoleId),
+    () =>
+        StorageService.getStringList(_coreKey(RoleService.currentRoleId)) ?? [],
+  );
+  static set _coreMemory(List<String> value) =>
+      _coreByRole[_coreKey(RoleService.currentRoleId)] = value;
 
   /// 向量记忆数量（后端向量记忆库）
-  static int vectorMemoryCount = 0;
+  static final Map<String, int> _vectorCounts = {};
+  static int get vectorMemoryCount =>
+      _vectorCounts[_coreKey(RoleService.currentRoleId)] ?? 0;
+  static set vectorMemoryCount(int value) =>
+      _vectorCounts[_coreKey(RoleService.currentRoleId)] = value;
 
   /// 短期记忆的最大条数（每个会话）
   static int maxShortTermSize = 100;
@@ -26,9 +135,16 @@ class MemoryService {
   static const int maxJsonMemoryEntries = 200;
 
   /// 按 roleId 记录上次核心记忆刷新时间与进行中的请求（TTL 节流 + in-flight 去重）
-  static final Map<String, DateTime> _coreMemoryLastRefresh = {};
-  static final Map<String, Future<void>> _coreMemoryInFlight = {};
+  static final Map<String, Map<String, DateTime>> _refreshByScope = {};
+  static Map<String, DateTime> get _coreMemoryLastRefresh =>
+      _refreshByScope.putIfAbsent(_scope, () => {});
+  static final Map<String, Map<String, Future<void>>> _inFlightByScope = {};
+  static Map<String, Future<void>> get _coreMemoryInFlight =>
+      _inFlightByScope.putIfAbsent(_scope, () => {});
   static const Duration _coreMemoryRefreshThrottle = Duration(seconds: 30);
+  static void invalidateSync() {
+    _coreMemoryLastRefresh.clear();
+  }
 
   /// 初始化记忆服务
   static Future<void> init() async {
@@ -51,7 +167,9 @@ class MemoryService {
 
   /// 加载核心记忆
   static Future<void> _loadCoreMemory() async {
-    final list = StorageService.getStringList(StorageService.keyCoreMemory);
+    final list = StorageService.getStringList(
+      _coreKey(RoleService.currentRoleId),
+    );
     if (list != null) {
       _coreMemory = List.from(list);
     }
@@ -80,7 +198,7 @@ class MemoryService {
       }
     }
 
-    final future = _doRefreshCoreMemoryFromBackend(rid);
+    final future = _doRefreshCoreMemoryFromBackend(rid, force: force);
     _coreMemoryInFlight[rid] = future;
     try {
       await future;
@@ -89,31 +207,44 @@ class MemoryService {
     }
   }
 
-  static Future<void> _doRefreshCoreMemoryFromBackend(String rid) async {
-    _coreMemoryLastRefresh[rid] = DateTime.now();
+  static Future<void> _doRefreshCoreMemoryFromBackend(
+    String rid, {
+    bool force = false,
+  }) async {
+    final key = _coreKey(rid);
     try {
       final response = await SecureWebSocketClient.instance.request(
         'roles_memory_get',
-        {'role_id': rid},
+        {
+          'role_id': rid,
+          'sections': ['core_memory', 'vector_memory_count'],
+        },
+        force: force,
       );
+      if (key != _coreKey(rid)) return;
+      _coreMemoryLastRefresh[rid] = DateTime.now();
       final dynamic raw = response['core_memory'];
+      List<String> memories;
       if (raw is List) {
-        _coreMemory = raw.map((e) => e.toString()).toList();
+        memories = raw.map((e) => e.toString()).toList();
       } else if (raw is String && raw.trim().isNotEmpty) {
-        _coreMemory = raw
+        memories = raw
             .split(RegExp(r'[\n；;]'))
             .map((e) => e.trim())
             .where((e) => e.isNotEmpty)
             .toList();
       } else {
-        _coreMemory = [];
+        memories = [];
       }
+      _coreByRole[key] = memories;
       // 读取向量记忆数量
       if (response['vector_memory_count'] is int) {
-        vectorMemoryCount = response['vector_memory_count'] as int;
+        _vectorCounts[key] = response['vector_memory_count'] as int;
       }
-      await _saveCoreMemory();
-      debugPrint('MemoryService: Core memory refreshed from backend for role $rid, vector memories: $vectorMemoryCount');
+      await StorageService.setStringList(key, memories);
+      debugPrint(
+        'MemoryService: Core memory refreshed from backend for role $rid, vector memories: $vectorMemoryCount',
+      );
     } catch (e) {
       debugPrint('MemoryService: Refresh core memory from backend failed: $e');
     }
@@ -122,7 +253,7 @@ class MemoryService {
   /// 保存核心记忆
   static Future<void> _saveCoreMemory() async {
     await StorageService.setStringList(
-      StorageService.keyCoreMemory,
+      _coreKey(RoleService.currentRoleId),
       _coreMemory,
     );
   }
@@ -197,8 +328,12 @@ class MemoryService {
   }
 
   /// 获取核心记忆
-  static List<String> getCoreMemory() {
-    return List.unmodifiable(_coreMemory);
+  static List<String> getCoreMemory({String? roleId}) {
+    if (roleId == null) return List.unmodifiable(_coreMemory);
+    final key = _coreKey(roleId);
+    return List.unmodifiable(
+      _coreByRole[key] ?? StorageService.getStringList(key) ?? [],
+    );
   }
 
   /// 移除核心记忆
@@ -219,9 +354,13 @@ class MemoryService {
   /// 仅更新本地核心记忆缓存（不触发后端同步）。
   /// 用于调用方已经把权威数据写入后端（如 roles_memory_update）后，
   /// 直接同步本地状态，避免多余的回读往返。
-  static Future<void> setCoreMemoryLocal(List<String> memories) async {
-    _coreMemory = List<String>.from(memories);
-    await _saveCoreMemory();
+  static Future<void> setCoreMemoryLocal(
+    List<String> memories, {
+    String? roleId,
+  }) async {
+    final key = _coreKey(roleId ?? RoleService.currentRoleId);
+    _coreByRole[key] = List<String>.from(memories);
+    await StorageService.setStringList(key, memories);
   }
 
   // ========== 工具方法 ==========
@@ -333,7 +472,9 @@ class MemoryService {
   }
 
   /// 列出后端向量记忆条目
-  static Future<List<Map<String, dynamic>>> listVectorMemories({String? roleId}) async {
+  static Future<List<Map<String, dynamic>>> listVectorMemories({
+    String? roleId,
+  }) async {
     try {
       final rid = roleId ?? RoleService.getCurrentRole().id;
       final response = await SecureWebSocketClient.instance.request(
@@ -376,7 +517,11 @@ class MemoryService {
   }
 
   /// 更新单条向量记忆文本（后端会重新嵌入）
-  static Future<bool> updateVectorMemory(int memoryId, String newText, {String? roleId}) async {
+  static Future<bool> updateVectorMemory(
+    int memoryId,
+    String newText, {
+    String? roleId,
+  }) async {
     try {
       final rid = roleId ?? RoleService.getCurrentRole().id;
       final response = await SecureWebSocketClient.instance.request(
@@ -391,16 +536,16 @@ class MemoryService {
   }
 
   /// 清空后端向量记忆库
-  static Future<bool> clearVectorMemory() async {
+  static Future<bool> clearVectorMemory({String? roleId}) async {
     try {
-      final roleId = RoleService.getCurrentRole().id;
+      roleId ??= RoleService.getCurrentRole().id;
       final response = await SecureWebSocketClient.instance.request(
         'vector_memory_clear',
         {'role_id': roleId},
       );
       final bool success = response['success'] == true;
       if (success) {
-        vectorMemoryCount = 0;
+        _vectorCounts[_coreKey(roleId)] = 0;
       }
       debugPrint('MemoryService: Vector memory cleared for role $roleId');
       return success;
@@ -445,11 +590,16 @@ class MemoryService {
   // ========== 后端短期记忆（对话历史）管理 ==========
 
   /// 每个 roleId 的短期记忆本地缓存（内存中）
-  static final Map<String, List<Map<String, dynamic>>> _shortTermCache = {};
+  static final Map<String, Map<String, List<Map<String, dynamic>>>>
+  _shortTermByScope = {};
+  static Map<String, List<Map<String, dynamic>>> get _shortTermCache =>
+      _shortTermByScope.putIfAbsent(_scope, () => {});
   static const int maxShortTermCacheEntries = 200;
 
   /// 每个 roleId 已知的最大条目 id（用于增量拉取）
-  static final Map<String, int> _shortTermLastId = {};
+  static final Map<String, Map<String, int>> _lastIdsByScope = {};
+  static Map<String, int> get _shortTermLastId =>
+      _lastIdsByScope.putIfAbsent(_scope, () => {});
 
   /// 从后端拉取短期记忆（首次全量，之后增量）
   /// 返回合并后的完整列表（倒序：最新的在最前）
@@ -459,15 +609,16 @@ class MemoryService {
   }) async {
     try {
       final rid = roleId ?? RoleService.getCurrentRole().id;
-      final lastId = forceFullRefresh ? null : _shortTermLastId[rid];
-      final payload = <String, dynamic>{'role_id': rid};
-      if (lastId != null) {
-        payload['since_id'] = lastId;
-      }
+      final payload = <String, dynamic>{
+        'role_id': rid,
+        'sections': ['short_term'],
+        'limit': 200,
+      };
 
       final response = await SecureWebSocketClient.instance.request(
         'roles_memory_get',
         payload,
+        force: forceFullRefresh,
       );
 
       final raw = response['short_term'];
@@ -503,7 +654,9 @@ class MemoryService {
       }
 
       // 按 id 倒序返回（最新的在最前）
-      final cached = List<Map<String, dynamic>>.from(_shortTermCache[rid] ?? []);
+      final cached = List<Map<String, dynamic>>.from(
+        _shortTermCache[rid] ?? [],
+      );
       cached.sort((a, b) {
         final ia = a['id'] is int ? a['id'] as int : 0;
         final ib = b['id'] is int ? b['id'] as int : 0;
@@ -514,7 +667,9 @@ class MemoryService {
       debugPrint('MemoryService: Get short-term from backend failed: $e');
       // 失败时返回已缓存数据
       final rid = roleId ?? RoleService.getCurrentRole().id;
-      final cached = List<Map<String, dynamic>>.from(_shortTermCache[rid] ?? []);
+      final cached = List<Map<String, dynamic>>.from(
+        _shortTermCache[rid] ?? [],
+      );
       cached.sort((a, b) {
         final ia = a['id'] is int ? a['id'] as int : 0;
         final ib = b['id'] is int ? b['id'] as int : 0;
@@ -547,7 +702,11 @@ class MemoryService {
   }
 
   /// 更新单条短期记忆内容
-  static Future<bool> updateShortTermEntry(int entryId, String message, {String? roleId}) async {
+  static Future<bool> updateShortTermEntry(
+    int entryId,
+    String message, {
+    String? roleId,
+  }) async {
     try {
       final rid = roleId ?? RoleService.getCurrentRole().id;
       final response = await SecureWebSocketClient.instance.request(
@@ -574,7 +733,10 @@ class MemoryService {
   }
 
   /// 删除单条短期记忆
-  static Future<bool> deleteShortTermEntry(int entryId, {String? roleId}) async {
+  static Future<bool> deleteShortTermEntry(
+    int entryId, {
+    String? roleId,
+  }) async {
     try {
       final rid = roleId ?? RoleService.getCurrentRole().id;
       final response = await SecureWebSocketClient.instance.request(
@@ -643,5 +805,4 @@ class MemoryService {
       debugPrint('MemoryService: Backend sync error: $e');
     }
   }
-
 }

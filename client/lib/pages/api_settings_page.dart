@@ -806,6 +806,48 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
     SettingsService.instance.loadPromptRegistry().then((_) {
       if (mounted) setState(() {});
     });
+    _refreshSummaryConfig();
+  }
+
+  Future<void> _refreshSummaryConfig() async {
+    final controllers = [
+      _url,
+      _key,
+      _model,
+      _temperature,
+      _timeout,
+      _effort,
+      _budget,
+      _systemPrompt,
+    ];
+    final before = controllers.map((c) => c.text).join('\u0000');
+    final flags = [_enabled, _format, _thinkingEnabled, _profileId].join('|');
+    final ok = await SettingsService.instance.syncSettingsGroupsFromBackend([
+      widget.feature == SummaryFeature.context
+          ? 'context_summary'
+          : 'core_summary',
+    ]);
+    if (!mounted ||
+        !ok ||
+        before != controllers.map((c) => c.text).join('\u0000') ||
+        flags != [_enabled, _format, _thinkingEnabled, _profileId].join('|')) {
+      return;
+    }
+    final config = SettingsService.instance.applyBoundProfile(_config.copy());
+    setState(() {
+      _url.text = config.apiUrl;
+      _key.text = config.apiKey;
+      _model.text = config.model;
+      _temperature.text = '${config.temperature}';
+      _timeout.text = '${config.timeoutSeconds}';
+      _effort.text = config.reasoningEffort;
+      _budget.text = config.thinkingBudget?.toString() ?? '';
+      _systemPrompt.text = config.systemPrompt;
+      _enabled = config.enabled;
+      _format = config.apiFormat;
+      _thinkingEnabled = config.thinkingEnabled;
+      _profileId = _profileById(config.profileId)?.id;
+    });
   }
 
   @override
@@ -938,7 +980,9 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
           profileId: _effectiveProfileId,
         ),
       );
-      final synced = await SettingsService.instance.syncApiSettingsToBackend();
+      final synced = await SettingsService.instance.syncSummaryConfigToBackend(
+        widget.feature,
+      );
       if (!mounted) return;
       _showMessage(context, synced ? '已保存' : '已保存到本地，后端同步失败，可稍后重试');
     } catch (_) {
@@ -2099,7 +2143,49 @@ String _capabilityLabel(ModelProfileCapability capability) =>
     };
 
 void _showMessage(BuildContext context, String text) {
-  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  final syncError = SettingsService.instance.lastSyncError;
+  if (syncError != null && (text.contains('同步失败') || text.contains('保存失败'))) {
+    text = '$text\n$syncError';
+  }
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(text),
+      action: SettingsService.instance.hasSettingsConflict
+          ? SnackBarAction(
+              label: '处理冲突',
+              onPressed: () async {
+                final keepLocal = await showDialog<bool>(
+                  context: context,
+                  builder: (dialogContext) => AlertDialog(
+                    title: const Text('设置已在其他设备修改'),
+                    content: const Text('选择保留本地修改，或采用服务器当前值。其他未提交修改会保留。'),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(dialogContext, false),
+                        child: const Text('采用服务器'),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.pop(dialogContext, true),
+                        child: const Text('保留本地'),
+                      ),
+                    ],
+                  ),
+                );
+                if (keepLocal == null) return;
+                try {
+                  final ok = await SettingsService.instance
+                      .resolveSettingsConflict(keepLocal: keepLocal);
+                  if (context.mounted) {
+                    _showMessage(context, ok ? '设置已同步' : '同步失败，本地修改已保留');
+                  }
+                } catch (_) {
+                  if (context.mounted) _showMessage(context, '同步失败，本地修改已保留');
+                }
+              },
+            )
+          : null,
+    ),
+  );
 }
 
 ({String url, Map<String, String> headers, bool nativeGemini})

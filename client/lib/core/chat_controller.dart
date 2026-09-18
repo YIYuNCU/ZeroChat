@@ -80,6 +80,16 @@ class ChatController extends ChangeNotifier {
   /// 用于跨"实时推送 / 超时恢复 / 重启恢复"多路径去重，避免同一回复重复渲染。
   final Set<String> _renderedTaskIds = <String>{};
   bool _persistedStateLoaded = false;
+  void switchBackend() {
+    _persistedStateLoaded = false;
+    _renderedTaskIds.clear();
+    for (final completer in _pendingChatTasks.values) {
+      if (!completer.isCompleted) {
+        completer.complete({'success': false, 'error': 'Backend changed'});
+      }
+    }
+    _pendingChatTasks.clear();
+  }
 
   /// 持久化待处理任务的存储键：task_id -> 渲染所需的上下文快照。
   /// 使 pending 任务在 App 重启后仍可恢复（内存 completer 会丢失）。

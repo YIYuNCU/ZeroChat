@@ -19,6 +19,8 @@ class SecureBackendResponse {
 class SecureBackendClient {
   static String _authToken = '';
   static String _encryptionSecret = '';
+  static String get cacheIdentity =>
+      sha256.convert(utf8.encode('$_authToken|$_encryptionSecret')).toString();
 
   /// 是否已配置鉴权 token 与加密 secret。未配置时应阻止连接并提示用户填写。
   static bool get isSecurityConfigured =>
@@ -138,8 +140,9 @@ class SecureBackendClient {
         final response = await http
             .put(
               Uri.parse(url),
-              headers:
-                  _buildHeaders(headers: {'Content-Type': 'application/json'}),
+              headers: _buildHeaders(
+                headers: {'Content-Type': 'application/json'},
+              ),
               body: jsonEncode({'payload': _encryptPayload(body)}),
             )
             .timeout(_connectReadTimeout);
@@ -218,12 +221,13 @@ class SecureBackendClient {
     bool includeAuth = true,
     Duration? timeout,
   }) async {
+    final requestHeaders = _buildHeaders(
+      headers: headers,
+      includeAuth: includeAuth,
+    );
     return _withRetry(
       () => http
-          .get(
-            Uri.parse(url),
-            headers: _buildHeaders(headers: headers, includeAuth: includeAuth),
-          )
+          .get(Uri.parse(url), headers: requestHeaders)
           .timeout(timeout ?? _connectReadTimeout),
       maxRetries: _idempotentMaxRetries,
       label: 'GET(raw) $url',

@@ -1,4 +1,7 @@
+import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'conditional_cache_service.dart';
 import 'storage_service.dart';
 import 'secure_storage_service.dart';
 import 'intent_service.dart';
@@ -7,6 +10,14 @@ import 'secure_websocket_client.dart';
 import '../models/ai_model_profile.dart';
 import '../models/provider_quiet_rule.dart';
 import '../models/summary_config.dart';
+import '../core/message_store.dart';
+import '../core/chat_controller.dart';
+import 'role_service.dart';
+import 'moments_service.dart';
+import 'task_service.dart';
+import 'emoji_service.dart';
+import 'chat_list_service.dart';
+import 'group_chat_service.dart';
 
 /// 全局设置服务。
 class SettingsService extends ChangeNotifier {
@@ -17,6 +28,187 @@ class SettingsService extends ChangeNotifier {
   int _normalizeTimeout(int? value) => (value ?? 60).clamp(1, 3600);
 
   static SettingsService get instance => _instance;
+  bool _loaded = false;
+  Future<void> _settingsTail = Future<void>.value();
+  int _settingsJobs = 0;
+  Future<T> _serializeSettings<T>(Future<T> Function() operation) {
+    final idle = _settingsJobs++ == 0;
+    Future<T> run() => runZoned(operation, zoneValues: {#settingsSync: this});
+    final future =
+        (idle ? Future<T>.sync(run) : _settingsTail.then((_) => run()))
+            .whenComplete(() {
+              _settingsJobs--;
+            });
+    _settingsTail = future.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {},
+    );
+    return future;
+  }
+
+  Future<void> _waitForSettingsSync() async {
+    if (_settingsJobs > 0 && !identical(Zone.current[#settingsSync], this)) {
+      await _settingsTail;
+    }
+  }
+
+  Map<String, String> _settingsBaseline = {};
+  Map<String, dynamic> _settingsRemoteVersions = {};
+  final Set<String> _incomingDirty = {};
+  String? lastSyncError;
+  List<String> _conflicts = [];
+  bool get hasSettingsConflict => _conflicts.isNotEmpty;
+
+  Future<bool> resolveSettingsConflict({required bool keepLocal}) =>
+      _serializeSettings(() async {
+        final fresh = await SecureWebSocketClient.instance.request(
+          'settings_get',
+          {'include_secrets': true},
+        );
+        final versions = Map<String, dynamic>.from(
+          fresh['field_versions'] as Map? ?? {},
+        );
+        for (final key in _conflicts) {
+          if (versions.containsKey(key)) {
+            _settingsRemoteVersions[key] = versions[key];
+          }
+          if (!keepLocal) {
+            _settingsBaseline.addAll(
+              _fingerprints({key: _apiSettingsPayload()[key]}),
+            );
+          }
+        }
+        _conflicts = [];
+        lastSyncError = null;
+        return keepLocal
+            ? _syncApiSettingsToBackend()
+            : _applyAllSettings(fresh);
+      });
+
+  Map<String, dynamic> _prepareIncoming(
+    Map<String, dynamic> server,
+    dynamic versions,
+  ) {
+    final local = _apiSettingsPayload();
+    _incomingDirty.clear();
+    for (final entry in local.entries) {
+      if (_settingsBaseline[entry.key] != _fieldFingerprint(entry.value)) {
+        _incomingDirty.add(entry.key);
+        server[entry.key] = entry.value;
+      }
+    }
+    if (versions is Map) {
+      for (final entry in versions.entries) {
+        if (!_incomingDirty.contains(entry.key)) {
+          _settingsRemoteVersions[entry.key.toString()] = entry.value;
+        }
+      }
+    }
+    return server;
+  }
+
+  Future<void> _finishIncoming() async {
+    for (final entry in _apiSettingsPayload().entries) {
+      if (!_incomingDirty.contains(entry.key)) {
+        _settingsBaseline.addAll(_fingerprints({entry.key: entry.value}));
+      }
+    }
+    await _saveSettingsBaseline();
+    await StorageService.setJson(
+      '${_baselineKey}_versions',
+      _settingsRemoteVersions,
+    );
+  }
+
+  String get _baselineKey =>
+      'settings_baseline_${ConditionalCacheService.digest('$_backendUrl|${SecureBackendClient.cacheIdentity}')}';
+
+  String _fieldFingerprint(dynamic value) =>
+      ConditionalCacheService.digest(jsonEncode(value));
+  Map<String, String> _fingerprints(Map<String, dynamic> values) => {
+    for (final entry in values.entries)
+      entry.key: _fieldFingerprint(entry.value),
+    for (final key in ['context_summary_config', 'core_memory_summary_config'])
+      if (values[key] is Map)
+        for (final field in (values[key] as Map).entries)
+          '$key.${field.key}': _fieldFingerprint(field.value),
+  };
+
+  Future<void> _saveSettingsBaseline() =>
+      StorageService.setJson(_baselineKey, _settingsBaseline);
+
+  Future<Map<String, dynamic>> _syncSettingsPatch(
+    Map<String, dynamic> candidate,
+  ) async {
+    final updates = <String, dynamic>{
+      for (final entry in candidate.entries)
+        if (_settingsBaseline[entry.key] != _fieldFingerprint(entry.value))
+          entry.key: entry.value,
+    };
+    for (final key in [
+      'context_summary_config',
+      'core_memory_summary_config',
+    ]) {
+      if (updates[key] is Map) {
+        final fields = Map<String, dynamic>.from(updates[key] as Map);
+        fields.removeWhere(
+          (field, value) =>
+              _settingsBaseline['$key.$field'] == _fieldFingerprint(value),
+        );
+        if (fields.isEmpty) {
+          updates.remove(key);
+        } else {
+          updates[key] = fields;
+        }
+      }
+    }
+    if (updates.isEmpty) return {'success': true};
+    final scope = _baselineKey;
+    final response = await SecureWebSocketClient.instance.request(
+      'settings_update',
+      {
+        'updates': updates,
+        'base_versions': {
+          for (final key in updates.keys)
+            if (_settingsRemoteVersions.containsKey(key))
+              key: _settingsRemoteVersions[key],
+        },
+      },
+    );
+    if (scope != _baselineKey) {
+      throw StateError('Backend changed during settings save');
+    }
+    if (response['success'] == true) {
+      lastSyncError = null;
+      _conflicts = [];
+      _settingsRemoteVersions.addAll(
+        Map<String, dynamic>.from(response['field_versions'] as Map? ?? {}),
+      );
+      for (final entry in updates.entries) {
+        _settingsBaseline[entry.key] = _fieldFingerprint(candidate[entry.key]);
+        if (entry.value is Map) {
+          for (final field in (entry.value as Map).entries) {
+            _settingsBaseline['${entry.key}.${field.key}'] = _fieldFingerprint(
+              field.value,
+            );
+          }
+        }
+      }
+      await _saveSettingsBaseline();
+      await StorageService.setJson(
+        '${_baselineKey}_versions',
+        _settingsRemoteVersions,
+      );
+    } else {
+      _conflicts = (response['conflicts'] as List? ?? [])
+          .map((key) => key.toString())
+          .toList();
+      lastSyncError = response['conflicts'] is List
+          ? '服务器设置已被其他设备修改，本地修改已保留：${(response['conflicts'] as List).join(', ')}'
+          : response['error']?.toString();
+    }
+    return response;
+  }
 
   String _normalizeFilePath(String value) {
     final trimmed = value.trim();
@@ -128,6 +320,7 @@ class SettingsService extends ChangeNotifier {
     required String effort,
     int? budget,
   }) async {
+    await _waitForSettingsSync();
     _modelThinkingSettings[kind] = {
       'thinking_enabled': enabled,
       'reasoning_effort': effort,
@@ -268,6 +461,7 @@ class SettingsService extends ChangeNotifier {
     SummaryFeature feature,
     SummaryApiConfig config,
   ) async {
+    await _waitForSettingsSync();
     config = applyBoundProfile(config.copy());
     await SecureStorageService.setString(
       _summarySecretKey(feature),
@@ -329,6 +523,7 @@ class SettingsService extends ChangeNotifier {
   Future<void> updatePromptOverrides(
     Map<String, Map<String, String>> overrides,
   ) async {
+    await _waitForSettingsSync();
     _promptOverrides = normalizePromptOverrides(overrides);
     await StorageService.setJson('prompt_overrides', _promptOverrides);
     notifyListeners();
@@ -514,6 +709,12 @@ class SettingsService extends ChangeNotifier {
       authToken: _backendAuthToken,
       encryptionSecret: _backendEncryptionSecret,
     );
+    await StorageService.configureNamespace(
+      ConditionalCacheService.digest(
+        '$_backendUrl|${SecureBackendClient.cacheIdentity}',
+      ),
+    );
+    _loadRoleModelProfileSelections();
 
     // 消息等待时间
     _messageWaitSeconds = StorageService.getInt('message_wait_seconds') ?? 0;
@@ -537,6 +738,14 @@ class SettingsService extends ChangeNotifier {
           30,
           180,
         );
+    final savedBaseline = StorageService.getJson(_baselineKey);
+    _settingsBaseline = savedBaseline == null
+        ? _fingerprints(_apiSettingsPayload())
+        : savedBaseline.map((key, value) => MapEntry(key, value.toString()));
+    await _saveSettingsBaseline();
+    _settingsRemoteVersions =
+        StorageService.getJson('${_baselineKey}_versions') ?? {};
+    _loaded = true;
   }
 
   // ========== 更新方法 ==========
@@ -641,6 +850,7 @@ class SettingsService extends ChangeNotifier {
     bool clearThinkingBudget = false,
     bool? stream,
   }) async {
+    await _waitForSettingsSync();
     _chatApiUrl = url;
     _chatApiKey = key;
     _chatModel = model;
@@ -685,6 +895,7 @@ class SettingsService extends ChangeNotifier {
   /// 更新供应商+模型级安静规则并本地持久化。
   /// 服务端同步由 syncApiSettingsToBackend 统一推送 `quiet_rules`。
   Future<void> updateProviderQuietRules(List<ProviderQuietRule> rules) async {
+    await _waitForSettingsSync();
     _providerQuietRules = List<ProviderQuietRule>.from(rules);
     await StorageService.setJsonList(
       'provider_quiet_rules',
@@ -820,6 +1031,7 @@ class SettingsService extends ChangeNotifier {
   }
 
   Future<void> saveApiProfile(ModelApiProfile profile) async {
+    await _waitForSettingsSync();
     _modelProfiles = [
       ..._modelProfiles.where((item) => item.id != profile.id),
       profile,
@@ -833,6 +1045,7 @@ class SettingsService extends ChangeNotifier {
   }
 
   Future<void> deleteModelProfile(String id) async {
+    await _waitForSettingsSync();
     _modelProfiles = _modelProfiles.where((item) => item.id != id).toList();
     await _persistModelProfiles();
     await SecureStorageService.remove('model_api_profile_key_$id');
@@ -903,6 +1116,7 @@ class SettingsService extends ChangeNotifier {
     required String model,
     String? apiFormat,
   }) async {
+    await _waitForSettingsSync();
     _intentEnabled = enabled;
     _intentApiUrl = url;
     _intentApiKey = key;
@@ -935,6 +1149,7 @@ class SettingsService extends ChangeNotifier {
     String? mode,
     String? apiFormat,
   }) async {
+    await _waitForSettingsSync();
     _visionEnabled = enabled;
     _visionApiUrl = url;
     _visionApiKey = key;
@@ -959,6 +1174,7 @@ class SettingsService extends ChangeNotifier {
     required String key,
     required String model,
   }) async {
+    await _waitForSettingsSync();
     _embeddingEnabled = enabled;
     _embeddingApiUrl = url;
     _embeddingApiKey = key;
@@ -972,12 +1188,33 @@ class SettingsService extends ChangeNotifier {
 
   // ========== 后端同步 ==========
 
+  bool _switchingBackend = false;
+  bool get isSwitchingBackend => _switchingBackend;
+  Future<void> _withBackendSwitch(Future<void> Function() operation) async {
+    _switchingBackend = true;
+    try {
+      await operation();
+    } finally {
+      _switchingBackend = false;
+    }
+  }
+
   /// 更新后端服务器地址
   Future<void> updateBackendUrl(String url) async {
+    return _serializeSettings(
+      () => _withBackendSwitch(() => _updateBackendUrl(url)),
+    );
+  }
+
+  Future<void> _updateBackendUrl(String url) async {
+    await _stashBackendSettings();
+    await MessageStore.instance.flushPendingSaves();
+    await SecureWebSocketClient.instance.close();
     // 去除尾部斜杠，避免拼接路径时出现双斜杠
     final normalized = url.trim().replaceAll(RegExp(r'/+$'), '');
     _backendUrl = normalized;
     await StorageService.setString('backend_url', normalized);
+    await _switchBackendCaches();
     notifyListeners();
     debugPrint('SettingsService: Backend URL updated to $normalized');
   }
@@ -988,6 +1225,23 @@ class SettingsService extends ChangeNotifier {
     required String authToken,
     required String encryptionSecret,
   }) async {
+    return _serializeSettings(
+      () => _withBackendSwitch(
+        () => _updateBackendSecurity(
+          authToken: authToken,
+          encryptionSecret: encryptionSecret,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _updateBackendSecurity({
+    required String authToken,
+    required String encryptionSecret,
+  }) async {
+    await _stashBackendSettings();
+    await MessageStore.instance.flushPendingSaves();
+    await SecureWebSocketClient.instance.close();
     _backendAuthToken = authToken;
     _backendEncryptionSecret = encryptionSecret;
 
@@ -1001,57 +1255,107 @@ class SettingsService extends ChangeNotifier {
       authToken: authToken,
       encryptionSecret: encryptionSecret,
     );
+    await _switchBackendCaches();
 
     notifyListeners();
     debugPrint('SettingsService: Local backend security config updated');
   }
 
-  /// 同步 API 设置到后端
-  Future<bool> syncApiSettingsToBackend() async {
-    try {
-      final response = await SecureWebSocketClient.instance.request(
-        'settings_update',
-        {
-          'updates': {
-            'ai_api_url': _chatApiUrl,
-            'ai_api_key': _chatApiKey,
-            'ai_model': _chatModel,
-            'ai_api_format': _chatApiFormat,
-            'ai_timeout_seconds': _chatTimeoutSeconds,
-            'ai_reasoning_effort': _chatReasoningEffort,
-            'thinking_enabled': _thinkingEnabled,
-            'ai_thinking_budget': _thinkingBudget ?? 0,
-            'model_thinking_settings': _modelThinkingSettings,
-            'ai_stream': _chatStream,
-            'context_summary_config': summaryConfigPayload(
-              _contextSummaryConfig,
-            ),
-            'core_memory_summary_config': summaryConfigPayload(
-              _coreMemorySummaryConfig,
-            ),
-            'prompt_overrides': _promptOverrides,
-            'model_prompt_overrides': modelPromptOverridesForSync(),
-            'intent_enabled': _intentEnabled,
-            'intent_api_url': _intentApiUrl,
-            'intent_api_key': _intentApiKey,
-            'intent_model': _intentModel,
-            'intent_api_format': _intentApiFormat,
-            'vision_enabled': _visionEnabled,
-            'vision_api_url': _visionApiUrl,
-            'vision_api_key': _visionApiKey,
-            'vision_model': _visionModel,
-            'vision_mode': _visionMode,
-            'vision_api_format': _visionApiFormat,
-            'embedding_enabled': _embeddingEnabled,
-            'embedding_api_url': _embeddingApiUrl,
-            'embedding_api_key': _embeddingApiKey,
-            'embedding_model': _embeddingModel,
-            'quiet_rules': _providerQuietRules
-                .map((rule) => rule.toJson())
-                .toList(),
-          },
+  Future<void> _switchBackendCaches() async {
+    if (!_loaded) return;
+    ConditionalCacheService.instance.invalidate();
+    await MessageStore.instance.switchBackend(
+      changeNamespace: () => StorageService.configureNamespace(
+        ConditionalCacheService.digest(
+          '$_backendUrl|${SecureBackendClient.cacheIdentity}',
+        ),
+      ),
+    );
+    ChatController.instance.switchBackend();
+    await RoleService.reloadLocalCache();
+    await MomentsService.init();
+    await TaskService.loadLocalOnly();
+    await ChatListService.init();
+    await GroupChatService.init();
+    EmojiService.resetLocalCache();
+    final stored = SecureStorageService.getString('${_baselineKey}_snapshot');
+    final values = stored.isEmpty
+        ? SettingsService._internal()._apiSettingsPayload()
+        : Map<String, dynamic>.from(jsonDecode(stored) as Map);
+    final bindings = values.remove('_local_summary_bindings') as Map? ?? {};
+    _contextSummaryConfig.profileId = bindings['context'] as String?;
+    _coreMemorySummaryConfig.profileId = bindings['core'] as String?;
+    _roleModelProfileSelections =
+        (StorageService.getJson('role_model_profile_selections') ?? {}).map(
+          (key, value) => MapEntry(key, value.toString()),
+        );
+    await _applyAllSettings({'settings': values}, preserveDirty: false);
+    final baseline = StorageService.getJson(_baselineKey);
+    _settingsBaseline =
+        baseline?.map((key, value) => MapEntry(key, value.toString())) ??
+        _fingerprints(values);
+    _settingsRemoteVersions =
+        StorageService.getJson('${_baselineKey}_versions') ?? {};
+  }
+
+  Future<void> _stashBackendSettings() async {
+    if (!_loaded) return;
+    await SecureStorageService.setString(
+      '${_baselineKey}_snapshot',
+      jsonEncode({
+        ..._apiSettingsPayload(),
+        '_local_summary_bindings': {
+          'context': _contextSummaryConfig.profileId,
+          'core': _coreMemorySummaryConfig.profileId,
         },
-      );
+      }),
+      requireSuccess: true,
+    );
+  }
+
+  Map<String, dynamic> _apiSettingsPayload() => {
+    'ai_api_url': _chatApiUrl,
+    'ai_api_key': _chatApiKey,
+    'ai_model': _chatModel,
+    'ai_api_format': _chatApiFormat,
+    'ai_timeout_seconds': _chatTimeoutSeconds,
+    'ai_reasoning_effort': _chatReasoningEffort,
+    'thinking_enabled': _thinkingEnabled,
+    'ai_thinking_budget': _thinkingBudget ?? 0,
+    'model_thinking_settings': _modelThinkingSettings,
+    'ai_stream': _chatStream,
+    'context_summary_config': summaryConfigPayload(_contextSummaryConfig),
+    'core_memory_summary_config': summaryConfigPayload(
+      _coreMemorySummaryConfig,
+    ),
+    'prompt_overrides': _promptOverrides,
+    'model_prompt_overrides': modelPromptOverridesForSync(),
+    'intent_enabled': _intentEnabled,
+    'intent_api_url': _intentApiUrl,
+    'intent_api_key': _intentApiKey,
+    'intent_model': _intentModel,
+    'intent_api_format': _intentApiFormat,
+    'vision_enabled': _visionEnabled,
+    'vision_api_url': _visionApiUrl,
+    'vision_api_key': _visionApiKey,
+    'vision_model': _visionModel,
+    'vision_mode': _visionMode,
+    'vision_api_format': _visionApiFormat,
+    'embedding_enabled': _embeddingEnabled,
+    'embedding_api_url': _embeddingApiUrl,
+    'embedding_api_key': _embeddingApiKey,
+    'embedding_model': _embeddingModel,
+    'quiet_rules': _providerQuietRules.map((rule) => rule.toJson()).toList(),
+  };
+
+  /// Send only locally changed fields; retries retain the unacknowledged diff.
+  Future<bool> syncApiSettingsToBackend() async {
+    return _serializeSettings(_syncApiSettingsToBackend);
+  }
+
+  Future<bool> _syncApiSettingsToBackend() async {
+    try {
+      final response = await _syncSettingsPatch(_apiSettingsPayload());
       if (response['success'] == true) {
         debugPrint('SettingsService: API settings synced to backend');
         return true;
@@ -1062,8 +1366,58 @@ class SettingsService extends ChangeNotifier {
     return false;
   }
 
+  /// 仅同步一个记忆总结配置。
+  ///
+  /// 总结设置页不能复用全量 API 设置同步：全量负载中的其他功能配置可能
+  /// 已不再符合服务端校验，导致当前总结配置也一并无法保存。
+  Future<bool> syncSummaryConfigToBackend(SummaryFeature feature) async {
+    return _serializeSettings(() => _syncSummaryConfigToBackend(feature));
+  }
+
+  Future<bool> _syncSummaryConfigToBackend(SummaryFeature feature) async {
+    final configKey = feature == SummaryFeature.context
+        ? 'context_summary_config'
+        : 'core_memory_summary_config';
+    try {
+      final response = await _syncSettingsPatch({
+        configKey: summaryConfigPayload(summaryConfigFor(feature)),
+      });
+      if (response['success'] == true) {
+        debugPrint('SettingsService: $configKey synced to backend');
+        return true;
+      }
+    } catch (e) {
+      debugPrint('SettingsService: $configKey backend sync failed: $e');
+    }
+    return false;
+  }
+
   /// 从后端拉取并应用全量设置（用于新安装客户端冷启动同步）
+  Future<bool> syncSettingsGroupsFromBackend(List<String> groups) =>
+      _serializeSettings(() async {
+        try {
+          final response = await SecureWebSocketClient.instance.request(
+            'settings_get',
+            {'groups': groups, 'include_secrets': true},
+          );
+          return _applyAllSettings({
+            ...response,
+            'settings': {
+              ..._apiSettingsPayload(),
+              ...Map<String, dynamic>.from(response['settings'] as Map),
+            },
+          });
+        } catch (e) {
+          debugPrint('SettingsService: Group settings read failed: $e');
+          return false;
+        }
+      });
+
   Future<bool> syncAllSettingsFromBackend() async {
+    return _serializeSettings(_syncAllSettingsFromBackend);
+  }
+
+  Future<bool> _syncAllSettingsFromBackend() async {
     try {
       final response = await SecureWebSocketClient.instance.request(
         'settings_get',
@@ -1071,12 +1425,29 @@ class SettingsService extends ChangeNotifier {
       );
 
       final payload = response;
+      return await _applyAllSettings(payload);
+    } catch (e) {
+      debugPrint('SettingsService: Settings read failed: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _applyAllSettings(
+    Map<String, dynamic> payload, {
+    bool preserveDirty = true,
+  }) async {
+    try {
       final settings = payload['settings'];
       if (settings is! Map) {
         return false;
       }
 
-      final server = Map<String, dynamic>.from(settings);
+      final server = preserveDirty
+          ? _prepareIncoming(
+              Map<String, dynamic>.from(settings),
+              payload['field_versions'],
+            )
+          : Map<String, dynamic>.from(settings);
       await _restoreThinkingSettings(server);
       await _restoreSummaryAndPromptSettings(server, includeSecrets: true);
 
@@ -1182,6 +1553,7 @@ class SettingsService extends ChangeNotifier {
         model: embeddingModel,
       );
 
+      if (preserveDirty) await _finishIncoming();
       debugPrint('SettingsService: Full settings synced from backend');
       return true;
     } catch (e) {
@@ -1192,17 +1564,34 @@ class SettingsService extends ChangeNotifier {
 
   /// 从后端拉取并应用公开设置（不请求密钥）
   Future<bool> syncPublicSettingsFromBackend() async {
+    return _serializeSettings(_syncPublicSettingsFromBackend);
+  }
+
+  Future<bool> _syncPublicSettingsFromBackend() async {
     try {
       final payload = await SecureWebSocketClient.instance.request(
         'settings_get',
-        const <String, dynamic>{},
+        const <String, dynamic>{
+          'groups': [
+            'chat',
+            'thinking',
+            'intent',
+            'vision',
+            'embedding',
+            'quiet_rules',
+            'profile',
+          ],
+        },
       );
       final settings = payload['settings'];
       if (settings is! Map) {
         return false;
       }
 
-      final server = Map<String, dynamic>.from(settings);
+      final server = _prepareIncoming(
+        Map<String, dynamic>.from(settings),
+        payload['field_versions'],
+      );
       await _restoreThinkingSettings(server);
       await _restoreSummaryAndPromptSettings(server, includeSecrets: false);
 
@@ -1299,6 +1688,7 @@ class SettingsService extends ChangeNotifier {
         model: embeddingModel,
       );
 
+      await _finishIncoming();
       debugPrint('SettingsService: Public settings synced from backend');
       return true;
     } catch (e) {

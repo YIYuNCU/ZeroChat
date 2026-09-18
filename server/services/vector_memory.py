@@ -93,6 +93,8 @@ class VectorMemoryStore:
         conn.execute(self.TABLE_DDL)
         conn.execute(self.INDEX_DDL)
         conn.commit()
+        from services.sync_revision import install_revision
+        install_revision(conn, "vector_embeddings")
 
     def store(self, text: str, embedding: List[float], role: str = "assistant",
               timestamp: Optional[str] = None, source: str = "chat"):
@@ -281,6 +283,17 @@ class VectorMemoryStore:
         conn.commit()
         return cursor.rowcount
 
+    def sync_page(self, offset=0, limit=100, version=None):
+        from services.sync_revision import snapshot
+        conn = self._get_conn()
+        offset, limit = max(0, int(offset)), max(1, min(100, int(limit)))
+        with snapshot(conn, "vector_embeddings") as current:
+            if offset and version != current:
+                return {"reset_required": True, "version": current}
+            items = self.list_all(limit=limit + 1, offset=offset)
+            return {"items": items[:limit], "has_more": len(items) > limit,
+                    "version": current, "next_cursor": offset + min(len(items), limit),
+                    "count": conn.execute("SELECT count(*) FROM vector_embeddings").fetchone()[0]}
     def replace_source_batch(self, source: str, items: List[Dict[str, Any]]) -> None:
         """Atomically replace all vectors belonging to a logical source."""
         conn = self._get_conn()

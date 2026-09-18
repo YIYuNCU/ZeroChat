@@ -6,6 +6,38 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// 使用 SharedPreferences 持久化数据
 class StorageService {
   static SharedPreferences? _prefs;
+  static String namespace = '';
+  static String archiveNamespace = '';
+
+  static Future<void> configureNamespace(String identity) async {
+    final legacy = prefs.getString('legacy_resource_owner');
+    if (legacy == null) {
+      await prefs.setString('legacy_resource_owner', identity);
+    }
+    namespace = identity;
+    archiveNamespace = (legacy ?? identity) == identity ? '' : identity;
+  }
+
+  static String _scoped(String key) {
+    if (archiveNamespace.isEmpty) return key;
+    const prefixes = [
+      'roles',
+      'current_role',
+      'core_memory',
+      'scheduled_tasks',
+      'moments_',
+      'message',
+      'pending_chat_',
+      'rendered_chat_',
+      'emoji_',
+      'chat_list',
+      'group',
+      'json_memory_',
+      'proactive_config_',
+      'role_model_profile_selections',
+    ];
+    return prefixes.any(key.startsWith) ? 'backend_${namespace}_$key' : key;
+  }
 
   /// 初始化存储服务
   static Future<void> init() async {
@@ -24,39 +56,39 @@ class StorageService {
   // ========== 通用方法 ==========
 
   static Future<bool> setString(String key, String value) async {
-    return await prefs.setString(key, value);
+    return await prefs.setString(_scoped(key), value);
   }
 
   static String? getString(String key) {
-    return prefs.getString(key);
+    return prefs.getString(_scoped(key));
   }
 
   static Future<bool> setStringList(String key, List<String> value) async {
-    return await prefs.setStringList(key, value);
+    return await prefs.setStringList(_scoped(key), value);
   }
 
   static List<String>? getStringList(String key) {
-    return prefs.getStringList(key);
+    return prefs.getStringList(_scoped(key));
   }
 
   static Future<bool> setInt(String key, int value) async {
-    return await prefs.setInt(key, value);
+    return await prefs.setInt(_scoped(key), value);
   }
 
   static int? getInt(String key) {
-    return prefs.getInt(key);
+    return prefs.getInt(_scoped(key));
   }
 
   static Future<bool> setBool(String key, bool value) async {
-    return await prefs.setBool(key, value);
+    return await prefs.setBool(_scoped(key), value);
   }
 
   static bool? getBool(String key) {
-    return prefs.getBool(key);
+    return prefs.getBool(_scoped(key));
   }
 
   static Future<bool> remove(String key) async {
-    return await prefs.remove(key);
+    return await prefs.remove(_scoped(key));
   }
 
   // ========== JSON 对象存储 ==========

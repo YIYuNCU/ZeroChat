@@ -9,6 +9,8 @@ import 'notification_service.dart';
 import 'settings_service.dart';
 import 'secure_backend_client.dart';
 import 'wake_lock_service.dart';
+import 'conditional_cache_service.dart';
+import 'transfer_metrics.dart';
 
 class SecureWebSocketClient {
   SecureWebSocketClient._() {
@@ -25,10 +27,12 @@ class SecureWebSocketClient {
 
   /// 前台/后台自适应心跳间隔。前台需要实时性，后台延长以省电；
   /// 服务端 WS 端点无应用级空闲超时，延长后台心跳安全。
-  static const Duration _fallbackForegroundHeartbeatInterval =
-      Duration(seconds: 25);
-  static const Duration _fallbackBackgroundHeartbeatInterval =
-      Duration(seconds: 60);
+  static const Duration _fallbackForegroundHeartbeatInterval = Duration(
+    seconds: 25,
+  );
+  static const Duration _fallbackBackgroundHeartbeatInterval = Duration(
+    seconds: 60,
+  );
 
   /// 心跳发出后等待 heartbeat_ack 的最长时间；超时视为半掉线并重连。
   static const Duration _heartbeatAckTimeout = Duration(seconds: 10);
@@ -56,14 +60,16 @@ class SecureWebSocketClient {
 
   final Map<String, Completer<Map<String, dynamic>>> _pending =
       <String, Completer<Map<String, dynamic>>>{};
-    final StreamController<Map<String, dynamic>> _serverPushController =
+  final Map<String, String> _pendingActions = {};
+  final StreamController<Map<String, dynamic>> _serverPushController =
       StreamController<Map<String, dynamic>>.broadcast();
-    final StreamController<void> _reconnectedController =
+  final StreamController<void> _reconnectedController =
       StreamController<void>.broadcast();
 
   Completer<void>? _connectingCompleter;
   int _requestSeq = 0;
   int _connectionAttempts = 0;
+  int _connectionGeneration = 0;
   bool _preferFallbackEndpoint = false;
   String? _endpointBackendUrl;
 
@@ -71,14 +77,19 @@ class SecureWebSocketClient {
   /// Used by ChatController to recover missed pushes.
   void Function()? onReconnected;
 
-  bool get isConnected => _socket != null && _socket!.readyState == WebSocket.open;
-  Stream<Map<String, dynamic>> get serverPushStream => _serverPushController.stream;
+  bool get isConnected =>
+      _socket != null && _socket!.readyState == WebSocket.open;
+  Stream<Map<String, dynamic>> get serverPushStream =>
+      _serverPushController.stream;
 
   /// Emits after every successful reconnection (not the first connect).
   /// Multiple subscribers can listen (e.g. RealtimeSyncService full re-sync).
   Stream<void> get onReconnectedStream => _reconnectedController.stream;
 
   Future<void> ensureConnected() async {
+    if (SettingsService.instance.isSwitchingBackend) {
+      throw StateError('Backend is switching');
+    }
     // 未配置鉴权 token / 加密 secret 时不再回退到内置默认值，直接阻止连接，
     // 提示用户到设置页填写（避免用无效默认值反复失败连接）。
     if (!SecureBackendClient.isSecurityConfigured) {
@@ -111,7 +122,11 @@ class SecureWebSocketClient {
     // 退避延迟只在 _scheduleReconnect 的定时器里应用一次；这里不再重复等待，
     // 避免经调度器进入时叠加两次退避。直接调用（如发送前保活）也应尽快连接。
     final completer = Completer<void>();
+    unawaited(completer.future.catchError((Object _) {}));
     _connectingCompleter = completer;
+    final generation = _connectionGeneration;
+    final identity =
+        '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}';
 
     final wasReconnection = _connectionAttempts > 0;
     _connectionAttempts += 1;
@@ -120,6 +135,12 @@ class SecureWebSocketClient {
       final socket = await _connectWithEndpointFallback(
         SettingsService.instance.backendUrl,
       );
+      if (generation != _connectionGeneration ||
+          identity !=
+              '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}') {
+        await socket.close();
+        throw StateError('Backend changed while connecting');
+      }
 
       _resetBackoff();
       _socket = socket;
@@ -145,12 +166,16 @@ class SecureWebSocketClient {
         }
       }
     } catch (e) {
-      _bumpBackoff();
-      _handleDisconnect('connect failed: $e');
-      completer.completeError(e);
+      if (generation == _connectionGeneration) {
+        _bumpBackoff();
+        _handleDisconnect('connect failed: $e');
+      }
+      if (!completer.isCompleted) completer.completeError(e);
       rethrow;
     } finally {
-      _connectingCompleter = null;
+      if (identical(_connectingCompleter, completer)) {
+        _connectingCompleter = null;
+      }
     }
   }
 
@@ -158,21 +183,107 @@ class SecureWebSocketClient {
     String action,
     Map<String, dynamic> payload, {
     Duration timeout = _defaultRequestTimeout,
+    bool force = false,
+    void Function(Map<String, dynamic>)? onCached,
   }) async {
+    if (SettingsService.instance.isSwitchingBackend) {
+      throw StateError('Backend is switching');
+    }
+    if (!SecureBackendClient.isSecurityConfigured) {
+      throw StateError('后端鉴权未配置，请先在设置中填写 Token 与加密密钥');
+    }
+    if (ConditionalCacheService.actions.contains(action)) {
+      final expectedIdentity =
+          '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}';
+      final scope = ConditionalCacheService.digest(
+        '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}',
+      );
+      final response = await ConditionalCacheService.instance.request(
+        scope: scope,
+        action: action,
+        payload: payload,
+        force: force,
+        onCached: onCached == null
+            ? null
+            : (value) {
+                if (expectedIdentity ==
+                    '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}') {
+                  onCached(value);
+                }
+              },
+        // Role profiles may carry provider keys. They are never persisted in the
+        // disposable transport cache; the existing role store owns that data.
+        persist:
+            payload['include_secrets'] != true &&
+            action != 'roles_detail' &&
+            (action != 'roles_list' || payload['summary'] == true),
+        send: (query) => _requestUncached(
+          action,
+          query,
+          timeout: timeout,
+          expectedIdentity: expectedIdentity,
+        ),
+      );
+      if (scope !=
+          ConditionalCacheService.digest(
+            '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}',
+          )) {
+        throw StateError('Backend identity changed during request');
+      }
+      if (action == 'chat_snapshot' &&
+          payload['client_md5'] == response['md5']) {
+        response['need_sync'] = false;
+      }
+      if (payload['client_hash'] != null &&
+          payload['client_hash'] == response['hash']) {
+        response['not_modified'] = true;
+      }
+      return response;
+    }
+    final result = await _requestUncached(action, payload, timeout: timeout);
+    if (!action.endsWith('_get') &&
+        !action.endsWith('_list') &&
+        !action.endsWith('_hash') &&
+        action != 'health') {
+      ConditionalCacheService.instance.invalidateMutation(action);
+    }
+    return result;
+  }
+
+  Future<Map<String, dynamic>> _requestUncached(
+    String action,
+    Map<String, dynamic> payload, {
+    Duration timeout = _defaultRequestTimeout,
+    String? expectedIdentity,
+  }) async {
+    final identity =
+        expectedIdentity ??
+        '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}';
     final requestId = _nextRequestId();
     Object? lastError;
 
     for (int attempt = 0; attempt <= _maxRequestRetries; attempt += 1) {
+      if (identity !=
+          '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}') {
+        throw StateError('Backend identity changed during request');
+      }
       try {
-        return await _sendRequestOnce(
+        final result = await _sendRequestOnce(
           action,
           payload,
           requestId: requestId,
           timeout: timeout,
+          expectedIdentity: identity,
         );
+        if (identity !=
+            '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}') {
+          throw StateError('Backend identity changed during request');
+        }
+        return result;
       } catch (e) {
         lastError = e;
-        final shouldRetry = attempt < _maxRequestRetries && _shouldRetryRequestError(e);
+        final shouldRetry =
+            attempt < _maxRequestRetries && _shouldRetryRequestError(e);
         if (!shouldRetry) {
           rethrow;
         }
@@ -192,22 +303,10 @@ class SecureWebSocketClient {
     Map<String, dynamic> payload, {
     required String requestId,
     required Duration timeout,
+    required String expectedIdentity,
   }) async {
     await ensureConnected();
-
     final completer = Completer<Map<String, dynamic>>();
-    _pending[requestId] = completer;
-
-    final encryptedPayload = SecureBackendClient.encryptPayloadForTransfer(
-      payload,
-    );
-
-    final frame = <String, dynamic>{
-      'request_id': requestId,
-      'action': action,
-      'payload': encryptedPayload,
-    };
-
     try {
       // 仅在后台申请请求唤醒锁；前台 CPU 本就处于唤醒状态无需持锁。
       if (!_inForeground) {
@@ -217,12 +316,30 @@ class SecureWebSocketClient {
         );
       }
       final socket = _socket;
+      if (SettingsService.instance.isSwitchingBackend ||
+          expectedIdentity !=
+              '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}') {
+        throw StateError('Backend identity changed before send');
+      }
       if (socket == null) {
         throw const SocketException('WebSocket disconnected before send');
       }
-      socket.add(jsonEncode(frame));
+      final encoded = jsonEncode({
+        'request_id': requestId,
+        'action': action,
+        'payload': SecureBackendClient.encryptPayloadForTransfer(payload),
+      });
+      _pending[requestId] = completer;
+      _pendingActions[requestId] = action;
+      TransferMetrics.record(
+        action,
+        sent: utf8.encode(encoded).length,
+        request: true,
+      );
+      socket.add(encoded);
     } catch (e) {
       _pending.remove(requestId);
+      _pendingActions.remove(requestId);
       rethrow;
     }
 
@@ -230,16 +347,16 @@ class SecureWebSocketClient {
       timeout,
       onTimeout: () {
         _pending.remove(requestId);
-        throw TimeoutException(
-          'WebSocket request timeout: $action',
-          timeout,
-        );
+        _pendingActions.remove(requestId);
+        throw TimeoutException('WebSocket request timeout: $action', timeout);
       },
     );
   }
 
   bool _shouldRetryRequestError(Object error) {
-    if (error is TimeoutException || error is SocketException || error is WebSocketException) {
+    if (error is TimeoutException ||
+        error is SocketException ||
+        error is WebSocketException) {
       return true;
     }
 
@@ -254,12 +371,16 @@ class SecureWebSocketClient {
     await ensureConnected().catchError((_) {});
   }
 
-  Future<void> recoverConnectionWithoutClose({String reason = 'auto_recover'}) async {
+  Future<void> recoverConnectionWithoutClose({
+    String reason = 'auto_recover',
+  }) async {
     _handleDisconnect('recover_without_close:$reason');
     await ensureConnected();
   }
 
   Future<void> close() async {
+    _connectionGeneration++;
+    _connectingCompleter = null;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _cancelPongWatchdog();
@@ -288,6 +409,8 @@ class SecureWebSocketClient {
   }
 
   Future<WebSocket> _connectWithEndpointFallback(String backendUrl) async {
+    final token = SettingsService.instance.backendAuthToken;
+    final generation = _connectionGeneration;
     if (_endpointBackendUrl != backendUrl) {
       _endpointBackendUrl = backendUrl;
       _preferFallbackEndpoint = false;
@@ -299,6 +422,9 @@ class SecureWebSocketClient {
     Object? firstError;
 
     for (final endpointPath in endpointPaths) {
+      if (generation != _connectionGeneration) {
+        throw StateError('Backend changed while connecting');
+      }
       final wsUri = _buildWsUri(
         backendUrl: backendUrl,
         endpointPath: endpointPath,
@@ -306,7 +432,7 @@ class SecureWebSocketClient {
       try {
         final socket = await WebSocket.connect(
           wsUri.toString(),
-          headers: {'X-Auth-Token': SettingsService.instance.backendAuthToken},
+          headers: {'X-Auth-Token': token},
         ).timeout(_connectTimeout);
         _preferFallbackEndpoint = endpointPath == _fallbackEndpointPath;
         if (_preferFallbackEndpoint) {
@@ -326,10 +452,7 @@ class SecureWebSocketClient {
     throw firstError ?? StateError('No WebSocket endpoint is available');
   }
 
-  Uri _buildWsUri({
-    required String backendUrl,
-    required String endpointPath,
-  }) {
+  Uri _buildWsUri({required String backendUrl, required String endpointPath}) {
     final uri = Uri.parse(backendUrl);
     final wsScheme = uri.scheme == 'https' ? 'wss' : 'ws';
 
@@ -380,6 +503,36 @@ class SecureWebSocketClient {
               ? Map<String, dynamic>.from(decrypted)
               : <String, dynamic>{'value': decrypted};
 
+          final type = (payloadMap['event_type'] ?? data['type'] ?? '')
+              .toString();
+          if (type.startsWith('moment_')) {
+            ConditionalCacheService.instance.invalidate(
+              actions: ['moments_list'],
+            );
+          } else if (type.startsWith('task_')) {
+            ConditionalCacheService.instance.invalidate(
+              actions: ['tasks_list', 'chat_snapshot', 'roles_memory_get'],
+            );
+          } else if (type.contains('chat') || type == 'proactive_message') {
+            ConditionalCacheService.instance.invalidate(
+              actions: [
+                'chat_snapshot',
+                'roles_memory_get',
+                'vector_memory_list',
+                'usage_stats_get',
+              ],
+            );
+          } else if (type == 'resource_changed') {
+            final actions = payloadMap['payload'] is Map
+                ? (payloadMap['payload'] as Map)['actions']
+                : null;
+            if (actions is List) {
+              ConditionalCacheService.instance.invalidate(
+                actions: actions.whereType<String>(),
+              );
+            }
+          }
+
           _serverPushController.add({
             'event': event,
             'type': data['type']?.toString(),
@@ -397,19 +550,24 @@ class SecureWebSocketClient {
       }
 
       final completer = _pending.remove(requestId);
+      final action = _pendingActions.remove(requestId) ?? 'unmatched';
+      TransferMetrics.record(
+        action,
+        received: utf8.encode(raw.toString()).length,
+      );
       if (completer == null || completer.isCompleted) {
         return;
       }
 
       final ok = data['ok'] == true;
       if (!ok) {
-        String errorText = data['error']?.toString() ?? 'unknown websocket error';
+        String errorText =
+            data['error']?.toString() ?? 'unknown websocket error';
         try {
           final encryptedError = data['data'];
           if (encryptedError != null) {
-            final decryptedError = SecureBackendClient.decryptPayloadFromTransfer(
-              encryptedError,
-            );
+            final decryptedError =
+                SecureBackendClient.decryptPayloadFromTransfer(encryptedError);
             if (decryptedError is Map) {
               final map = Map<String, dynamic>.from(decryptedError);
               final maybeError = map['error']?.toString();
@@ -502,9 +660,13 @@ class SecureWebSocketClient {
       _armPongWatchdog();
     } catch (e) {
       _heartbeatFailCount += 1;
-      debugPrint('SecureWebSocketClient: heartbeat failed ($_heartbeatFailCount): $e');
+      debugPrint(
+        'SecureWebSocketClient: heartbeat failed ($_heartbeatFailCount): $e',
+      );
       if (_heartbeatFailCount >= 2) {
-        _handleDisconnect('heartbeat failed after $_heartbeatFailCount attempts: $e');
+        _handleDisconnect(
+          'heartbeat failed after $_heartbeatFailCount attempts: $e',
+        );
       }
     }
   }
@@ -550,7 +712,9 @@ class SecureWebSocketClient {
       return result != ConnectivityResult.none;
     }
     if (result is List<ConnectivityResult>) {
-      return result.any((ConnectivityResult item) => item != ConnectivityResult.none);
+      return result.any(
+        (ConnectivityResult item) => item != ConnectivityResult.none,
+      );
     }
     if (result is Iterable) {
       return result.any((dynamic item) => item != ConnectivityResult.none);
@@ -560,12 +724,9 @@ class SecureWebSocketClient {
 
   void _scheduleConnectivityConnectionCheck() {
     _connectivityReconnectTimer?.cancel();
-    _connectivityReconnectTimer = Timer(
-      _connectivityReconnectDebounce,
-      () {
-        unawaited(_checkConnectionAfterNetworkChange());
-      },
-    );
+    _connectivityReconnectTimer = Timer(_connectivityReconnectDebounce, () {
+      unawaited(_checkConnectionAfterNetworkChange());
+    });
   }
 
   Future<void> _checkConnectionAfterNetworkChange() async {
@@ -632,7 +793,8 @@ class SecureWebSocketClient {
     final clamped = _reconnectBackoffCount.clamp(0, _maxReconnectBackoffCount);
     // 2^clamped seconds with jitter (±25%)
     final base = (_baseReconnectDelay.inMilliseconds << clamped).toDouble();
-    final jitter = 0.75 + 0.5 * (DateTime.now().millisecondsSinceEpoch % 100) / 100.0;
+    final jitter =
+        0.75 + 0.5 * (DateTime.now().millisecondsSinceEpoch % 100) / 100.0;
     final delay = (base * jitter).clamp(
       _baseReconnectDelay.inMilliseconds.toDouble(),
       _maxReconnectDelay.inMilliseconds.toDouble(),
@@ -662,9 +824,11 @@ class SecureWebSocketClient {
   }
 
   void _failAllPending(String reason) {
-    final entries = List<MapEntry<String, Completer<Map<String, dynamic>>>>.from(
-      _pending.entries,
-    );
+    _pendingActions.clear();
+    final entries =
+        List<MapEntry<String, Completer<Map<String, dynamic>>>>.from(
+          _pending.entries,
+        );
     _pending.clear();
 
     for (final entry in entries) {

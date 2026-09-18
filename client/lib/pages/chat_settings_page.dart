@@ -69,7 +69,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     await MemoryService.refreshCoreMemoryFromBackend(roleId: _currentRole.id);
     if (!mounted) return;
     setState(() {
-      _backendCoreMemory = MemoryService.getCoreMemory();
+      _backendCoreMemory = MemoryService.getCoreMemory(roleId: _currentRole.id);
     });
   }
 
@@ -81,7 +81,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       'core_memory': memories,
     });
     final updated = List<String>.from(memories);
-    await MemoryService.setCoreMemoryLocal(updated);
+    await MemoryService.setCoreMemoryLocal(updated, roleId: _currentRole.id);
     final updatedRole = _currentRole.copyWith(coreMemory: updated);
     await RoleService.updateRoleLocal(updatedRole);
     if (!mounted) return;
@@ -317,9 +317,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               trailing: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 160),
                 child: Text(
-                  _formatQuietPeriods(
-                    _currentRole.proactiveConfig.quietRules,
-                  ),
+                  _formatQuietPeriods(_currentRole.proactiveConfig.quietRules),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.end,
@@ -945,15 +943,22 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 final buckets =
                     (data?['by_platform_model'] as List?)
                         ?.whereType<Map>()
-                        .map((e) => _usageBucketLabel(e.cast<String, dynamic>()))
+                        .map(
+                          (e) => _usageBucketLabel(e.cast<String, dynamic>()),
+                        )
                         .where((e) => e.isNotEmpty)
                         .toSet()
                         .toList() ??
                     <String>[];
-                if (selectedBucket == null || !buckets.contains(selectedBucket)) {
-                  final latest = (data?['last'] as Map?)?.cast<String, dynamic>();
-                  final latestBucket = latest == null ? '' : _usageBucketLabel(latest);
-                  selectedBucket = latestBucket.isNotEmpty && buckets.contains(latestBucket)
+                if (selectedBucket == null ||
+                    !buckets.contains(selectedBucket)) {
+                  final latest = (data?['last'] as Map?)
+                      ?.cast<String, dynamic>();
+                  final latestBucket = latest == null
+                      ? ''
+                      : _usageBucketLabel(latest);
+                  selectedBucket =
+                      latestBucket.isNotEmpty && buckets.contains(latestBucket)
                       ? latestBucket
                       : (buckets.isEmpty ? null : buckets.first);
                 }
@@ -983,7 +988,8 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                       .toList();
             final visibleLast =
                 last != null &&
-                    (selectedBucket == null || _usageBucketLabel(last) == selectedBucket)
+                    (selectedBucket == null ||
+                        _usageBucketLabel(last) == selectedBucket)
                 ? last
                 : null;
 
@@ -1201,6 +1207,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   void _showShortTermMemory() {
     List<Map<String, dynamic>> items = [];
     bool loading = true;
+    final pager = MemoryPageSession(_currentRole.id);
 
     showModalBottomSheet(
       context: context,
@@ -1212,14 +1219,22 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            Future<void> reload({bool forceFullRefresh = false}) async {
-              final list = await MemoryService.getShortTermFromBackend(
-                roleId: _currentRole.id,
-                forceFullRefresh: forceFullRefresh,
-              );
-              if (!mounted) return;
+            Future<void> reload({
+              bool forceFullRefresh = false,
+              bool more = false,
+            }) async {
+              pager.onCached = () {
+                if (mounted && context.mounted) {
+                  setModalState(() {
+                    items = pager.items;
+                    loading = false;
+                  });
+                }
+              };
+              await pager.load(more: more, force: forceFullRefresh);
+              if (!mounted || !context.mounted) return;
               setModalState(() {
-                items = list;
+                items = pager.items;
                 loading = false;
               });
             }
@@ -1257,8 +1272,8 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                                   size: 20,
                                   color: Color(0xFF888888),
                                 ),
-                                tooltip: '增量刷新',
-                                onPressed: () => reload(),
+                                tooltip: '刷新',
+                                onPressed: () => reload(forceFullRefresh: true),
                               ),
                               if (items.isNotEmpty)
                                 TextButton(
@@ -1289,16 +1304,29 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                       child: loading
                           ? const Center(child: CircularProgressIndicator())
                           : items.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Text(
-                                '暂无短期记忆',
-                                style: TextStyle(color: Color(0xFF888888)),
+                                pager.error ?? '暂无短期记忆',
+                                style: const TextStyle(
+                                  color: Color(0xFF888888),
+                                ),
                               ),
                             )
                           : ListView.builder(
                               controller: scrollController,
-                              itemCount: items.length,
+                              itemCount:
+                                  items.length +
+                                  (pager.hasMore || pager.error != null
+                                      ? 1
+                                      : 0),
                               itemBuilder: (context, index) {
+                                if (index == items.length) {
+                                  return TextButton(
+                                    onPressed: () =>
+                                        reload(more: pager.error == null),
+                                    child: Text(pager.error ?? '加载更早的记忆'),
+                                  );
+                                }
                                 return _buildShortTermTile(
                                   items[index],
                                   () => reload(),
@@ -1388,6 +1416,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   void _showVectorMemoryOptions() {
     List<Map<String, dynamic>> items = [];
     bool loading = true;
+    final pager = MemoryPageSession(_currentRole.id, vector: true);
 
     showModalBottomSheet(
       context: context,
@@ -1399,13 +1428,19 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            Future<void> reload() async {
-              final list = await MemoryService.listVectorMemories(
-                roleId: _currentRole.id,
-              );
-              if (!mounted) return;
+            Future<void> reload({bool more = false}) async {
+              pager.onCached = () {
+                if (mounted && context.mounted) {
+                  setModalState(() {
+                    items = pager.items;
+                    loading = false;
+                  });
+                }
+              };
+              await pager.load(more: more, force: true);
+              if (!mounted || !context.mounted) return;
               setModalState(() {
-                items = _sortMemoryDesc(list);
+                items = _sortMemoryDesc(pager.items);
                 loading = false;
               });
               setState(() {});
@@ -1444,7 +1479,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                                   '确定要清空所有向量记忆吗？这将删除 AI 自动生成的语义记忆。',
                                 );
                                 if (confirm == true) {
-                                  await MemoryService.clearVectorMemory();
+                                  await MemoryService.clearVectorMemory(
+                                    roleId: _currentRole.id,
+                                  );
                                   await reload();
                                 }
                               },
@@ -1461,17 +1498,30 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                       child: loading
                           ? const Center(child: CircularProgressIndicator())
                           : items.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Text(
-                                'AI 会在对话中自动生成语义记忆\n暂无向量记忆',
+                                pager.error ?? 'AI 会在对话中自动生成语义记忆\n暂无向量记忆',
                                 textAlign: TextAlign.center,
-                                style: TextStyle(color: Color(0xFF888888)),
+                                style: const TextStyle(
+                                  color: Color(0xFF888888),
+                                ),
                               ),
                             )
                           : ListView.builder(
                               controller: scrollController,
-                              itemCount: items.length,
+                              itemCount:
+                                  items.length +
+                                  (pager.hasMore || pager.error != null
+                                      ? 1
+                                      : 0),
                               itemBuilder: (context, index) {
+                                if (index == items.length) {
+                                  return TextButton(
+                                    onPressed: () =>
+                                        reload(more: pager.error == null),
+                                    child: Text(pager.error ?? '加载更早的记忆'),
+                                  );
+                                }
                                 final item = items[index];
                                 final id = item['id'] is int
                                     ? item['id'] as int
@@ -1890,6 +1940,17 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   void _openRoleSettings() async {
+    try {
+      _currentRole = await RoleService.ensureRoleDetails(_currentRole.id);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('角色详情同步失败，请重试')));
+      }
+      return;
+    }
+    if (!mounted) return;
     final result = await Navigator.push<Role>(
       context,
       MaterialPageRoute(

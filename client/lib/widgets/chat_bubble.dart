@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:cached_network_image/cached_network_image.dart';
+import 'remote_media_image.dart';
 
 import 'package:flutter/material.dart';
 import '../models/message.dart';
@@ -610,30 +610,26 @@ class ChatBubble extends StatelessWidget {
   }
 
   Widget _buildNetworkStickerWithRetry(String imageUrl, String? emotion) {
-    return CachedNetworkImage(
-      imageUrl: imageUrl,
-      httpHeaders: SecureBackendClient.authHeaders,
+    return RemoteMediaImage(
+      imageUrl,
+      headers: SecureBackendClient.authHeaders,
       fit: BoxFit.contain,
       // 120px 显示上限 × 3 解码，限制内存位图大小。
-      memCacheWidth: 360,
-      placeholder: (_, _) => _buildStickerPlaceholder(emotion),
-      errorWidget: (_, _, _) {
+      cacheWidth: 360,
+      errorBuilder: (_, _, _) {
         final retryUrl = _buildBaseRetryUrl(imageUrl);
         if (retryUrl == null || retryUrl == imageUrl) {
           return _buildStickerPlaceholder(emotion);
         }
 
-        return CachedNetworkImage(
-          imageUrl: retryUrl,
-          httpHeaders: SecureBackendClient.authHeaders,
+        return RemoteMediaImage(
+          retryUrl,
+          headers: SecureBackendClient.authHeaders,
           fit: BoxFit.contain,
-          memCacheWidth: 360,
-          placeholder: (_, _) => _buildStickerPlaceholder(emotion),
-          errorWidget: (_, _, _) => _buildStickerPlaceholder(emotion),
-          fadeInDuration: const Duration(milliseconds: 100),
+          cacheWidth: 360,
+          errorBuilder: (_, _, _) => _buildStickerPlaceholder(emotion),
         );
       },
-      fadeInDuration: const Duration(milliseconds: 150),
     );
   }
 

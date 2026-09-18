@@ -2,6 +2,7 @@ import 'package:flutter/painting.dart';
 
 import 'avatar_cache_service.dart';
 import 'emoji_transfer_service.dart';
+import 'remote_media_cache.dart';
 
 /// Coordinates bounded in-memory and on-disk media caches.
 class MediaCacheService {
@@ -27,6 +28,7 @@ class MediaCacheService {
     return Future.wait([
       AvatarCacheService.trimToBudget(),
       EmojiTransferService.trimToBudget(),
+      RemoteMediaCache.trim(),
     ]);
   }
 }

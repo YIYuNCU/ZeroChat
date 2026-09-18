@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'secure_websocket_client.dart';
 import 'settings_service.dart';
 import 'storage_service.dart';
+import 'secure_backend_client.dart';
 
 /// Downloads protected emoji assets over the encrypted WebSocket in bounded chunks.
 class EmojiTransferService {
@@ -42,8 +43,15 @@ class EmojiTransferService {
     return next;
   }
 
-  static String _key(String reference, String origin) =>
-      sha256.convert(utf8.encode('$origin|$reference')).toString();
+  static String get _origin =>
+      '${SettingsService.instance.backendUrl}|${SecureBackendClient.cacheIdentity}';
+  static String _key(String reference, String origin) {
+    final hash = Uri.tryParse(reference)?.queryParameters['sha256'] ?? '';
+    final identity = RegExp(r'^[a-f0-9]{64}$').hasMatch(hash)
+        ? hash
+        : reference;
+    return sha256.convert(utf8.encode('$origin|$identity')).toString();
+  }
 
   static void _scheduleMaintenance() {
     _maintenanceTimer ??= Timer(const Duration(seconds: 3), () {
@@ -63,7 +71,7 @@ class EmojiTransferService {
   }) {
     final normalized = reference.trim();
     if (!isTransferReference(normalized)) return Future.value(null);
-    final origin = SettingsService.instance.backendUrl;
+    final origin = _origin;
     final epoch = _epoch;
     final version = _versions[_key(normalized, origin)] ?? 0;
     final requestKey = '${_key(normalized, origin)}|$epoch|$version';
@@ -86,7 +94,7 @@ class EmojiTransferService {
   );
 
   static Future<void> invalidate(String reference) {
-    final origin = SettingsService.instance.backendUrl;
+    final origin = _origin;
     final key = _key(reference.trim(), origin);
     _versions[key] = (_versions[key] ?? 0) + 1;
     final legacyKey = sha256.convert(utf8.encode(reference.trim())).toString();
@@ -165,7 +173,7 @@ class EmojiTransferService {
     File? partial;
     bool current() =>
         epoch == _epoch &&
-        origin == SettingsService.instance.backendUrl &&
+        origin == _origin &&
         (_versions[_key(reference, origin)] ?? 0) == version;
     try {
       await _mutationTail;

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../widgets/remote_media_image.dart';
 import '../models/role.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
@@ -138,7 +139,7 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
     if (role.avatarUrl != null && role.avatarUrl!.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.network(
+        child: RemoteMediaImage(
           role.avatarUrl!,
           headers: SecureBackendClient.authHeaders,
           width: 40,

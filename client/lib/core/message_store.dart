@@ -65,11 +65,42 @@ class MessageStore extends ChangeNotifier {
   /// 本地归档变更时递增，用于识别可能覆盖新消息的旧快照。
   int _localMessageRevision = 0;
   Future<void> _archiveMutationTail = Future<void>.value();
+  bool _switchingBackend = false;
   bool _snapshotSyncRequested = false;
   Future<void>? _snapshotSyncFuture;
   int _hashRevision = -1;
   String? _cachedHash;
   Future<void>? _initFuture;
+
+  Future<void> switchBackend({Future<void> Function()? changeNamespace}) async {
+    _switchingBackend = true;
+    try {
+      await _archiveMutationTail;
+      if (changeNamespace != null) await changeNamespace();
+      for (final timer in _saveDebounceTimers.values) {
+        timer.cancel();
+      }
+      _saveDebounceTimers.clear();
+      _messages.clear();
+      _lastMessages.clear();
+      _messageCounts.clear();
+      _knownChatIds.clear();
+      _unreadCounts.clear();
+      _activeChatWindowCounts.clear();
+      _expandedChatWindows.clear();
+      _archiveDirectoryPath = null;
+      _cachedHash = null;
+      _hashRevision = -1;
+      _localMessageRevision++;
+      await _loadArchiveIndex();
+      for (final controller in _streamControllers.values) {
+        controller.add([]);
+      }
+      notifyListeners();
+    } finally {
+      _switchingBackend = false;
+    }
+  }
 
   /// 初始化（确保只执行一次）
   static Future<void> init() async {
@@ -137,7 +168,16 @@ class MessageStore extends ChangeNotifier {
   }
 
   Future<T> _withArchiveMutation<T>(Future<T> Function() operation) {
-    final next = _archiveMutationTail.then((_) => operation());
+    if (_switchingBackend) {
+      return Future<T>.error(StateError('Backend archive is switching'));
+    }
+    final namespace = StorageService.namespace;
+    final next = _archiveMutationTail.then((_) {
+      if (namespace != StorageService.namespace) {
+        throw StateError('Backend changed before archive write');
+      }
+      return operation();
+    });
     _archiveMutationTail = next.then<void>(
       (_) {},
       onError: (error, stackTrace) {},
@@ -766,7 +806,7 @@ class MessageStore extends ChangeNotifier {
     if (cached != null) return Directory(cached);
     final documents = await getApplicationDocumentsDirectory();
     final directory = Directory(
-      '${documents.path}${Platform.pathSeparator}message_archives',
+      '${documents.path}${Platform.pathSeparator}message_archives${StorageService.archiveNamespace.isEmpty ? '' : '/${StorageService.archiveNamespace}'}',
     );
     if (!await directory.exists()) {
       await directory.create(recursive: true);
@@ -899,6 +939,7 @@ class MessageStore extends ChangeNotifier {
       final data = await SecureWebSocketClient.instance.request(
         'chat_snapshot',
         {'client_md5': requestContext.localMd5},
+        force: true,
       );
       await _withArchiveMutation(() async {
         if (!isSnapshotRevisionCurrent(
@@ -920,6 +961,9 @@ class MessageStore extends ChangeNotifier {
         final chatsRaw = data['chats'];
         if (chatsRaw is! Map) {
           return;
+        }
+        for (final chatId in _knownChatIds.toList()) {
+          chatsRaw.putIfAbsent(chatId, () => <dynamic>[]);
         }
 
         var syncedChats = 0;
@@ -978,6 +1022,14 @@ class MessageStore extends ChangeNotifier {
           messages
             ..clear()
             ..addAll(mergedMessages);
+          if (jsonEncode(
+                messages.map((message) => message.toJson()).toList(),
+              ) ==
+              jsonEncode(
+                localArchive.map((message) => message.toJson()).toList(),
+              )) {
+            continue;
+          }
           final newBackgroundMessages = messages.where(
             (message) =>
                 message.senderId != 'me' &&
@@ -1107,7 +1159,9 @@ class MessageStore extends ChangeNotifier {
     required bool tracked,
   }) async {
     Object? lastError;
+    final namespace = StorageService.namespace;
     for (int attempt = 0; attempt <= _syncMaxRetry; attempt += 1) {
+      if (namespace != StorageService.namespace) return;
       try {
         await SecureWebSocketClient.instance.request('save_chat_message', {
           'role_id': chatId,
@@ -1122,6 +1176,7 @@ class MessageStore extends ChangeNotifier {
           },
         });
 
+        if (namespace != StorageService.namespace) return;
         debugPrint(
           'MessageStore: Synced message ${message.id} via websocket ✓',
         );
@@ -1146,7 +1201,7 @@ class MessageStore extends ChangeNotifier {
     debugPrint(
       'MessageStore: WebSocket sync failed for ${message.id} after retries: $lastError',
     );
-    if (tracked) {
+    if (tracked && namespace == StorageService.namespace) {
       await updateMessageSendStatus(
         chatId,
         message.id,
@@ -1159,6 +1214,7 @@ class MessageStore extends ChangeNotifier {
   /// 由重连后的全量对账调用，且必须在快照对比之前执行。
   Future<void> drainOutbox() async {
     if (_draining) return;
+    final namespace = StorageService.namespace;
     _draining = true;
     try {
       final pending = <MapEntry<String, Message>>[];
@@ -1176,6 +1232,7 @@ class MessageStore extends ChangeNotifier {
       if (pending.isEmpty) return;
       debugPrint('MessageStore: draining outbox (${pending.length} messages)');
       for (final entry in pending) {
+        if (namespace != StorageService.namespace) return;
         await _runOutboxSync(
           entry.key,
           entry.value,

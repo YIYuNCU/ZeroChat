@@ -134,6 +134,8 @@ class MomentsService extends ChangeNotifier {
 
   /// 加载动态
   Future<void> _loadPosts() async {
+    _posts = [];
+    _lastHashCheckAt = null;
     final jsonList = StorageService.getJsonList(_storageKey);
     _localHash = StorageService.getString(_hashStorageKey) ?? '';
     _hasValidLocalCache = jsonList != null;
@@ -166,22 +168,6 @@ class MomentsService extends ChangeNotifier {
   String _computePostsHashFromJson(List<Map<String, dynamic>> jsonList) {
     final normalized = jsonEncode(jsonList);
     return sha256.convert(utf8.encode(normalized)).toString();
-  }
-
-  Future<String?> _fetchBackendHash({int limit = 50}) async {
-    try {
-      final response = await SecureWebSocketClient.instance.request(
-        'moments_hash',
-        {'limit': limit},
-      );
-      final hash = response['hash']?.toString();
-      if (hash != null && hash.isNotEmpty) {
-        return hash;
-      }
-    } catch (e) {
-      debugPrint('MomentsService: Fetch backend hash failed: $e');
-    }
-    return null;
   }
 
   /// 进入朋友圈时调用：仅在 hash 不一致时同步数据。
@@ -222,16 +208,7 @@ class MomentsService extends ChangeNotifier {
         now.difference(lastCheckAt) < _hashCheckThrottle) {
       return false;
     }
-    _lastHashCheckAt = now;
-
-    final backendHash = await _fetchBackendHash(limit: limit);
-    if (backendHash == null || backendHash.isEmpty) {
-      return false;
-    }
-    if (_localHash == backendHash) {
-      return false;
-    }
-    return fetchFromBackend(limit: limit, expectedHash: backendHash);
+    return fetchFromBackend(limit: limit, force: force);
   }
 
   /// 发布动态（用户）
@@ -401,8 +378,9 @@ class MomentsService extends ChangeNotifier {
             'limit': limit,
             if (_localHash.isNotEmpty && _hasValidLocalCache)
               'client_hash': _localHash,
-          });
+          }, force: true);
       final responseHash = response['hash']?.toString();
+      _lastHashCheckAt = DateTime.now();
       if (response['not_modified'] == true) {
         if (responseHash != null &&
             responseHash.isNotEmpty &&

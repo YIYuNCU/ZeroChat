@@ -10,6 +10,8 @@ import 'moments_service.dart';
 import 'role_service.dart';
 import 'secure_websocket_client.dart';
 import 'task_service.dart';
+import 'conditional_cache_service.dart';
+import 'memory_service.dart';
 
 class RealtimeSyncService {
   RealtimeSyncService._();
@@ -55,6 +57,16 @@ class RealtimeSyncService {
             .trim();
         if (type.isEmpty) {
           return;
+        }
+        if (type == 'resource_changed') {
+          final payload = event['payload'];
+          final actions = payload is Map ? payload['actions'] : null;
+          if (actions is List) {
+            if (actions.contains('roles_list')) RoleService.invalidateSync();
+            if (actions.contains('roles_memory_get')) {
+              MemoryService.invalidateSync();
+            }
+          }
         }
 
         if (_isChatPush(type)) {
@@ -115,6 +127,9 @@ class RealtimeSyncService {
   }
 
   static Future<void> _resyncAll() async {
+    ConditionalCacheService.instance.invalidate();
+    RoleService.invalidateSync();
+    MemoryService.invalidateSync();
     // Independent resources must still refresh if the chat recovery fails.
     await Future.wait([
       _resyncChats(),

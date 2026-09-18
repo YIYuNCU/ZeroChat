@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'remote_media_image.dart';
 
 import 'package:flutter/material.dart';
 
@@ -158,7 +159,7 @@ class _EmojiImageState extends State<EmojiImage> {
   @override
   Widget build(BuildContext context) {
     if (!_isTransferReference) {
-      return Image.network(
+      return RemoteMediaImage(
         widget.source,
         headers: widget.headers,
         fit: widget.fit,

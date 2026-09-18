@@ -7,6 +7,7 @@ import shutil
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from functools import lru_cache
 from urllib.parse import quote, unquote, urlparse
 
 from fastapi import WebSocket
@@ -44,6 +45,19 @@ def _role_emoji_ref(role_id: str, category: str, filename: str) -> str:
 
 def _user_emoji_ref(emoji_id: str) -> str:
     return f"ws-emoji://user/{quote(emoji_id, safe='')}"
+
+
+@lru_cache(maxsize=1024)
+def _emoji_hash_at_version(path: str, modified: int, changed: int, size: int) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _emoji_content_hash(path: Path) -> str:
+    try:
+        stat = path.stat()
+        return _emoji_hash_at_version(str(path), stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+    except OSError:
+        return ""
 
 
 def _cleanup_emoji_transfers() -> None:
@@ -410,7 +424,10 @@ async def _handle_vision_upload_commit(payload: dict, backend_base_url: str) -> 
 
 
 async def _handle_settings_get(payload: dict, backend_base_url: str) -> dict:
-    settings_data = summary_config_service.load_settings_with_summary_configs()
+    from services.settings_sync import select_settings
+    from services.conditional_sync import digest
+    settings_data = select_settings(summary_config_service.load_settings_with_summary_configs(), payload.get("groups"))
+    versions = {key: digest(value) for key, value in settings_data.items()}
     include_secrets = payload.get("include_secrets") is True
     if not include_secrets:
         for key_name in ("ai_api_key", "intent_api_key", "vision_api_key", "embedding_api_key"):
@@ -428,7 +445,7 @@ async def _handle_settings_get(payload: dict, backend_base_url: str) -> dict:
             if masked is not None:
                 entry["api_key_masked"] = masked
             settings_data[config_key] = entry
-    return {"settings": settings_data}
+    return {"settings": settings_data, "field_versions": versions}
 
 
 async def _handle_settings_prompts_get(payload: dict) -> dict:
@@ -769,6 +786,8 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
         role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
         role_copy["avatar_hash"] = roles._get_role_avatar_hash(role_id)
 
+    if payload.get("compact_response"):
+        return {"success": True}
     return role_copy
 
 
@@ -870,12 +889,12 @@ async def _handle_user_emojis_list(payload: dict, backend_base_url: str) -> dict
         if category:
             normalized = roles._normalize_category_name(str(category))
             rows = conn.execute(
-                "SELECT id, category, tag, filename, created_at FROM user_emojis WHERE category = ? ORDER BY created_at DESC",
+                "SELECT id, category, tag, filename, created_at, file_path FROM user_emojis WHERE category = ? ORDER BY created_at DESC",
                 (normalized,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, category, tag, filename, created_at FROM user_emojis ORDER BY created_at DESC"
+                "SELECT id, category, tag, filename, created_at, file_path FROM user_emojis ORDER BY created_at DESC"
             ).fetchall()
 
     emojis = [
@@ -885,7 +904,8 @@ async def _handle_user_emojis_list(payload: dict, backend_base_url: str) -> dict
             "tag": str(r["tag"]),
             "filename": str(r["filename"]),
             "created_at": str(r["created_at"]),
-            "url": _user_emoji_ref(str(r["id"])),
+            "url": _user_emoji_ref(str(r["id"])) + "?sha256=" + _emoji_content_hash(
+                ensure_path_within_root(Path(str(r["file_path"])), roles.get_user_emoji_root())),
         }
         for r in rows
     ]
@@ -1020,7 +1040,50 @@ def _forget_async_chat_task(task_id: str, task: asyncio.Task) -> None:
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
+_SETTINGS_SYNC_LOCK = asyncio.Lock()
+
+
+async def _notify_resource_change(action, result):
+    from services.conditional_sync import invalidated_actions
+    from transport.push_hub import publish_server_push
+    actions = invalidated_actions(action)
+    if actions and isinstance(result, dict) and result.get("success") is not False and not result.get("error"):
+        try:
+            await publish_server_push("resource_changed", {"actions": actions})
+        except RuntimeError:
+            # Standalone dispatcher tests have no configured push hub.
+            pass
+
+
 async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, config: dict):
+    from services.conditional_sync import READ_ACTIONS, pack_response
+    if action == "settings_update":
+        from services.conditional_sync import digest
+        async with _SETTINGS_SYNC_LOCK:
+            current = summary_config_service.load_settings_with_summary_configs()
+            bases = payload.get("base_versions") or {}
+            conflicts = [key for key in (payload.get("updates") or {})
+                         if key in bases and bases[key] != digest(current.get(key))]
+            if conflicts:
+                return {"success": False, "conflicts": conflicts, "error": "Settings changed on another device"}
+            result = await _dispatch_ws_action(action, payload, websocket, config)
+            if result.get("success"):
+                current = summary_config_service.load_settings_with_summary_configs()
+                result["field_versions"] = {key: digest(current.get(key)) for key in (payload.get("updates") or {})}
+                await _notify_resource_change(action, result)
+            return result
+    known = payload.get("_sync")
+    if action in READ_ACTIONS and isinstance(known, dict) and known.get("version") == 1:
+        query = {key: value for key, value in payload.items()
+                 if key not in {"_sync", "client_hash", "client_md5"}}
+        result = await _dispatch_ws_action(action, query, websocket, config)
+        return pack_response(action, result, known)
+    result = await _dispatch_ws_action(action, payload, websocket, config)
+    await _notify_resource_change(action, result)
+    return result
+
+
+async def _dispatch_ws_action(action: str, payload: dict, websocket: WebSocket, config: dict):
     backend_base_url = resolve_backend_base_url_from_websocket(websocket, config)
 
     # --- Extracted handlers ---
@@ -1186,6 +1249,25 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
                 if active_task is not None and not active_task.done():
                     return {"success": True, "task_id": task_id, "status": "queued"}
 
+            if context.get("compact_context") is True and not context.get("context_supplied"):
+                from services.memory_service import get_context_messages, load_memory_sections
+                from services.chat_io_service import run_file_io
+                role = roles.load_role(event.role_id) or {}
+                history = await get_context_messages(event.role_id, conversation_key="default_user",
+                    skip_summary=True, latest=True, max_context_rounds=role.get("max_context_rounds"))
+                memory = await run_file_io(load_memory_sections, event.role_id, ["core_memory"])
+                missing = []
+                if not history:
+                    missing.append("history")
+                if not memory.get("core_memory"):
+                    missing.append("core_memory")
+                if not role.get("attached_json_content"):
+                    missing.append("attached_json")
+                available = context.get("fallback_fields") or []
+                missing = [key for key in missing if key in available]
+                if missing:
+                    return {"status": "context_required", "fields": missing}
+
             background_task = asyncio.create_task(
                 _process_chat_background(task_id, event)
             )
@@ -1341,11 +1423,29 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
 
     if action == "roles_list":
         role_items = roles.build_role_items(backend_base_url)
+        if payload.get("summary"):
+            detail_keys = {"system_prompt", "core_memory", "attached_json_content", "ai_api_key"}
+            role_items = [{key: value for key, value in role.items() if key not in detail_keys} for role in role_items]
+            for role in role_items:
+                if isinstance(role.get("onebot_config"), dict):
+                    role["onebot_config"] = {key: value for key, value in role["onebot_config"].items() if key != "secret"}
         current_hash = roles.compute_roles_hash(role_items)
         client_hash = str(payload.get("client_hash") or "").strip()
         if client_hash and client_hash == current_hash:
             return {"roles": [], "hash": current_hash, "not_modified": True, "count": len(role_items)}
         return {"roles": role_items, "hash": current_hash, "not_modified": False}
+
+    if action == "roles_detail":
+        role_id = _safe_segment(str(payload.get("role_id") or ""), "role_id")
+        role = roles.load_role(role_id)
+        if role is None:
+            raise ValueError("Role not found")
+        role = dict(role)
+        role["core_memory"] = roles._core_memory_to_lines(role.get("core_memory", []))
+        if role.get("avatar_url"):
+            role["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"
+            role["avatar_hash"] = roles._get_role_avatar_hash(role_id)
+        return {"role": role}
 
     if action == "roles_hash":
         role_items = roles.build_role_items(backend_base_url)
@@ -1397,6 +1497,11 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         role_id = str(payload.get("role_id") or "").strip()
         if not role_id:
             raise ValueError("role_id missing")
+        if "sections" in payload:
+            from services.memory_service import load_memory_sections
+            from services.chat_io_service import run_file_io
+            return await run_file_io(load_memory_sections, role_id, payload["sections"],
+                                     payload.get("limit", 200), payload.get("before_id"), payload.get("version"))
         since_id_raw = payload.get("since_id")
         since_id = int(since_id_raw) if since_id_raw is not None else None
         return await roles.get_memory(role_id, since_id=since_id)
@@ -1458,6 +1563,11 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
         role_id = str(payload.get("role_id") or "").strip()
         if not role_id:
             raise ValueError("role_id missing")
+        if payload.get("paged"):
+            from services.vector_memory import VectorMemoryStore
+            from services.chat_io_service import run_file_io
+            return await run_file_io(VectorMemoryStore(role_id).sync_page,
+                payload.get("offset", 0), payload.get("limit", 100), payload.get("version"))
         from services.memory_service import list_vector_memories
         limit = int(payload.get("limit") or 500)
         offset = int(payload.get("offset") or 0)
@@ -1568,7 +1678,7 @@ async def handle_ws_action(action: str, payload: dict, websocket: WebSocket, con
                 "id": f"{category}:{f.name}",
                 "filename": f.name,
                 "category": category,
-                "url": _role_emoji_ref(role_id, category, f.name),
+                "url": _role_emoji_ref(role_id, category, f.name) + "?sha256=" + _emoji_content_hash(f),
             }
             for f in files
         ]

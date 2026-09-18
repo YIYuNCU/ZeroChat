@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/message.dart';
@@ -6,6 +5,7 @@ import '../models/emoji_item.dart';
 import '../models/role.dart';
 import '../core/message_parts.dart';
 import '../widgets/chat_bubble.dart';
+import '../widgets/remote_media_image.dart';
 import '../widgets/input_bar.dart';
 import '../core/chat_controller.dart';
 import '../core/message_store.dart';
@@ -640,18 +640,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     return Scaffold(
       resizeToAvoidBottomInset: false,
       appBar: _buildAppBar(),
-      body: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFFEDEDED),
-          image: backgroundUrl.isNotEmpty
-              ? DecorationImage(
-                  image: backgroundUrl.startsWith('http')
-                      ? NetworkImage(backgroundUrl) as ImageProvider
-                      : FileImage(File(backgroundUrl)),
-                  fit: BoxFit.cover,
-                )
-              : null,
-        ),
+      body: RemoteMediaBackground(
+        url: backgroundUrl,
         child: Column(
           children: [
             Expanded(
