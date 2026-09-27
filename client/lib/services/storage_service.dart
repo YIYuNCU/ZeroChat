@@ -35,6 +35,7 @@ class StorageService {
       'json_memory_',
       'proactive_config_',
       'role_model_profile_selections',
+      'tool_calls_cache_',
     ];
     return prefixes.any(key.startsWith) ? 'backend_${namespace}_$key' : key;
   }

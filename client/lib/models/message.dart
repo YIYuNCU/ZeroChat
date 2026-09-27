@@ -18,6 +18,13 @@ class Message {
   /// 引用消息的预览文本
   final String? quotedPreviewText;
 
+  /// 生成本条消息时对应的 AI 请求 id（可为空）。
+  /// 工具调用历史功能用它按需向服务端查询调用明细，明细本身不随消息存储/传输。
+  final String? requestId;
+
+  /// 本条消息生成过程中是否发生过工具调用（仅作展示入口开关，不含明细）。
+  final bool hasToolCalls;
+
   Message({
     required this.id,
     required this.senderId,
@@ -29,6 +36,8 @@ class Message {
     this.sendStatus = MessageSendStatus.sent,
     this.quotedMessageId,
     this.quotedPreviewText,
+    this.requestId,
+    this.hasToolCalls = false,
   });
 
   /// 创建带引用的消息
@@ -73,6 +82,8 @@ class Message {
       ),
       quotedMessageId: json['quoted_message_id'] as String?,
       quotedPreviewText: json['quoted_preview_text'] as String?,
+      requestId: json['request_id'] as String?,
+      hasToolCalls: json['has_tool_calls'] as bool? ?? false,
     );
   }
 
@@ -88,6 +99,8 @@ class Message {
       'send_status': sendStatus.name,
       'quoted_message_id': quotedMessageId,
       'quoted_preview_text': quotedPreviewText,
+      if (requestId != null) 'request_id': requestId,
+      'has_tool_calls': hasToolCalls,
     };
   }
 
@@ -113,6 +126,8 @@ class Message {
     MessageSendStatus? sendStatus,
     String? quotedMessageId,
     String? quotedPreviewText,
+    String? requestId,
+    bool? hasToolCalls,
   }) {
     return Message(
       id: id ?? this.id,
@@ -125,11 +140,16 @@ class Message {
       sendStatus: sendStatus ?? this.sendStatus,
       quotedMessageId: quotedMessageId ?? this.quotedMessageId,
       quotedPreviewText: quotedPreviewText ?? this.quotedPreviewText,
+      requestId: requestId ?? this.requestId,
+      hasToolCalls: hasToolCalls ?? this.hasToolCalls,
     );
   }
 
   /// 是否有引用
   bool get hasQuote => quotedMessageId != null;
+
+  /// 是否携带可用于查询工具调用历史的 request_id
+  bool get hasRequestId => requestId != null && requestId!.isNotEmpty;
 }
 
 /// 消息类型枚举

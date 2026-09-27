@@ -348,22 +348,26 @@ async def execute_continue_if_no_reply(
 
 async def execute_block_user(role_data: Dict, user_id: str, reason: str) -> str:
     """屏蔽用户，返回结果描述"""
+    from services.chat_io_service import role_lock
+
     role_id = role_data.get("id", "")
     profile_file = _role_dir(role_id) / "profile.json"
 
     try:
-        with open(profile_file, "r", encoding="utf-8") as f:
-            role_content = json.load(f)
-        onebot_config = role_content.get("onebot_config") or {}
-        blocked = onebot_config.get("blocked_users") or {}
+        # 与 roles.save_role / 生理周期镜像共用同一把角色档案锁，避免整份档案互相覆盖
+        with role_lock(role_id):
+            with open(profile_file, "r", encoding="utf-8") as f:
+                role_content = json.load(f)
+            onebot_config = role_content.get("onebot_config") or {}
+            blocked = onebot_config.get("blocked_users") or {}
 
-        if user_id not in blocked:
-            blocked[user_id] = []
-        onebot_config["blocked_users"] = blocked
-        role_content["onebot_config"] = onebot_config
+            if user_id not in blocked:
+                blocked[user_id] = []
+            onebot_config["blocked_users"] = blocked
+            role_content["onebot_config"] = onebot_config
 
-        with open(profile_file, "w", encoding="utf-8") as f:
-            json.dump(role_content, f, ensure_ascii=False, indent=2)
+            with open(profile_file, "w", encoding="utf-8") as f:
+                json.dump(role_content, f, ensure_ascii=False, indent=2)
 
         role_name = role_data.get("name", role_id)
         logger.warning(f"AI主动屏蔽用户: role={role_name}({role_id}), target={user_id}, reason={reason}")

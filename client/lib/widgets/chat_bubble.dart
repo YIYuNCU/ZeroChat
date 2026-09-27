@@ -12,6 +12,7 @@ import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/secure_websocket_client.dart';
 import '../services/role_service.dart';
+import '../services/tool_call_service.dart';
 import 'smart_avatar_image.dart';
 
 /// ZeroChat 风格聊天气泡组件
@@ -231,9 +232,23 @@ class ChatBubble extends StatelessWidget {
           ],
           // 正文按标签的原始顺序逐片段渲染。
           ..._buildBodyParts(),
+          // 工具调用历史（角色开启「显示工具调用历史」且本条消息携带记录时展示）
+          if (_showToolCallsCard) ...[
+            const SizedBox(height: 6),
+            _ToolCallsCard(roleId: message.senderId, requestId: message.requestId!),
+          ],
         ],
       ),
     );
+  }
+
+  /// 是否显示工具调用历史卡片：仅 AI 消息、角色已开启该设置、且本条消息
+  /// 确实发生过工具调用（明细按需向服务端查询，这里只判断入口是否展示）。
+  bool get _showToolCallsCard {
+    if (isSender || !message.hasToolCalls || !message.hasRequestId) {
+      return false;
+    }
+    return RoleService.getRoleById(message.senderId)?.showToolCalls ?? false;
   }
 
   /// 构建消息正文各片段（对话/动作/声音/心理/事实/数值）。
@@ -999,6 +1014,193 @@ class _TransferStickerContentState extends State<_TransferStickerContent> {
       default:
         return '😐';
     }
+  }
+}
+
+/// 工具调用历史卡片：默认折叠，仅显示入口。点击展开时才向服务端按需查询
+/// 该次回复的工具调用明细（首次查询后本地缓存，见 [ToolCallService]）。
+class _ToolCallsCard extends StatefulWidget {
+  final String roleId;
+  final String requestId;
+
+  const _ToolCallsCard({required this.roleId, required this.requestId});
+
+  @override
+  State<_ToolCallsCard> createState() => _ToolCallsCardState();
+}
+
+class _ToolCallsCardState extends State<_ToolCallsCard> {
+  bool _expanded = false;
+  bool _loading = false;
+  List<Map<String, dynamic>>? _toolCalls;
+  String? _error;
+
+  Future<void> _toggleExpanded() async {
+    setState(() => _expanded = !_expanded);
+    if (!_expanded || _toolCalls != null || _loading) return;
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final calls = await ToolCallService.getToolCalls(
+        roleId: widget.roleId,
+        requestId: widget.requestId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _toolCalls = calls;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '加载失败';
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF0F2F5),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0xFFE0E3E8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: _toggleExpanded,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 6,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.build_outlined,
+                    size: 14,
+                    color: Color(0xFF666666),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    _headerText,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF666666),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 16,
+                    color: const Color(0xFF666666),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded) _buildExpandedBody(),
+        ],
+      ),
+    );
+  }
+
+  String get _headerText {
+    if (_loading) return '正在加载工具调用记录…';
+    if (_error != null) return _error!;
+    final calls = _toolCalls;
+    if (calls == null) return '查看工具调用记录';
+    return '调用了 ${calls.length} 个工具';
+  }
+
+  Widget _buildExpandedBody() {
+    if (_loading) {
+      return const Padding(
+        padding: EdgeInsets.fromLTRB(8, 0, 8, 8),
+        child: SizedBox(
+          width: 14,
+          height: 14,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    final calls = _toolCalls ?? const <Map<String, dynamic>>[];
+    if (calls.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.fromLTRB(8, 0, 8, 8),
+        child: Text(
+          '没有可显示的调用记录',
+          style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [for (final call in calls) _buildCallEntry(call)],
+      ),
+    );
+  }
+
+  Widget _buildCallEntry(Map<String, dynamic> call) {
+    final name = call['name']?.toString() ?? '';
+    final rawArguments = call['arguments'];
+    final argumentsText = (rawArguments is Map && rawArguments.isNotEmpty)
+        ? rawArguments.entries.map((e) => '${e.key}=${e.value}').join(', ')
+        : '';
+    final result = call['result']?.toString() ?? '';
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            name,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF333333),
+            ),
+          ),
+          if (argumentsText.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                argumentsText,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF888888),
+                ),
+              ),
+            ),
+          if (result.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                result,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF4F7892),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 

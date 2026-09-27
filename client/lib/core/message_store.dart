@@ -1007,6 +1007,8 @@ class MessageStore extends ChangeNotifier {
                 quotedPreviewText:
                     map['quoted_preview_text']?.toString() ??
                     map['quote_content']?.toString(),
+                requestId: map['request_id']?.toString(),
+                hasToolCalls: map['has_tool_calls'] as bool? ?? false,
               ),
             );
           }
@@ -1173,6 +1175,8 @@ class MessageStore extends ChangeNotifier {
             'type': message.type.toString().split('.').last,
             'quote_id': message.quotedMessageId,
             'quote_content': message.quotedPreviewText,
+            if (message.requestId != null) 'request_id': message.requestId,
+            'has_tool_calls': message.hasToolCalls,
           },
         });
 

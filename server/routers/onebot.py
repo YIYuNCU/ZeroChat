@@ -626,13 +626,17 @@ def _build_conversation_key(transformed: Dict[str, Any]) -> str:
 
 def _persist_onebot_config(role_id: str, onebot_config: Dict):
     """将 onebot_config 变更写回 profile.json"""
+    from services.chat_io_service import role_lock
+
     profile_file = _role_dir(role_id) / "profile.json"
     try:
-        with open(profile_file, "r", encoding="utf-8") as f:
-            role_data = json.load(f)
-        role_data["onebot_config"] = onebot_config
-        with open(profile_file, "w", encoding="utf-8") as f:
-            json.dump(role_data, f, ensure_ascii=False, indent=2)
+        # 与 roles.save_role / 生理周期镜像共用同一把角色档案锁，避免整份档案互相覆盖
+        with role_lock(role_id):
+            with open(profile_file, "r", encoding="utf-8") as f:
+                role_data = json.load(f)
+            role_data["onebot_config"] = onebot_config
+            with open(profile_file, "w", encoding="utf-8") as f:
+                json.dump(role_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"持久化 onebot_config 失败: role={role_id}, error={e}")
 

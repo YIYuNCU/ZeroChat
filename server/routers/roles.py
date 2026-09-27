@@ -248,6 +248,7 @@ class RoleCreate(BaseModel):
     show_psychology: Optional[bool] = None
     show_stats: Optional[bool] = None
     show_no_reply: Optional[bool] = None
+    show_tool_calls: Optional[bool] = None
 
     # 归档状态：归档后不能对话、不发朋友圈、不发主动消息
     archived: Optional[bool] = False
@@ -283,6 +284,7 @@ class RoleUpdate(BaseModel):
     show_psychology: Optional[bool] = None
     show_stats: Optional[bool] = None
     show_no_reply: Optional[bool] = None
+    show_tool_calls: Optional[bool] = None
     archived: Optional[bool] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
@@ -429,32 +431,50 @@ def _get_role_avatar_hash(role_id: str) -> str:
 
 def save_role(role_id: str, data: Dict):
     profile_file = get_role_dir(role_id) / "profile.json"
-    previous_period_start = None
-    try:
-        if profile_file.exists():
-            with open(profile_file, "r", encoding="utf-8") as f:
-                previous_cycle = (json.load(f) or {}).get("menstruation_cycle") or {}
-            if isinstance(previous_cycle, dict):
-                previous_period_start = previous_cycle.get("last_period_start")
-    except (OSError, TypeError, ValueError):
-        pass
-
-    current_cycle = data.get("menstruation_cycle") or {}
-    current_period_start = (
-        current_cycle.get("last_period_start")
-        if isinstance(current_cycle, dict)
-        else None
-    )
-    data["updated_at"] = datetime.now().isoformat()
-    with open(profile_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    if current_period_start is not None and str(current_period_start) != str(previous_period_start):
+    # 整段"读旧值 -> 同步周期状态 -> 写整份档案"必须串行，否则会与运行时的周期镜像
+    # 写入（memory_service._persist_profile_cycle_state）互相覆盖。
+    with role_lock(role_id):
+        previous_period_start = None
         try:
-            from services.memory_service import reset_menstruation_cycle_state
+            if profile_file.exists():
+                with open(profile_file, "r", encoding="utf-8") as f:
+                    previous_cycle = (json.load(f) or {}).get("menstruation_cycle") or {}
+                if isinstance(previous_cycle, dict):
+                    previous_period_start = previous_cycle.get("last_period_start")
+        except (OSError, TypeError, ValueError):
+            pass
 
-            reset_menstruation_cycle_state(role_id, current_period_start)
+        current_cycle = data.get("menstruation_cycle") or {}
+        current_period_start = (
+            current_cycle.get("last_period_start")
+            if isinstance(current_cycle, dict)
+            else None
+        )
+        cycle_start_changed = (
+            current_period_start is not None
+            and str(current_period_start) != str(previous_period_start)
+        )
+        try:
+            from services.memory_service import (
+                mirror_stored_cycle_state,
+                sync_menstruation_cycle_state,
+            )
+
+            if cycle_start_changed:
+                # 上次经期时间被修改：立刻重算下一次经期时间，并让 json 与数据库写入
+                # 同一份内容。未修改时不重算，已规划的下一次经期时间不会被重新抽取。
+                sync_menstruation_cycle_state(
+                    role_id, profile_file, data, current_period_start
+                )
+            else:
+                # 未修改锚点：只把数据库里已有的规划值补回档案，避免每次保存设置都
+                # 把服务端镜像弄丢（客户端只会回传三个用户可见字段）。
+                mirror_stored_cycle_state(role_id, data)
         except Exception:
             pass
+        data["updated_at"] = datetime.now().isoformat()
+        with open(profile_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
     # 使 ai_behavior 中的角色缓存失效
     try:
         from routers.ai_behavior import invalidate_role_cache
@@ -462,8 +482,28 @@ def save_role(role_id: str, data: Dict):
     except ImportError:
         pass
 
+def _client_menstruation_cycle(role: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """只保留前端需要的生理周期字段。
+
+    档案里还镜像着服务端专用的 ``next_period_start``（准确规划值），它绝不能下发前端：
+    前端只显示"上一次开始时间"，下一次由后端运算（见 memory_service._sync_cycle_anchor）。
+    """
+
+    cycle_data = role.get("menstruation_cycle")
+    if not isinstance(cycle_data, dict):
+        return None
+    return {
+        key: cycle_data[key]
+        for key in ("cycle_length", "period_length", "last_period_start")
+        if cycle_data.get(key) is not None
+    }
+
+
 def normalize_role_avatar_url(role: Dict[str, Any], request: Request) -> Dict[str, Any]:
     role_copy = dict(role)
+    client_cycle = _client_menstruation_cycle(role_copy)
+    if client_cycle is not None:
+        role_copy["menstruation_cycle"] = client_cycle
     role_id = str(role_copy.get("id", "")).strip()
     if role_id:
         if not role_copy.get("avatar_url",None):
@@ -671,6 +711,7 @@ async def create_role(role: RoleCreate, request: Request):
         "show_psychology": role.show_psychology if role.show_psychology is not None else True,
         "show_stats": role.show_stats if role.show_stats is not None else True,
         "show_no_reply": role.show_no_reply if role.show_no_reply is not None else False,
+        "show_tool_calls": role.show_tool_calls if role.show_tool_calls is not None else False,
         "archived": bool(role.archived),
         "tags": role.tags or [],
         "gender": role.gender or "men",
@@ -1347,6 +1388,12 @@ class ChatMessage(BaseModel):
     type: Optional[str] = "text"
     quote_id: Optional[str] = None
     quote_content: Optional[str] = None
+    # 生成本条消息时对应的 AI 请求 id（前端「工具调用历史」功能用）：
+    # 工具调用明细落在 memory.sqlite 的 tool_calls 表中，前端按需以此 id 查询，
+    # 不随消息本体存储/传输。
+    request_id: Optional[str] = None
+    # 本条消息生成过程中是否发生过工具调用（仅展示入口开关，不含明细）。
+    has_tool_calls: Optional[bool] = False
 
 class ChatMessagesSync(BaseModel):
     """消息同步请求"""
@@ -1588,6 +1635,7 @@ def build_role_items(backend_base_url: str) -> List[Dict[str, Any]]:
         role_copy = dict(role)
         cycle_data = role_copy.get("menstruation_cycle")
         if isinstance(cycle_data, dict):
+            client_cycle = _client_menstruation_cycle(role_copy) or {}
             try:
                 from services.memory_service import _get_menstruation_status
 
@@ -1600,14 +1648,15 @@ def build_role_items(backend_base_url: str) -> List[Dict[str, Any]]:
                 if period_start:
                     # The profile value is the editable cycle anchor. The
                     # client should display the runtime cycle's latest start.
-                    role_copy["menstruation_cycle"] = {
-                        **cycle_data,
-                        "last_period_start": period_start,
-                    }
+                    # 只下发"上一次开始时间"：下一次经期是服务端规划值 + ±3 天预计值，
+                    # 前端既不显示也不参与计算（见 memory_service._sync_cycle_anchor），
+                    # 因此这里白名单化，避免档案里的 next_period_start 镜像被带出去。
+                    client_cycle["last_period_start"] = period_start
             except Exception:
                 # Role synchronization must remain available if optional
                 # runtime cycle state cannot be read.
                 pass
+            role_copy["menstruation_cycle"] = client_cycle
         role_id = str(role_copy.get("id", "")).strip()
         if role_id and role_copy.get("avatar_url"):
             role_copy["avatar_url"] = f"{backend_base_url}/files/roles/{role_id}/avatar"

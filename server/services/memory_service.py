@@ -19,6 +19,7 @@ from core.utils import ensure_direct_child_path, is_tool_role_id
 from services.vector_memory import VectorMemoryStore, _extract_semantic_text
 from services import summary_config_service
 from services.settings_service import get_thinking_config
+from services.chat_io_service import role_lock
 
 logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -37,6 +38,9 @@ SUMMARY_FAILURE_COOLDOWN_SECONDS = 120
 #: The degraded (summary-unavailable) window reads this many times the normal window so a
 #: few extra turns stay stable instead of sliding immediately.
 FALLBACK_WINDOW_MULTIPLIER = 3
+#: The exact next-period date is committed when a cycle starts and is never handed to the
+#: model; the model only sees an estimate within this many days of it.
+NEXT_PERIOD_ESTIMATE_MAX_OFFSET_DAYS = 3
 
 
 class _SummaryBusy:
@@ -175,6 +179,24 @@ def _init_db(conn: sqlite3.Connection):
         """
     )
     _ensure_short_term_schema(conn)
+    # 工具调用历史（前端「工具调用历史」功能用）：按 request_id 关联到
+    # 一次 AI 回复，明细按需查询，不随聊天消息本体存储/传输。
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_calls (
+            id INTEGER PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            name TEXT,
+            arguments TEXT,
+            result TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tool_calls_request_id ON tool_calls(request_id)"
+    )
     from services.sync_revision import install_revision
     install_revision(conn, "short_term")
 
@@ -610,16 +632,245 @@ def _clamp_int(value, default: int, min_val: int, max_val: int, jitter=None) -> 
     return result
 
 
-def _advance_period_cycles(last_start: datetime.date, cycle_length: int, today: datetime.date) -> datetime.date:
-    """Advance cycles with a small, persisted per-cycle biological variation."""
-    while last_start + timedelta(days=cycle_length) <= today:
-        variation = random.randint(-2, 2)
-        next_start = last_start + timedelta(days=max(1, cycle_length + variation))
-        if next_start > today:
-            # Do not move a projected future start into the current cycle.
-            break
-        last_start = next_start
-    return last_start
+def _parse_iso_date(value: Any) -> Optional[datetime.date]:
+    """Parse an ISO date / datetime string coming from a profile or memory metadata."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _plan_next_period_start(period_start: datetime.date, cycle_length: int) -> datetime.date:
+    """Commit the authoritative start date of the cycle following ``period_start``.
+
+    The date is drawn exactly once per cycle (with a small biological variation) and is
+    then persisted, so every later read agrees on when the next period starts instead of
+    re-rolling a new date on each request.
+    """
+
+    variation = random.randint(-2, 2)
+    return period_start + timedelta(days=max(1, cycle_length + variation))
+
+
+def _ensure_future_date(candidate: datetime.date, today: datetime.date) -> datetime.date:
+    """Keep a planned / estimated period date out of today and the past.
+
+    A "next period" date that is not in the future is meaningless (and would make the
+    model talk about a period that has already started), so anything at or before today is
+    pushed to tomorrow.
+    """
+
+    if candidate <= today:
+        return today + timedelta(days=1)
+    return candidate
+
+
+def _sync_cycle_anchor(
+    conn,
+    role_id: str,
+    profile_path: Path,
+    data: dict,
+    cycle_data: dict,
+    cycle_length: int,
+    today: datetime.date,
+) -> tuple[datetime.date, datetime.date]:
+    """Return ``(current_period_start, planned_next_period_start)`` as exact dates.
+
+    The next cycle is planned when the current one starts and that plan is then treated
+    as ground truth: a new cycle begins exactly on the planned day.  Nothing here is
+    exposed to the model directly — ``_get_next_period_estimate`` derives what it sees.
+
+    Whenever a cycle starts (including the first initialization) the exact start date is
+    written to both stores: the runtime metadata in SQLite and the role's ``profile.json``
+    anchor, so a restart or a profile read sees the same period history.
+    """
+
+    anchor_changed = False
+
+    period_start = _parse_iso_date(_get_meta(conn, "last_period_start"))
+    if period_start is None:
+        period_start = _parse_iso_date(cycle_data.get("last_period_start"))
+        if period_start is None:
+            period_start = today - timedelta(days=random.randint(0, max(1, cycle_length - 1)))
+        period_start = min(period_start, today)
+        _set_meta(conn, "last_period_start", period_start.isoformat())
+        _set_meta(conn, "next_period_start", None)
+        anchor_changed = True
+
+    period_start = min(period_start, today)
+
+    planned = _parse_iso_date(_get_meta(conn, "next_period_start"))
+    if planned is None:
+        # 数据库里的规划值丢失时，回退到档案里镜像的那一份（两处内容保持一致）。
+        planned = _parse_iso_date(cycle_data.get("next_period_start"))
+        if planned is not None and planned > period_start:
+            _set_meta(conn, "next_period_start", planned.isoformat())
+        else:
+            planned = None
+    if planned is None or planned <= period_start:
+        # 没有规划值（或规划值已失效）时立刻算一个；算出来不在未来就直接顺延到明天。
+        planned = _ensure_future_date(
+            _plan_next_period_start(period_start, cycle_length), today
+        )
+        _set_meta(conn, "next_period_start", planned.isoformat())
+
+    # 规划日已到达（或已过去）说明新周期开始：逐周期推进到未来，
+    # 这里不能顺延到明天，否则连续多个周期就补不回来了。
+    while planned <= today:
+        period_start = planned
+        _set_meta(conn, "last_period_start", period_start.isoformat())
+        planned = _plan_next_period_start(period_start, cycle_length)
+        _set_meta(conn, "next_period_start", planned.isoformat())
+        anchor_changed = True
+
+    # 推进结束后规划值必定在未来；这里只是把不变式写死。
+    planned = _ensure_future_date(planned, today)
+
+    # 数据库与档案（json）始终保持同一份内容：锚点、规划值都镜像过去。
+    if (
+        anchor_changed
+        or _parse_iso_date(cycle_data.get("last_period_start")) != period_start
+        or _parse_iso_date(cycle_data.get("next_period_start")) != planned
+    ):
+        _persist_profile_cycle_state(
+            role_id, profile_path, data, cycle_data, period_start, planned
+        )
+
+    return period_start, planned
+
+
+def _merge_profile_cycle_fields(
+    role_id: str,
+    profile_path: Path,
+    fallback_data: dict,
+    cycle_updates: Optional[dict] = None,
+    top_updates: Optional[dict] = None,
+) -> None:
+    """Merge cycle-related fields into ``profile.json`` under the role's file lock.
+
+    Every profile writer has to re-read before writing: the runtime cycle code and the
+    settings endpoints both do read-modify-write on the same file, and a whole-file dump of
+    an older snapshot would roll back whatever the other writer just stored.  Only the
+    fields passed here are touched, so unrelated settings survive.
+    """
+
+    with role_lock(role_id):
+        try:
+            with open(profile_path, "r", encoding="utf-8") as f:
+                on_disk = json.load(f)
+        except Exception:
+            on_disk = None
+        if not isinstance(on_disk, dict):
+            on_disk = dict(fallback_data or {})
+
+        if top_updates:
+            on_disk.update(top_updates)
+        if cycle_updates:
+            cycle_data = on_disk.get("menstruation_cycle")
+            if not isinstance(cycle_data, dict):
+                cycle_data = {}
+            cycle_data.update(cycle_updates)
+            on_disk["menstruation_cycle"] = cycle_data
+
+        try:
+            _save_profile(profile_path, on_disk)
+        except Exception:
+            # 档案写入失败不影响运行：SQLite 元数据仍是权威来源，下次读取会重试同步。
+            pass
+
+
+def _persist_profile_cycle_state(
+    role_id: str,
+    profile_path: Path,
+    data: dict,
+    cycle_data: dict,
+    period_start: datetime.date,
+    planned_next_period_start: datetime.date,
+) -> None:
+    """Mirror the runtime cycle state into ``profile.json``.
+
+    The SQLite metadata stays authoritative at runtime, while the profile carries the same
+    anchor and plan so both stores agree; ``next_period_start`` is a server-side mirror and
+    is stripped from every client payload.
+
+    The values are re-read from the database inside the file lock, so a concurrent settings
+    save (which also writes the database) can never be rolled back by this mirror write.
+    """
+
+    try:
+        with _get_connection(role_id) as conn:
+            stored_start = _parse_iso_date(_get_meta(conn, "last_period_start"))
+            stored_planned = _parse_iso_date(_get_meta(conn, "next_period_start"))
+    except Exception:
+        stored_start, stored_planned = None, None
+
+    period_start = stored_start or period_start
+    planned_next_period_start = stored_planned or planned_next_period_start
+
+    _merge_profile_cycle_fields(
+        role_id,
+        profile_path,
+        data,
+        cycle_updates={
+            "last_period_start": period_start.isoformat(),
+            "next_period_start": planned_next_period_start.isoformat(),
+        },
+    )
+    # 调用方的内存字典同步成同一份内容
+    cycle_data["last_period_start"] = period_start.isoformat()
+    cycle_data["next_period_start"] = planned_next_period_start.isoformat()
+    data["menstruation_cycle"] = cycle_data
+
+
+def _get_next_period_estimate(
+    conn, planned: datetime.date, today: datetime.date
+) -> datetime.date:
+    """Return the model-facing estimate for the committed next-period date.
+
+    The committed plan stays server-side; the model only receives ``planned ± 3`` days,
+    and never today or a past date (an imminent period can therefore only be reported as
+    "within a few days").  The estimate is deliberately *not* stable across days: before
+    the period actually starts the model should sound uncertain and its stated date may
+    drift, which is what a real cycle looks like.  It is cached for the current day only,
+    so the model never contradicts itself twice within the same conversation.
+    """
+
+    cached = _parse_iso_date(_get_meta(conn, "next_period_start_estimate"))
+    cached_base = _parse_iso_date(_get_meta(conn, "next_period_start_estimate_base"))
+    cached_for = (_get_meta(conn, "next_period_start_estimate_date") or "").strip()
+    if (
+        cached is not None
+        and cached > today
+        and cached_base == planned
+        and cached_for == today.isoformat()
+    ):
+        return cached
+
+    offsets = [
+        offset
+        for offset in range(
+            -NEXT_PERIOD_ESTIMATE_MAX_OFFSET_DAYS,
+            NEXT_PERIOD_ESTIMATE_MAX_OFFSET_DAYS + 1,
+        )
+        if planned + timedelta(days=offset) > today
+    ]
+    if offsets:
+        estimate = planned + timedelta(days=random.choice(offsets))
+    else:
+        # 规划值本身不在未来时的兜底：顺延到明天。
+        estimate = _ensure_future_date(planned, today)
+    estimate = _ensure_future_date(estimate, today)
+
+    _set_meta(conn, "next_period_start_estimate", estimate.isoformat())
+    _set_meta(conn, "next_period_start_estimate_base", planned.isoformat())
+    _set_meta(conn, "next_period_start_estimate_date", today.isoformat())
+    return estimate
 
 
 def _get_menstruation_status(role_id: str) -> Optional[Dict[str, Any]]:
@@ -640,24 +891,40 @@ def _get_menstruation_status(role_id: str) -> Optional[Dict[str, Any]]:
 
     cycle_data, cycle_length, period_length, profile_updated = _load_cycle_data(data)
     if profile_updated or data.get("gender") != gender:
+        # 只合并这几个字段，避免整份旧快照覆盖掉并发写入的其它设置
         data["gender"] = gender
         data["menstruation_cycle"] = cycle_data
-        _save_profile(profile_path, data)
+        _merge_profile_cycle_fields(
+            role_id,
+            profile_path,
+            data,
+            cycle_updates={
+                "cycle_length": cycle_length,
+                "period_length": period_length,
+            },
+            top_updates={"gender": gender},
+        )
 
     today = datetime.now().date()
     with _get_connection(role_id) as conn:
-        period_start = _get_or_init_last_period_start(
-            conn, cycle_data, cycle_length, today
+        period_start, planned_next_period_start = _sync_cycle_anchor(
+            conn,
+            role_id,
+            profile_path,
+            data,
+            cycle_data,
+            cycle_length,
+            today,
         )
-        period_start = _advance_period_cycles(period_start, cycle_length, today)
-        next_period_start = period_start + timedelta(days=cycle_length)
-        _set_meta(conn, "last_period_start", period_start.isoformat())
-        _set_meta(conn, "next_period_start", next_period_start.isoformat())
+        # 交给 AI 的始终是模糊预计值；准确值只留在服务端（元数据/档案）。
+        next_period_start = _get_next_period_estimate(
+            conn, planned_next_period_start, today
+        )
 
     cycle_day = (today - period_start).days + 1
     period_end = period_start + timedelta(days=period_length - 1)
     in_period = today <= period_end
-    return {
+    status = {
         "today": today.isoformat(),
         "cycle_length": cycle_length,
         "period_length": period_length,
@@ -667,9 +934,12 @@ def _get_menstruation_status(role_id: str) -> Optional[Dict[str, Any]]:
         "period_start": period_start.isoformat(),
         # Kept for state transitions; do not expose it to the model early.
         "expected_period_end": period_end.isoformat(),
+        # Estimated (fuzzy) date for the next period; the exact plan is server-side only.
         "next_period_start": next_period_start.isoformat(),
+        "next_period_start_is_estimate": True,
         "days_until_next_period": max(0, (next_period_start - today).days),
     }
+    return status
 
 
 def _if_in_menstruation(role_id: str) -> tuple[Optional[bool], Optional[int]]:
@@ -681,39 +951,138 @@ def _if_in_menstruation(role_id: str) -> tuple[Optional[bool], Optional[int]]:
     return False, int(status["days_until_next_period"])
 
 
-def _get_or_init_last_period_start(conn, cycle_data: dict, cycle_length: int, today: datetime.date):
-    """Get last period start from DB or initialize from profile data."""
+def _write_back_stored_cycle_state(
+    role_id: str, profile_path: Path, data: dict, cycle_data: dict
+) -> None:
+    """Restore the server-side cycle state into ``data`` instead of applying an edit.
 
-    last_raw = _get_meta(conn, "last_period_start")
-    if not last_raw:
-        profile_start = cycle_data.get("last_period_start")
+    Used when an edit cannot be applied (unparsable anchor, database write failure): the
+    profile must never end up holding a new anchor together with an old plan, so the values
+    the server still believes in are written back.  Falls back to the current file content
+    when the database is unreadable too, and drops the fields when neither is available
+    (the next runtime read mirrors them again).
+    """
+
+    stored: Optional[Dict[str, Any]] = None
+    try:
+        with _get_connection(role_id) as conn:
+            stored = {
+                "last_period_start": _get_meta(conn, "last_period_start"),
+                "next_period_start": _get_meta(conn, "next_period_start"),
+            }
+    except Exception:
+        stored = None
+
+    if stored is None:
         try:
-            last_date = datetime.fromisoformat(profile_start).date()
-        except (TypeError, ValueError):
-            last_date = today - timedelta(days=random.randint(0, max(1, cycle_length - 1)))
-        last_date = min(last_date, today)
-        _set_meta(conn, "last_period_start", last_date.isoformat())
-        return last_date
+            with open(profile_path, "r", encoding="utf-8") as f:
+                on_disk = (json.load(f) or {}).get("menstruation_cycle")
+            stored = on_disk if isinstance(on_disk, dict) else {}
+        except Exception:
+            stored = {}
+
+    for key in ("last_period_start", "next_period_start"):
+        value = stored.get(key)
+        if value is None:
+            cycle_data.pop(key, None)
+        else:
+            cycle_data[key] = value
+    data["menstruation_cycle"] = cycle_data
+
+
+def mirror_stored_cycle_state(role_id: str, data: dict) -> None:
+    """Mirror the stored runtime cycle state into a profile payload without re-planning it.
+
+    Called when settings are saved without touching ``last_period_start``: the client only
+    ever receives (and therefore only ever sends back) the three user-facing fields, so the
+    server-side ``next_period_start`` mirror would otherwise be dropped from the file.  This
+    never re-rolls the committed plan — it only copies the values the database already has.
+    """
+
+    if _normalize_gender(data) != "women":
+        # 非女性角色完全不维护生理周期
+        return
+
+    cycle_data = data.get("menstruation_cycle")
+    if not isinstance(cycle_data, dict):
+        return
 
     try:
-        last_date = datetime.fromisoformat(last_raw).date()
-    except (TypeError, ValueError):
-        last_date = today - timedelta(days=random.randint(0, max(1, cycle_length - 1)))
-    return min(last_date, today)
-
-
-def reset_menstruation_cycle_state(role_id: str, last_period_start: Any) -> None:
-    """Replace the runtime cycle anchor after its profile setting changes.
-
-    The cycle status is cached in ``memory_meta`` so it can advance naturally
-    between requests.  A profile edit must invalidate that cache; otherwise
-    the old anchor continues to override the newly configured date.
-    """
-    if last_period_start is None:
+        with _get_connection(role_id) as conn:
+            stored_start = _parse_iso_date(_get_meta(conn, "last_period_start"))
+            stored_planned = _parse_iso_date(_get_meta(conn, "next_period_start"))
+    except Exception:
         return
-    with _get_connection(role_id) as conn:
-        _set_meta(conn, "last_period_start", str(last_period_start).strip())
-        _set_meta(conn, "next_period_start", None)
+
+    if stored_start is None:
+        # 数据库还没有周期状态（从未读取过），保持档案原样
+        return
+
+    cycle_data["last_period_start"] = stored_start.isoformat()
+    if stored_planned is not None:
+        cycle_data["next_period_start"] = stored_planned.isoformat()
+    data["menstruation_cycle"] = cycle_data
+
+
+def sync_menstruation_cycle_state(
+    role_id: str, profile_path: Path, data: dict, last_period_start: Any
+) -> Optional[datetime.date]:
+    """React to a ``last_period_start`` edit by re-planning the next period immediately.
+
+    Called only when that field really changed, so saving other settings never re-rolls the
+    committed plan.  The edited anchor and the freshly computed plan are written to the
+    ``data`` dict (the caller persists it as ``profile.json``) *and* to the runtime
+    metadata in SQLite, so both stores end up with the same content.
+
+    The plan follows the runtime rule: current cycle length ± a small variation, and never
+    today or earlier — a value at or before today is pushed to tomorrow.
+
+    The database is written first; only when that succeeded is the profile content updated.
+    An edit that cannot be applied (unparsable date, database failure) leaves both stores on
+    the previous state instead of half-applying it.
+    """
+
+    if _normalize_gender(data) != "women":
+        # 非女性角色完全不维护生理周期
+        return None
+
+    cycle_data = data.get("menstruation_cycle")
+    if not isinstance(cycle_data, dict):
+        cycle_data = {}
+    data["menstruation_cycle"] = cycle_data
+
+    anchor = _parse_iso_date(last_period_start)
+    if anchor is None:
+        _write_back_stored_cycle_state(role_id, profile_path, data, cycle_data)
+        return None
+
+    _, cycle_length, period_length, _ = _load_cycle_data(data)
+
+    today = datetime.now().date()
+    # 与运行时一致：档案锚点不能落在未来
+    anchor = min(anchor, today)
+    planned = _ensure_future_date(_plan_next_period_start(anchor, cycle_length), today)
+
+    try:
+        with _get_connection(role_id) as conn:
+            _set_meta(conn, "last_period_start", anchor.isoformat())
+            _set_meta(conn, "next_period_start", planned.isoformat())
+            # 规划值变了，清掉给 AI 的预计值缓存，下次读取会重新抽取
+            _set_meta(conn, "next_period_start_estimate", None)
+            _set_meta(conn, "next_period_start_estimate_base", None)
+            _set_meta(conn, "next_period_start_estimate_date", None)
+    except Exception:
+        # 数据库没写成功：不半写入档案，两处一起停在旧状态
+        _write_back_stored_cycle_state(role_id, profile_path, data, cycle_data)
+        return None
+
+    cycle_data["cycle_length"] = cycle_length
+    cycle_data["period_length"] = period_length
+    cycle_data["last_period_start"] = anchor.isoformat()
+    cycle_data["next_period_start"] = planned.isoformat()
+
+    return planned
+
 
 def _get_menstruation_cycle_info(role_id: str) -> Optional[Dict[str, Any]]:
     status = _get_menstruation_status(role_id)
@@ -724,7 +1093,9 @@ def _get_menstruation_cycle_info(role_id: str) -> Optional[Dict[str, Any]]:
         "period_length": status["period_length"],
         "period_start": status["period_start"],
         "expected_period_end": status["expected_period_end"],
+        # Estimated date, safe to hand to the model.
         "next_period_start": status["next_period_start"],
+        "days_until_next_period": status["days_until_next_period"],
     }
 
 def _get_role_core_memory(role_id: str) -> str:
@@ -1185,6 +1556,76 @@ def append_short_term(
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端仅保证 request_id 在 DB 记录中可用。
         return int(row[0]) if row else None
+
+
+def append_tool_calls(role_id: str, request_id: str, calls: List[Dict[str, Any]]) -> None:
+    """把一次 AI 回复过程中的工具调用记录写入 tool_calls 表。
+
+    按 request_id 关联到对应的助手回复；前端「工具调用历史」功能按需查询，
+    不随聊天消息本体存储/传输。空列表直接跳过，不产生占位行。
+    """
+    if is_tool_role_id(role_id) or not calls:
+        return
+    normalized_request_id = str(request_id or "").strip()
+    if not normalized_request_id:
+        return
+    created_at = datetime.now().isoformat()
+    with _get_connection(role_id) as conn:
+        # 幂等：同一 request_id 的日志只写一次，避免推送重放/客户端重试
+        # 导致同一轮回复的工具调用记录重复入库。
+        existing = conn.execute(
+            "SELECT 1 FROM tool_calls WHERE request_id = ? LIMIT 1",
+            (normalized_request_id,),
+        ).fetchone()
+        if existing is not None:
+            return
+        for seq, call in enumerate(calls):
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("name") or "")
+            arguments = call.get("arguments")
+            try:
+                arguments_text = json.dumps(arguments or {}, ensure_ascii=False)
+            except (TypeError, ValueError):
+                arguments_text = "{}"
+            result_text = str(call.get("result") or "")
+            conn.execute(
+                """
+                INSERT INTO tool_calls (request_id, seq, name, arguments, result, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (normalized_request_id, seq, name, arguments_text, result_text, created_at),
+            )
+
+
+def get_tool_calls(role_id: str, request_id: str) -> List[Dict[str, Any]]:
+    """按 request_id 查询工具调用历史，按调用顺序返回。"""
+    normalized_request_id = str(request_id or "").strip()
+    if is_tool_role_id(role_id) or not normalized_request_id:
+        return []
+    with _get_connection(role_id) as conn:
+        rows = conn.execute(
+            """
+            SELECT name, arguments, result
+            FROM tool_calls
+            WHERE request_id = ?
+            ORDER BY seq ASC
+            """,
+            (normalized_request_id,),
+        ).fetchall()
+    result: List[Dict[str, Any]] = []
+    for name, arguments_text, result_text in rows:
+        try:
+            arguments = json.loads(arguments_text) if arguments_text else {}
+        except (TypeError, ValueError):
+            arguments = {}
+        result.append({
+            "name": name,
+            "arguments": arguments if isinstance(arguments, dict) else {},
+            "result": result_text or "",
+        })
+    return result
+
 
 def _summary_message_text(content: str) -> str:
     """Unwrap stored message envelopes without truncating multiline dialogue."""

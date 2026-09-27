@@ -651,6 +651,16 @@ async def _run_memory_ai_pipeline(
             )
         )
 
+    # 工具调用历史落库：与是否写入短期记忆无关，只要发生了工具调用就记录，
+    # 按 request_id 关联，前端按需查询，不随消息本体存储/传输。
+    tool_calls_log = result.get("_tool_calls_log") or []
+    if tool_calls_log:
+        from services.memory_service import append_tool_calls
+        await _run_db(
+            role_id,
+            functools.partial(append_tool_calls, role_id, normalized_request_id, tool_calls_log),
+        )
+
     new_core = None
     if trigger_summary_after_reply:
         new_core = await trigger_memory_summary(role_id, role)
@@ -666,6 +676,9 @@ async def _run_memory_ai_pipeline(
         "new_core": new_core,
         "vector_memory_count": vector_memories_count,
         "emojis_called": result.get("_emojis_called", []),
+        # 工具调用明细已按 request_id 落库，不再随管道结果一并返回；
+        # 客户端展开卡片时按需通过独立接口查询。
+        "has_tool_calls": bool(result.get("_tool_calls_log")),
     }
 
 def _resolve_vision_uploads(upload_ids: List[str]) -> tuple[List[str], List[Path]]:
@@ -726,6 +739,48 @@ def _vision_history_scope(event_context: Dict[str, Any]) -> str:
     return f"{origin}:{chat_id}"
 
 
+def _build_menstruation_chat_context(menstruation_status: Dict[str, Any]) -> List[str]:
+    """构造聊天用的生理期上下文片段。
+
+    下一次经期永远只是估算：服务端按周期规划值给出 ±3 天的随机预计，且这个预计值
+    每天都在变。这里必须让角色清楚"这是猜的、会变"，否则她会把预计日期当成确定事实
+    告诉用户（甚至当作承诺），用户之后就会发现日期对不上。
+    """
+
+    next_start = menstruation_status["next_period_start"]
+    uncertainty = (
+        f"下一次经期只是估算：大致在 {next_start} 前后，可能提前也可能延后几天，"
+        "而且这个预计日期每天都在浮动。\n"
+        "你并不知道确切日期——不要说成确定的事实、不要承诺具体日期，也不要把天数说得过分精确；"
+        "被问到时用模糊、留有余地的说法（例如“大概还有一周多”“差不多就这几天吧”）。"
+        "之后日期若发生变化，就自然地改口，不必解释原因，也不要向用户说明这些是系统数据。\n"
+    )
+
+    if menstruation_status["in_period"]:
+        parts = [
+            "[生理期状态]\n"
+            f"今天：{menstruation_status['today']}（周期第{menstruation_status['cycle_day']}天）\n"
+            f"本次经期开始：{menstruation_status['period_start']}，今天是第{menstruation_status['period_day']}天。\n"
+            f"{uncertainty}"
+            "请自然考虑这一状态对情绪和身体感受的影响。"
+        ]
+        if menstruation_status["today"] == menstruation_status["expected_period_end"]:
+            parts.append(
+                "[生理期状态更新]\n"
+                "按当前周期估算，本次经期预计在今天前后结束——这只是估算，"
+                "提前或延后一两天都正常，不要当成确定的事实说出来。"
+                "请自然考虑这一变化，不要主动向用户解释系统数据。"
+            )
+        return parts
+
+    return [
+        "[生理期状态]\n"
+        f"今天：{menstruation_status['today']}（周期第{menstruation_status['cycle_day']}天），当前不在经期。\n"
+        f"{uncertainty}"
+        "请自然考虑这一状态对情绪和身体感受的影响。"
+    ]
+
+
 async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     """处理用户聊天消息"""
     from services.memory_service import (
@@ -760,27 +815,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         extra_parts.append(search_context)
     menstruation_status = _get_menstruation_status(role_id)
     if menstruation_status is not None:
-        if menstruation_status["in_period"]:
-            extra_parts.append(
-                "[生理期状态]\n"
-                f"今天：{menstruation_status['today']}（周期第{menstruation_status['cycle_day']}天）\n"
-                f"本次经期开始：{menstruation_status['period_start']}，今天是第{menstruation_status['period_day']}天。\n"
-                f"预计下次经期开始：{menstruation_status['next_period_start']} 左右。\n"
-                "请自然考虑这一状态对情绪和身体感受的影响，不要主动向用户解释系统数据。"
-            )
-            if menstruation_status["today"] == menstruation_status["expected_period_end"]:
-                extra_parts.append(
-                    "[生理期状态更新]\n"
-                    "按当前周期估算，本次经期预计在今天结束。请自然考虑这一变化，"
-                    "不要主动向用户解释系统数据。"
-                )
-        else:
-            extra_parts.append(
-                "[生理期状态]\n"
-                f"今天：{menstruation_status['today']}（周期第{menstruation_status['cycle_day']}天），当前不在经期。\n"
-                f"预计下次经期开始：{menstruation_status['next_period_start']} 左右，时间可能前后浮动。\n"
-                "请自然考虑这一状态对情绪和身体感受的影响，不要主动向用户解释系统数据。"
-            )
+        extra_parts.extend(_build_menstruation_chat_context(menstruation_status))
     # 外挂 JSON 记录
     attached_json = role.get("attached_json_content", "")
     if not attached_json:
@@ -882,6 +917,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             "request_id": pipeline_result.get("request_id") or request_id,
             "emojis_called": [] if no_reply else pipeline_result.get("emojis_called", []),
             "no_reply": no_reply,
+            "has_tool_calls": pipeline_result.get("has_tool_calls", False),
         }
     )
 
@@ -917,7 +953,12 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
         success=True,
         action="reply",
         content=ai_message,
-        metadata={"type": "proactive", "role_name": role.get("name")}
+        metadata={
+            "type": "proactive",
+            "role_name": role.get("name"),
+            "request_id": pipeline_result.get("request_id"),
+            "has_tool_calls": pipeline_result.get("has_tool_calls", False),
+        }
     )
 
 
@@ -970,7 +1011,12 @@ async def handle_followup(role: Dict, event: AIEvent) -> AIResponse:
         success=True,
         action="reply",
         content=ai_message,
-        metadata={"type": "followup", "role_name": role.get("name")}
+        metadata={
+            "type": "followup",
+            "role_name": role.get("name"),
+            "request_id": pipeline_result.get("request_id"),
+            "has_tool_calls": pipeline_result.get("has_tool_calls", False),
+        }
     )
 
 
@@ -996,9 +1042,17 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
     in_menstruation, menstruation_day = _if_in_menstruation(role_id)
     cycle_info = _get_menstruation_cycle_info(role_id)
     if in_menstruation is True and menstruation_day is not None:
-        extra_parts.append(f"\n生理期数据：你当前处于生理期第{menstruation_day}天，预计持续时间{cycle_info['period_length']}天，请考虑这一点对你的情绪和状态的影响。\n")
+        extra_parts.append(
+            f"\n生理期数据：你当前处于生理期第{menstruation_day}天，预计持续"
+            f"{cycle_info['period_length']}天左右（只是估算，提前或延后一两天都正常，"
+            "不要说成确定的事实），请考虑这一点对你的情绪和状态的影响。\n"
+        )
     elif in_menstruation is False and menstruation_day is not None:
-        extra_parts.append(f"\n生理期数据：你当前不处于生理期，预计还有{menstruation_day}天来生理期。\n")
+        extra_parts.append(
+            f"\n生理期数据：你当前不处于生理期，预计还有{menstruation_day}天左右来生理期"
+            "（只是估算，可能提前或延后，而且这个天数每天都会浮动——不要承诺具体日期，"
+            "被问到时用模糊说法，例如“差不多还有十来天吧”）。\n"
+        )
     attached_json = role.get("attached_json_content", "")
     if not attached_json:
         attached_json = str(task_context.get("attached_json") or "").strip()
@@ -1035,6 +1089,7 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
             "type": "task",
             "task_id": task_context.get("task_id"),
             "request_id": pipeline_result.get("request_id") or request_id,
+            "has_tool_calls": pipeline_result.get("has_tool_calls", False),
         }
     )
 

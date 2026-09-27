@@ -60,6 +60,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late bool _showPsychology;
   late bool _showStats;
   late bool _showNoReply;
+  late bool _showToolCalls;
   late bool _archived;
 
   @override
@@ -133,6 +134,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _showPsychology = widget.role.showPsychology;
     _showStats = widget.role.showStats;
     _showNoReply = widget.role.showNoReply;
+    _showToolCalls = widget.role.showToolCalls;
     _archived = widget.role.archived;
   }
 
@@ -649,6 +651,13 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                 subtitle: 'AI 返回 <无回复/> 时在聊天中显示提示',
                 value: _showNoReply,
                 onChanged: (v) => setState(() => _showNoReply = v),
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildSwitchRow(
+                title: '显示工具调用历史',
+                subtitle: '在气泡下方显示本次回复调用的工具、参数与结果',
+                value: _showToolCalls,
+                onChanged: (v) => setState(() => _showToolCalls = v),
               ),
             ],
           ),
@@ -1386,6 +1395,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       showPsychology: _showPsychology,
       showStats: _showStats,
       showNoReply: _showNoReply,
+      showToolCalls: _showToolCalls,
       archived: _archived,
     );
     await SettingsService.instance.setSelectedModelProfileForRole(

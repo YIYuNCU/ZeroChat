@@ -728,6 +728,11 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                 if role_model.show_no_reply is not None
                 else False
             ),
+            "show_tool_calls": (
+                role_model.show_tool_calls
+                if role_model.show_tool_calls is not None
+                else False
+            ),
             "archived": bool(role_model.archived),
             "tags": role_model.tags or [],
             "gender": role_model.gender or "men",
@@ -1505,6 +1510,16 @@ async def _dispatch_ws_action(action: str, payload: dict, websocket: WebSocket, 
         since_id_raw = payload.get("since_id")
         since_id = int(since_id_raw) if since_id_raw is not None else None
         return await roles.get_memory(role_id, since_id=since_id)
+
+    if action == "tool_calls_get":
+        role_id = str(payload.get("role_id") or "").strip()
+        request_id = str(payload.get("request_id") or "").strip()
+        if not role_id or not request_id:
+            raise ValueError("role_id/request_id missing")
+        from services.memory_service import get_tool_calls
+        from services.chat_io_service import run_file_io
+        calls = await run_file_io(get_tool_calls, role_id, request_id)
+        return {"tool_calls": calls}
 
     if action == "usage_stats_get":
         role_id = str(payload.get("role_id") or "").strip()

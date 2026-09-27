@@ -3,12 +3,16 @@ import hashlib
 import json
 import unittest
 from copy import deepcopy
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
-from routers.ai_behavior import VisionRequest, chat_with_vision
+from routers.ai_behavior import (
+    VisionRequest,
+    _build_menstruation_chat_context,
+    chat_with_vision,
+)
 from routers.settings import SettingsUpdate, update_settings
 from routers import roles as roles_router
 from services.ai_tools import (
@@ -28,7 +32,7 @@ from services.ai_service import (
     _normalize_embedding_url,
     generate_with_role,
 )
-from services.memory_service import _advance_period_cycles
+from services.memory_service import _plan_next_period_start
 from services import memory_service
 from services import vision_service
 from transport import ws_dispatcher
@@ -377,15 +381,329 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
             captured_messages[0][-1]["content"].index('"stats_current"'),
         )
 
-    def test_period_cycle_advance_applies_a_bounded_variation(self):
+    def test_period_plan_is_committed_with_a_bounded_variation(self):
         with patch("services.memory_service.random.randint", return_value=-2):
-            advanced = _advance_period_cycles(
-                date(2026, 1, 1), 28, date(2026, 1, 30)
-            )
+            planned = _plan_next_period_start(date(2026, 1, 1), 28)
 
-        self.assertEqual(advanced, date(2026, 1, 27))
+        self.assertEqual(planned, date(2026, 1, 27))
 
-    def test_role_period_start_edit_resets_runtime_cycle_anchor(self):
+    def test_next_period_plan_stays_server_side_and_ai_sees_a_bounded_estimate(self):
+        with TemporaryDirectory() as temp_dir:
+            role_id = "role-cycle-plan"
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_dir = roles_router.get_role_dir(role_id)
+                today = date.today()
+                (role_dir / "profile.json").write_text(
+                    json.dumps(
+                        {
+                            "id": role_id,
+                            "gender": "women",
+                            "menstruation_cycle": {
+                                "cycle_length": 30,
+                                "period_length": 6,
+                                "last_period_start": (
+                                    today - timedelta(days=30)
+                                ).isoformat(),
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                # 规划的准确日期在周期开始时就已经确定
+                planned_start = today + timedelta(days=10)
+                with memory_service._get_connection(role_id) as conn:
+                    memory_service._set_meta(
+                        conn,
+                        "last_period_start",
+                        (today - timedelta(days=20)).isoformat(),
+                    )
+                    memory_service._set_meta(
+                        conn, "next_period_start", planned_start.isoformat()
+                    )
+
+                with patch("services.memory_service.random.choice", return_value=-3):
+                    status = memory_service._get_menstruation_status(role_id)
+
+                self.assertIsNotNone(status)
+                # 给 AI 的只是 ±3 天内的预计值，绝不是准确值
+                self.assertEqual(
+                    status["next_period_start"],
+                    (planned_start - timedelta(days=3)).isoformat(),
+                )
+                self.assertNotEqual(
+                    status["next_period_start"], planned_start.isoformat()
+                )
+                self.assertGreater(status["days_until_next_period"], 0)
+                self.assertFalse(status["in_period"])
+
+                # 准确值仍保留在服务端元数据里，作为权威时间
+                with memory_service._get_connection(role_id) as conn:
+                    self.assertEqual(
+                        memory_service._get_meta(conn, "next_period_start"),
+                        planned_start.isoformat(),
+                    )
+
+                # 同一天内预计值保持稳定（跨天才会重新抽取，制造自然的不确定感）
+                with patch("services.memory_service.random.choice", return_value=2):
+                    repeated = memory_service._get_menstruation_status(role_id)
+                self.assertEqual(
+                    repeated["next_period_start"], status["next_period_start"]
+                )
+
+                # 换一天则允许（也应当）给出不同的预计日期
+                with memory_service._get_connection(role_id) as conn:
+                    memory_service._set_meta(
+                        conn,
+                        "next_period_start_estimate_date",
+                        (today - timedelta(days=1)).isoformat(),
+                    )
+                with patch("services.memory_service.random.choice", return_value=3):
+                    next_day = memory_service._get_menstruation_status(role_id)
+                self.assertEqual(
+                    next_day["next_period_start"],
+                    (planned_start + timedelta(days=3)).isoformat(),
+                )
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_next_period_estimate_is_always_in_the_future(self):
+        with TemporaryDirectory() as temp_dir:
+            role_id = "role-cycle-imminent"
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_dir = roles_router.get_role_dir(role_id)
+                today = date.today()
+                (role_dir / "profile.json").write_text(
+                    json.dumps(
+                        {
+                            "id": role_id,
+                            "gender": "women",
+                            "menstruation_cycle": {
+                                "cycle_length": 30,
+                                "period_length": 6,
+                                "last_period_start": today.isoformat(),
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                # 计划就在明天：预计值不得退回今天或过去
+                planned_start = today + timedelta(days=1)
+                with memory_service._get_connection(role_id) as conn:
+                    memory_service._set_meta(conn, "last_period_start", today.isoformat())
+                    memory_service._set_meta(
+                        conn, "next_period_start", planned_start.isoformat()
+                    )
+
+                # 计划就在明天：无论当天抽到哪个偏移，预计值都不得退回今天或过去
+                estimates = set()
+                for _ in range(20):
+                    with memory_service._get_connection(role_id) as conn:
+                        # 清掉缓存的预计值，强制每次重新抽取
+                        memory_service._set_meta(conn, "next_period_start_estimate", None)
+                        memory_service._set_meta(conn, "next_period_start_estimate_base", None)
+                    status = memory_service._get_menstruation_status(role_id)
+                    self.assertIsNotNone(status)
+                    estimate = date.fromisoformat(status["next_period_start"])
+                    self.assertGreater(estimate, today)
+                    self.assertLessEqual(
+                        abs((estimate - planned_start).days),
+                        memory_service.NEXT_PERIOD_ESTIMATE_MAX_OFFSET_DAYS,
+                    )
+                    estimates.add(estimate)
+
+                self.assertTrue(
+                    estimates.issubset(
+                        {
+                            planned_start + timedelta(days=offset)
+                            for offset in range(
+                                -memory_service.NEXT_PERIOD_ESTIMATE_MAX_OFFSET_DAYS,
+                                memory_service.NEXT_PERIOD_ESTIMATE_MAX_OFFSET_DAYS + 1,
+                            )
+                        }
+                    )
+                )
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_new_cycle_starts_exactly_on_the_planned_day(self):
+        with TemporaryDirectory() as temp_dir:
+            role_id = "role-cycle-rollover"
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_dir = roles_router.get_role_dir(role_id)
+                today = date.today()
+                (role_dir / "profile.json").write_text(
+                    json.dumps(
+                        {
+                            "id": role_id,
+                            "gender": "women",
+                            "menstruation_cycle": {
+                                "cycle_length": 30,
+                                "period_length": 6,
+                                "last_period_start": (
+                                    today - timedelta(days=30)
+                                ).isoformat(),
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with memory_service._get_connection(role_id) as conn:
+                    memory_service._set_meta(
+                        conn,
+                        "last_period_start",
+                        (today - timedelta(days=30)).isoformat(),
+                    )
+                    memory_service._set_meta(
+                        conn, "next_period_start", today.isoformat()
+                    )
+
+                with patch("services.memory_service.random.randint", return_value=0):
+                    status = memory_service._get_menstruation_status(role_id)
+
+                self.assertIsNotNone(status)
+                # 新周期在规划日当天准时开始，并把准确值交给 AI
+                self.assertTrue(status["in_period"])
+                self.assertEqual(status["period_day"], 1)
+                self.assertEqual(status["period_start"], today.isoformat())
+
+                with memory_service._get_connection(role_id) as conn:
+                    self.assertEqual(
+                        memory_service._get_meta(conn, "last_period_start"),
+                        today.isoformat(),
+                    )
+                    self.assertEqual(
+                        memory_service._get_meta(conn, "next_period_start"),
+                        (today + timedelta(days=30)).isoformat(),
+                    )
+
+                # 数据库与 profile.json 必须同时记录这次经期开始时间
+                profile = json.loads((role_dir / "profile.json").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    profile["menstruation_cycle"]["last_period_start"],
+                    today.isoformat(),
+                )
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_missing_next_period_plan_is_created_now_and_never_in_the_past(self):
+        with TemporaryDirectory() as temp_dir:
+            role_id = "role-cycle-missing-plan"
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_dir = roles_router.get_role_dir(role_id)
+                today = date.today()
+                stale_start = today - timedelta(days=200)
+                (role_dir / "profile.json").write_text(
+                    json.dumps(
+                        {
+                            "id": role_id,
+                            "gender": "women",
+                            "menstruation_cycle": {
+                                "cycle_length": 30,
+                                "period_length": 6,
+                                "last_period_start": stale_start.isoformat(),
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                # next_period_start 不存在（例如刚被重置），且算出来的日期已经过期
+                with memory_service._get_connection(role_id) as conn:
+                    memory_service._set_meta(
+                        conn, "last_period_start", stale_start.isoformat()
+                    )
+                    memory_service._set_meta(conn, "next_period_start", None)
+
+                status = memory_service._get_menstruation_status(role_id)
+
+                self.assertIsNotNone(status)
+                with memory_service._get_connection(role_id) as conn:
+                    planned = memory_service._get_meta(conn, "next_period_start")
+                # 立刻算出规划值，且小于等于今天时直接顺延到明天
+                self.assertEqual(planned, (today + timedelta(days=1)).isoformat())
+                # 给 AI 的预计值同样不能落在今天或更早
+                self.assertGreater(
+                    date.fromisoformat(status["next_period_start"]), today
+                )
+                self.assertGreaterEqual(status["days_until_next_period"], 1)
+
+                # 未来某天该规划日到达时，才真正开始新周期
+                self.assertFalse(status["in_period"])
+                self.assertEqual(status["period_start"], stale_start.isoformat())
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_menstruation_prompt_marks_next_period_as_uncertain(self):
+        status = {
+            "today": "2026-03-10",
+            "cycle_length": 28,
+            "period_length": 5,
+            "cycle_day": 12,
+            "in_period": False,
+            "period_day": None,
+            "period_start": "2026-02-27",
+            "expected_period_end": "2026-03-03",
+            "next_period_start": "2026-03-26",
+            "next_period_start_is_estimate": True,
+            "days_until_next_period": 16,
+        }
+
+        outside_text = "\n".join(_build_menstruation_chat_context(status))
+        # 预计日期要给出，但必须同时说清它只是会浮动的估算
+        self.assertIn("2026-03-26", outside_text)
+        self.assertIn("估算", outside_text)
+        self.assertIn("浮动", outside_text)
+        self.assertIn("不要承诺具体日期", outside_text)
+        self.assertIn("模糊", outside_text)
+
+        # 经期最后一天：状态片段 + 结束提示，且结束时间同样被标为估算
+        in_period = dict(
+            status,
+            in_period=True,
+            period_day=3,
+            cycle_day=3,
+            expected_period_end=status["today"],
+        )
+        in_period_parts = _build_menstruation_chat_context(in_period)
+        in_period_text = "\n".join(in_period_parts)
+
+        self.assertEqual(len(in_period_parts), 2)
+        self.assertIn("第3天", in_period_text)
+        self.assertIn("估算", in_period_text)
+        self.assertIn("不要当成确定的事实", in_period_text)
+
+    def test_role_period_start_edit_resyncs_both_stores_immediately(self):
         with TemporaryDirectory() as temp_dir:
             role_id = "role-period-test"
             role_root = Path(temp_dir)
@@ -396,6 +714,7 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
             memory_service.close_all_connections()
             try:
                 role_dir = roles_router.get_role_dir(role_id)
+                today = date.today()
                 profile = {
                     "id": role_id,
                     "gender": "women",
@@ -411,21 +730,365 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
                 with memory_service._get_connection(role_id) as conn:
                     memory_service._set_meta(conn, "last_period_start", "2026-01-01")
 
-                profile["menstruation_cycle"]["last_period_start"] = "2026-02-15"
+                # 修改上次经期时间：应立刻算出下一次经期时间，并同时写进 json 与数据库
+                profile["menstruation_cycle"]["last_period_start"] = today.isoformat()
+                roles_router.save_role(role_id, profile)
+
+                with memory_service._get_connection(role_id) as conn:
+                    db_start = memory_service._get_meta(conn, "last_period_start")
+                    db_planned = memory_service._get_meta(conn, "next_period_start")
+
+                stored = json.loads((role_dir / "profile.json").read_text(encoding="utf-8"))
+                cycle = stored["menstruation_cycle"]
+
+                self.assertEqual(db_start, today.isoformat())
+                self.assertEqual(cycle["last_period_start"], db_start)
+                # 两边内容一致，且规划值一定在未来
+                self.assertEqual(cycle["next_period_start"], db_planned)
+                self.assertGreater(
+                    date.fromisoformat(db_planned), today
+                )
+                self.assertLessEqual(
+                    abs(
+                        (
+                            date.fromisoformat(db_planned)
+                            - (today + timedelta(days=30))
+                        ).days
+                    ),
+                    2,
+                )
+
+                # 提交设置但没改 last_period_start：不得重新计算
+                original_planned = db_planned
+                profile["menstruation_cycle"]["cycle_length"] = 35
+                profile["name"] = "改个名字"
                 roles_router.save_role(role_id, profile)
 
                 with memory_service._get_connection(role_id) as conn:
                     self.assertEqual(
-                        memory_service._get_meta(conn, "last_period_start"),
-                        "2026-02-15",
+                        memory_service._get_meta(conn, "next_period_start"),
+                        original_planned,
                     )
-                    self.assertIsNone(
-                        memory_service._get_meta(conn, "next_period_start")
-                    )
+                stored_again = json.loads(
+                    (role_dir / "profile.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    stored_again["menstruation_cycle"]["next_period_start"],
+                    original_planned,
+                )
             finally:
                 memory_service.close_all_connections()
                 roles_router.ROLES_DIR = old_roles_dir
                 memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_stale_period_start_edit_is_pushed_to_tomorrow(self):
+        with TemporaryDirectory() as temp_dir:
+            role_id = "role-period-stale"
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_dir = roles_router.get_role_dir(role_id)
+                today = date.today()
+                stale = today - timedelta(days=200)
+                profile = {
+                    "id": role_id,
+                    "gender": "women",
+                    "menstruation_cycle": {
+                        "cycle_length": 30,
+                        "period_length": 6,
+                        "last_period_start": today.isoformat(),
+                    },
+                }
+                (role_dir / "profile.json").write_text(
+                    json.dumps(profile), encoding="utf-8"
+                )
+                with memory_service._get_connection(role_id) as conn:
+                    memory_service._set_meta(conn, "last_period_start", today.isoformat())
+
+                # 改成一个很久以前的时间：算出来的下一次经期已过期 -> 顺延到明天
+                profile["menstruation_cycle"]["last_period_start"] = stale.isoformat()
+                roles_router.save_role(role_id, profile)
+
+                with memory_service._get_connection(role_id) as conn:
+                    db_planned = memory_service._get_meta(conn, "next_period_start")
+                stored = json.loads((role_dir / "profile.json").read_text(encoding="utf-8"))
+
+                self.assertEqual(db_planned, (today + timedelta(days=1)).isoformat())
+                self.assertEqual(
+                    stored["menstruation_cycle"]["next_period_start"], db_planned
+                )
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def _setup_women_role_with_plan(self, role_root, role_id, days_ago=10):
+        """建一个已进入运行态的女性角色，返回 (role_dir, 档案 dict, 数据库锚点/规划值)。"""
+
+        role_dir = roles_router.get_role_dir(role_id)
+        today = date.today()
+        profile = {
+            "id": role_id,
+            "name": role_id,
+            "gender": "women",
+            "menstruation_cycle": {
+                "cycle_length": 30,
+                "period_length": 6,
+                "last_period_start": (today - timedelta(days=days_ago)).isoformat(),
+            },
+        }
+        (role_dir / "profile.json").write_text(json.dumps(profile), encoding="utf-8")
+        with memory_service._get_connection(role_id) as conn:
+            memory_service._set_meta(
+                conn, "last_period_start", profile["menstruation_cycle"]["last_period_start"]
+            )
+        # 跑一次状态读取，让规划值与镜像都落地
+        memory_service._get_menstruation_status(role_id)
+        with memory_service._get_connection(role_id) as conn:
+            db = {
+                "last_period_start": memory_service._get_meta(conn, "last_period_start"),
+                "next_period_start": memory_service._get_meta(conn, "next_period_start"),
+            }
+        return role_dir, profile, db
+
+    def _read_cycle(self, role_dir):
+        stored = json.loads((role_dir / "profile.json").read_text(encoding="utf-8"))
+        return stored, stored["menstruation_cycle"]
+
+    def test_saving_settings_without_cycle_change_keeps_the_plan_mirror(self):
+        """只改设置（未动上次经期时间）时，服务端规划值不能被前端载荷抹掉。"""
+
+        with TemporaryDirectory() as temp_dir:
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_id = "role-mirror-on-save"
+                role_dir, profile, db = self._setup_women_role_with_plan(
+                    role_root, role_id
+                )
+                before_plan = db["next_period_start"]
+                self.assertIsNotNone(before_plan)
+
+                # 前端只会拿到三个用户可见字段，回传时自然没有 next_period_start
+                payload = dict(profile)
+                payload["menstruation_cycle"] = roles_router._client_menstruation_cycle(
+                    profile
+                )
+                payload["name"] = "改个名字"
+                roles_router.save_role(role_id, payload)
+
+                _, cycle = self._read_cycle(role_dir)
+                with memory_service._get_connection(role_id) as conn:
+                    db_plan = memory_service._get_meta(conn, "next_period_start")
+
+                self.assertEqual(cycle["next_period_start"], db_plan)
+                # 镜像写回的是已有规划值，不是重新抽的
+                self.assertEqual(db_plan, before_plan)
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_unparsable_period_start_never_reaches_the_profile(self):
+        """无法解析的上次经期时间不能只落进 json：两处都要停在原状态。"""
+
+        with TemporaryDirectory() as temp_dir:
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_id = "role-bad-anchor"
+                role_dir, profile, db = self._setup_women_role_with_plan(
+                    role_root, role_id
+                )
+
+                profile["menstruation_cycle"]["last_period_start"] = "不是日期"
+                roles_router.save_role(role_id, profile)
+
+                stored, cycle = self._read_cycle(role_dir)
+                with memory_service._get_connection(role_id) as conn:
+                    db_start = memory_service._get_meta(conn, "last_period_start")
+                    db_plan = memory_service._get_meta(conn, "next_period_start")
+
+                self.assertEqual(db_start, db["last_period_start"])
+                self.assertEqual(db_plan, db["next_period_start"])
+                self.assertEqual(cycle["last_period_start"], db_start)
+                self.assertEqual(cycle["next_period_start"], db_plan)
+                # 非法值不落盘
+                self.assertNotIn("不是日期", json.dumps(stored))
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_failed_database_write_does_not_half_apply_the_edit(self):
+        """数据库写不进去时，json 也不能单方面改成新锚点。"""
+
+        with TemporaryDirectory() as temp_dir:
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_id = "role-db-failure"
+                role_dir, profile, db = self._setup_women_role_with_plan(
+                    role_root, role_id
+                )
+
+                profile["menstruation_cycle"]["last_period_start"] = date.today().isoformat()
+                with patch(
+                    "services.memory_service._get_connection",
+                    side_effect=RuntimeError("db down"),
+                ):
+                    roles_router.save_role(role_id, profile)
+
+                _, cycle = self._read_cycle(role_dir)
+                with memory_service._get_connection(role_id) as conn:
+                    db_start = memory_service._get_meta(conn, "last_period_start")
+                    db_plan = memory_service._get_meta(conn, "next_period_start")
+
+                # 两处一起停在旧状态，而不是 json 前进、数据库留在原地
+                self.assertEqual(db_start, db["last_period_start"])
+                self.assertEqual(db_plan, db["next_period_start"])
+                self.assertEqual(cycle["last_period_start"], db_start)
+                self.assertEqual(cycle["next_period_start"], db_plan)
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_cycle_mirror_never_rolls_back_a_concurrent_settings_save(self):
+        """状态读取拿着旧快照写镜像时，不能覆盖期间的设置保存。"""
+
+        with TemporaryDirectory() as temp_dir:
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_id = "role-concurrent-save"
+                role_dir, _, db = self._setup_women_role_with_plan(role_root, role_id)
+
+                # 状态读取拿到的旧快照（函数开头读入，之后才写回）
+                stale_dir = role_dir
+                stale_data, stale_cycle = self._read_cycle(stale_dir)
+
+                # 期间用户保存了设置：改名 + onebot 配置 + 改了上次经期时间
+                concurrent = json.loads(
+                    (role_dir / "profile.json").read_text(encoding="utf-8")
+                )
+                concurrent["name"] = "并发改名"
+                concurrent["onebot_config"] = {"enabled": True}
+                concurrent["menstruation_cycle"]["last_period_start"] = (
+                    date.today() - timedelta(days=3)
+                ).isoformat()
+                roles_router.save_role(role_id, concurrent)
+
+                # 状态读取随后用旧快照做镜像写回（这里用旧值调用内部镜像函数）
+                memory_service._persist_profile_cycle_state(
+                    role_id,
+                    role_dir / "profile.json",
+                    stale_data,
+                    stale_cycle,
+                    date.fromisoformat(db["last_period_start"]),
+                    date.fromisoformat(db["next_period_start"]),
+                )
+
+                stored, cycle = self._read_cycle(role_dir)
+                with memory_service._get_connection(role_id) as conn:
+                    db_start = memory_service._get_meta(conn, "last_period_start")
+                    db_plan = memory_service._get_meta(conn, "next_period_start")
+
+                self.assertEqual(stored["name"], "并发改名")
+                self.assertEqual(stored["onebot_config"], {"enabled": True})
+                self.assertEqual(cycle["last_period_start"], db_start)
+                self.assertEqual(cycle["next_period_start"], db_plan)
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_non_women_role_never_maintains_cycle_state(self):
+        """非女性角色完全不维护生理周期：不重算、不写数据库、不镜像。"""
+
+        with TemporaryDirectory() as temp_dir:
+            role_root = Path(temp_dir)
+            old_roles_dir = roles_router.ROLES_DIR
+            old_memory_roles_dir = memory_service.ROLES_DIR
+            roles_router.ROLES_DIR = role_root
+            memory_service.ROLES_DIR = role_root
+            memory_service.close_all_connections()
+            try:
+                role_id = "role-men-cycle"
+                role_dir = roles_router.get_role_dir(role_id)
+                profile = {
+                    "id": role_id,
+                    "name": role_id,
+                    "gender": "men",
+                    "menstruation_cycle": {
+                        "cycle_length": 30,
+                        "period_length": 6,
+                        "last_period_start": (date.today() - timedelta(days=10)).isoformat(),
+                    },
+                }
+                (role_dir / "profile.json").write_text(
+                    json.dumps(profile), encoding="utf-8"
+                )
+
+                profile["menstruation_cycle"]["last_period_start"] = date.today().isoformat()
+                roles_router.save_role(role_id, profile)
+
+                with memory_service._get_connection(role_id) as conn:
+                    self.assertIsNone(memory_service._get_meta(conn, "last_period_start"))
+                    self.assertIsNone(memory_service._get_meta(conn, "next_period_start"))
+
+                _, cycle = self._read_cycle(role_dir)
+                # 用户填的值原样保存，但服务端不据此维护任何周期状态
+                self.assertEqual(cycle["last_period_start"], date.today().isoformat())
+                self.assertNotIn("next_period_start", cycle)
+                self.assertIsNone(memory_service._get_menstruation_status(role_id))
+            finally:
+                memory_service.close_all_connections()
+                roles_router.ROLES_DIR = old_roles_dir
+                memory_service.ROLES_DIR = old_memory_roles_dir
+
+    def test_client_payload_hides_server_side_next_period(self):
+        from routers.roles import _client_menstruation_cycle
+
+        role = {
+            "id": "role-x",
+            "menstruation_cycle": {
+                "cycle_length": 30,
+                "period_length": 6,
+                "last_period_start": "2026-03-01",
+                "next_period_start": "2026-03-30",
+            },
+        }
+
+        self.assertEqual(
+            _client_menstruation_cycle(role),
+            {
+                "cycle_length": 30,
+                "period_length": 6,
+                "last_period_start": "2026-03-01",
+            },
+        )
+        self.assertIsNone(_client_menstruation_cycle({"id": "role-y"}))
 
     def test_role_list_uses_runtime_period_start_for_women(self):
         with TemporaryDirectory() as temp_dir:

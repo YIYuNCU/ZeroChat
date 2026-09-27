@@ -61,6 +61,7 @@ async def _consume_inline_emoji_tool_markup(
             logger.warning("Inline emoji tool call failed: %s", tool_result)
 
     result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
+    result.setdefault("_tool_calls_log", [])
     return result
 
 # 共享 httpx 客户端连接池
@@ -1348,6 +1349,7 @@ async def generate_with_role(
     # despite the image-tool instruction. Never let that turn into a reply
     # which silently ignores an image attached to the current message.
     if image_data_urls and not result.get("_recognized_current_image"):
+        _pre_image_tool_calls_log = list(result.get("_tool_calls_log") or [])
         image_understanding = await execute_recognize_image(
             image_data_urls,
             user_message,
@@ -1375,7 +1377,10 @@ async def generate_with_role(
                 role_data,
                 tools,
                 vision_context=vision_context,
+                existing_log=_pre_image_tool_calls_log,
             )
+        else:
+            result["_tool_calls_log"] = _pre_image_tool_calls_log
 
     return await _consume_inline_emoji_tool_markup(result, role_data)
 
@@ -1386,6 +1391,7 @@ async def _handle_tool_calls(
     role_data: Dict,
     tools: Optional[List[Dict]],
     vision_context: Optional[Dict[str, Any]] = None,
+    existing_log: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     处理 AI 返回的 tool_calls，支持多轮工具调用循环（最多 5 轮）。
@@ -1396,6 +1402,9 @@ async def _handle_tool_calls(
     emojis_called: List[Any] = []
     recognized_current_image = False
     max_rounds = 5
+    # 结构化工具调用历史，供前端「工具调用历史」功能展示：
+    # 每项 {"name": str, "arguments": dict, "result": str}。
+    tool_calls_log: List[Dict[str, Any]] = list(existing_log or [])
 
     for round_idx in range(max_rounds):
         # DeepSeek requires its original assistant tool-call message, followed
@@ -1582,9 +1591,26 @@ async def _handle_tool_calls(
                     tool_result = await execute_recognize_image(urls, prompt, image_index)
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: review_previous_images -> {tool_result[:100]}")
+
+                # 每个分支都恰好向 messages 追加了一条 role=tool 消息；将其内容
+                # 记为这次调用的结果，供前端「工具调用历史」展示。
+                if messages and messages[-1].get("tool_call_id") == tool_call_id:
+                    tool_calls_log.append({
+                        "name": func_name,
+                        "arguments": args,
+                        "result": str(messages[-1].get("content") or ""),
+                    })
             except Exception as e:
                 logger.error(f"Tool execution error: {func_name} -> {e}")
-                messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": f"操作失败：{e}"})
+                error_text = f"操作失败：{e}"
+                messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": error_text})
+                safe_args = locals().get("args")
+                safe_args = safe_args if isinstance(safe_args, dict) else {}
+                tool_calls_log.append({
+                    "name": func_name,
+                    "arguments": safe_args,
+                    "result": error_text,
+                })
 
         tool_count = len(result["tool_calls"])
         logger.info(f"Re-calling AI with {tool_count} tool result(s) (round {round_idx+1}/{max_rounds})")
@@ -1599,12 +1625,14 @@ async def _handle_tool_calls(
             if recognized_current_image:
                 result["_recognized_current_image"] = True
             result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
+            result["_tool_calls_log"] = tool_calls_log
             return result
 
     logger.warning(f"Tool call loop reached max {max_rounds} rounds, returning last result")
     if recognized_current_image:
         result["_recognized_current_image"] = True
     result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
+    result["_tool_calls_log"] = tool_calls_log
     return result
 
 async def generate_moment_post(

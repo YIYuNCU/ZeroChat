@@ -43,8 +43,17 @@ class _AiReply {
   final String content;
   // 元素可为 String（情绪名，走随机）或 Map（精确表情 {category, filename}）
   final List<dynamic> emojisCalled;
+  // 本次 AI 请求的 request_id（工具调用历史功能按需查询明细用）
+  final String? requestId;
+  // 本次回复生成过程中是否发生过工具调用（明细按需查询，这里只是入口开关）
+  final bool hasToolCalls;
 
-  const _AiReply(this.content, this.emojisCalled);
+  const _AiReply(
+    this.content,
+    this.emojisCalled, [
+    this.requestId,
+    this.hasToolCalls = false,
+  ]);
 }
 
 /// 聊天核心引擎
@@ -1015,6 +1024,8 @@ class ChatController extends ChangeNotifier {
         rawReply.content,
         isGroup: false,
         toolEmotions: rawReply.emojisCalled,
+        requestId: rawReply.requestId,
+        hasToolCalls: rawReply.hasToolCalls,
       );
     }
 
@@ -1107,6 +1118,8 @@ class ChatController extends ChangeNotifier {
             rawReply.content,
             isGroup: true,
             toolEmotions: rawReply.emojisCalled,
+            requestId: rawReply.requestId,
+            hasToolCalls: rawReply.hasToolCalls,
           );
           anySpokeInRound = true;
           if (MessageParts.isNoReplyDirective(rawReply.content)) {
@@ -1309,6 +1322,8 @@ class ChatController extends ChangeNotifier {
         content,
         isGroup: isGroup,
         toolEmotions: _extractToolEmotions(metadata),
+        requestId: metadata?['request_id']?.toString(),
+        hasToolCalls: _extractHasToolCalls(metadata),
       );
       debugPrint('ChatController: recovered reply stored for task $taskId');
 
@@ -1400,6 +1415,10 @@ class ChatController extends ChangeNotifier {
       _kRenderedTasksKey,
       _renderedTaskIds.toList(),
     );
+  }
+
+  bool _extractHasToolCalls(Map<String, dynamic>? metadata) {
+    return metadata?['has_tool_calls'] as bool? ?? false;
   }
 
   List<dynamic> _extractToolEmotions(Map<String, dynamic>? metadata) {
@@ -1666,6 +1685,8 @@ class ChatController extends ChangeNotifier {
       return _AiReply(
         submitResponse.content!,
         _extractToolEmotions(submitResponse.metadata),
+        submitResponse.metadata?['request_id']?.toString(),
+        _extractHasToolCalls(submitResponse.metadata),
       );
     }
 
@@ -1720,7 +1741,12 @@ class ChatController extends ChangeNotifier {
             debugPrint('ChatController: Metadata from async push: $metadata');
           }
           await _markTaskRendered(taskId);
-          return _AiReply(content, _extractToolEmotions(metadata));
+          return _AiReply(
+            content,
+            _extractToolEmotions(metadata),
+            metadata?['request_id']?.toString(),
+            _extractHasToolCalls(metadata),
+          );
         }
 
         // 服务端已明确返回终态失败，才向用户展示发送失败。
@@ -1773,7 +1799,12 @@ class ChatController extends ChangeNotifier {
                         : null,
                   );
                   await _markTaskRendered(taskId);
-                  return _AiReply(content, _extractToolEmotions(metadata));
+                  return _AiReply(
+                    content,
+                    _extractToolEmotions(metadata),
+                    metadata?['request_id']?.toString(),
+                    _extractHasToolCalls(metadata),
+                  );
                 }
               }
             }
@@ -1843,6 +1874,8 @@ class ChatController extends ChangeNotifier {
     String rawReply, {
     required bool isGroup,
     List<dynamic> toolEmotions = const <dynamic>[],
+    String? requestId,
+    bool hasToolCalls = false,
   }) async {
     final segments = SegmentSender.splitMessage(rawReply);
     final availableEmojiCategories = await _loadAvailableEmojiCategories(
@@ -1892,6 +1925,10 @@ class ChatController extends ChangeNotifier {
         receiverId: 'me',
         content: displayText,
         timestamp: DateTime.now(),
+        // request_id/工具调用标记挂在本轮回复的最后一段上，避免同一轮回复的
+        // 每个分段消息都重复展示同一份调用历史入口。
+        requestId: isLast ? requestId : null,
+        hasToolCalls: isLast && hasToolCalls,
       );
 
       await MessageStore.instance.addMessage(chatId, aiMessage);
