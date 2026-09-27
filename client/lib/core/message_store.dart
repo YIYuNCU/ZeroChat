@@ -10,6 +10,8 @@ import '../services/storage_service.dart';
 import '../services/secure_websocket_client.dart';
 import '../services/chat_list_service.dart';
 import '../services/message_archive_service.dart';
+import '../services/notification_service.dart';
+import '../services/role_service.dart';
 
 /// 消息存储层
 /// 聊天记录的唯一真实来源（Single Source of Truth）
@@ -1037,7 +1039,8 @@ class MessageStore extends ChangeNotifier {
                 message.senderId != 'me' &&
                 !previousIds.contains(message.id) &&
                 (message.id.contains('_proactive') ||
-                    message.id.contains('_task_')),
+                    message.id.contains('_task_') ||
+                    message.id.contains('_followup')),
           );
           final newUnreadCount = newBackgroundMessages.length;
           await _writeArchivedMessages(chatId, messages);
@@ -1077,6 +1080,30 @@ class MessageStore extends ChangeNotifier {
           }
           if (newUnreadCount > 0) {
             incrementUnread(chatId, count: newUnreadCount);
+          }
+          // App 前台但不在该聊天详情页时，快照同步是主动消息（proactive/task/
+          // followup）唯一的展示入口，之前只更新了未读数和角标，没有弹系统
+          // 通知。这里补上：NotificationService 内部会按 _currentChatId 跳过
+          // 当前正打开的聊天，避免和聊天页内的实时渲染重复提示。
+          if (newBackgroundMessages.isNotEmpty) {
+            final role = RoleService.getRoleById(chatId);
+            final latestBackgroundMessage = newBackgroundMessages.last;
+            final notificationParts = MessageParts.parse(
+              latestBackgroundMessage.content,
+              allowFact: false,
+            );
+            final notifyText = notificationParts.dialogue.trim().isNotEmpty
+                ? notificationParts.dialogue
+                : notificationParts.plainText;
+            unawaited(
+              NotificationService.instance.showMessageNotification(
+                chatId: chatId,
+                senderName: role?.name ?? 'AI',
+                message: notifyText.isNotEmpty
+                    ? notifyText
+                    : latestBackgroundMessage.content,
+              ),
+            );
           }
           _notifyMessageUpdate(chatId);
           syncedChats += 1;

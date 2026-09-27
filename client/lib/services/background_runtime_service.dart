@@ -34,12 +34,17 @@ class BackgroundRuntimeService {
 
   static Duration _resolveServiceWatchdogInterval() {
     final seconds = SettingsService.instance.backgroundWatchdogIntervalSeconds;
-    return Duration(seconds: seconds.clamp(10, 120));
+    // 下限从 10 秒提到 30 秒：检测"前台服务被系统杀死"是低频事件，
+    // 不需要秒级响应，过短的间隔只会增加不必要的跨 isolate/plugin channel
+    // 唤醒次数（每次 isRunning() 调用本身有固定开销）。
+    return Duration(seconds: seconds.clamp(30, 180));
   }
 
   static Duration _resolveBackgroundTaskPollInterval() {
     final seconds = SettingsService.instance.backgroundPollIntervalSeconds;
-    return Duration(seconds: seconds.clamp(15, 120));
+    // 下限从 15 秒提到 60 秒：WS 心跳 + server_push 已是主要实时通道，
+    // 这个轮询只是兜底 Doze/断线期间漏收的推送，不需要高频触发。
+    return Duration(seconds: seconds.clamp(60, 300));
   }
 
   static Future<void> init({required bool enabled}) async {
@@ -275,6 +280,12 @@ class BackgroundRuntimeService {
 
     // 处理服务端实时推送：后台隔离直接把 task/proactive 消息转成通知，
     // 无需等待轮询。与轮询共用 notifiedTaskMessageIds 去重。
+    //
+    // 注意：服务端 publish_server_push 把业务字段（chat_id/role_id/message_id）
+    // 放在 event['payload'] 里，且从不携带消息正文 content。这里若直接从事件
+    // 顶层读 chat_id/content 永远为空，会被下面的判空短路吞掉，导致后台永远
+    // 不弹通知。正确做法：从 payload 里取 chat_id/message_id 做去重与定位，
+    // 再触发一次快照拉取换取真实正文后展示通知。
     Future<void> handleServerPush(Map<String, dynamic> event) async {
       if (appInForeground || !bootstrapReady) {
         return;
@@ -286,32 +297,31 @@ class BackgroundRuntimeService {
         return;
       }
 
-      final chatId = (event['chat_id'] ?? event['role_id'] ?? '').toString();
-      final messageId = (event['message_id'] ?? event['id'] ?? '').toString();
-      final content = (event['content'] ?? '').toString();
-      final senderId = (event['sender_id'] ?? '').toString();
+      final rawPayload = event['payload'];
+      final payload = rawPayload is Map
+          ? Map<String, dynamic>.from(rawPayload)
+          : <String, dynamic>{};
 
-      if (chatId.isEmpty || content.isEmpty || senderId == 'me') {
+      final chatId = (payload['chat_id'] ?? payload['role_id'] ?? '')
+          .toString();
+      final messageId = (payload['message_id'] ?? payload['id'] ?? '')
+          .toString();
+
+      if (chatId.isEmpty) {
         return;
       }
       if (messageId.isNotEmpty && notifiedTaskMessageIds.contains(messageId)) {
         return;
       }
 
-      final role = RoleService.getRoleById(chatId);
-      await NotificationService.instance.showMessageNotification(
-        chatId: chatId,
-        senderName: role?.name ?? 'AI',
-        message: content,
+      // 推送本身不带正文，拉一次快照取真实消息内容后再弹通知；
+      // 与轮询共用去重集合，避免随后轮询重复通知同一条消息。
+      taskNotifyBaseline = await _pollTaskMessagesAndNotify(
+        baseline: taskNotifyBaseline,
+        notifiedTaskMessageIds: notifiedTaskMessageIds,
+        notifiedTaskMessageOrder: notifiedTaskMessageOrder,
+        maxNotifiedTaskMessageIds: maxNotifiedTaskMessageIds,
       );
-      if (messageId.isNotEmpty) {
-        _rememberNotifiedMessageId(
-          messageId,
-          notifiedTaskMessageIds,
-          notifiedTaskMessageOrder,
-          maxNotifiedTaskMessageIds,
-        );
-      }
     }
 
     Future<void>(() async {
@@ -356,6 +366,15 @@ class BackgroundRuntimeService {
           return;
         }
         if (appInForeground || !bootstrapReady) {
+          return;
+        }
+        // AI 回复通常需要数秒生成，最早的 pending 请求发起不到 15 秒时
+        // 检查几乎必然空手而归；跳过这些必然无效的早期 tick，减少请求次数。
+        final earliestStartedAt = pendingRequests.values
+            .map((state) => state.startedAt)
+            .reduce((a, b) => a.isBefore(b) ? a : b);
+        if (DateTime.now().difference(earliestStartedAt) <
+            const Duration(seconds: 15)) {
           return;
         }
 
@@ -461,7 +480,11 @@ class BackgroundRuntimeService {
       service.stopSelf();
     });
 
-    foregroundNotificationTimer = Timer.periodic(const Duration(minutes: 5), (
+    // 5分钟→30分钟：这个刷新纯粹是让通知文案里的时间戳变化，本身没有功能
+    // 价值（watchdog 已经能检测服务是否存活）。保留低频刷新而非完全移除，
+    // 是因为部分 OEM 系统会把长期内容不变的前台通知判定为"不活跃"进而更
+    // 积极地回收服务，适度刷新仍有边际保活价值。
+    foregroundNotificationTimer = Timer.periodic(const Duration(minutes: 30), (
       timer,
     ) async {
       if (service is AndroidServiceInstance) {
@@ -521,9 +544,13 @@ class BackgroundRuntimeService {
             latestSeen = timestamp;
           }
 
-          // 只处理后端任务/主动触发写入的消息，避免与正常聊天通知重复
+          // 只处理后端任务/主动触发/无回复续写写入的消息，避免与正常聊天通知重复。
+          // 三种 id 格式对应 server/core/lifecycle.py 里 task/proactive/followup
+          // 三类事件落库时拼的 message id。
           final isBackgroundMessage =
-              messageId.contains('_task_') || messageId.contains('_proactive');
+              messageId.contains('_task_') ||
+              messageId.contains('_proactive') ||
+              messageId.contains('_followup');
           if (!isBackgroundMessage) {
             continue;
           }

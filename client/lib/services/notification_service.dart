@@ -56,6 +56,15 @@ class NotificationService {
     _currentChatId = chatId;
   }
 
+  /// 仅当当前记录的聊天ID等于 [chatId] 时才清空。
+  /// 用于聊天详情页 dispose 时退出，避免 A 页压栈进 B 页时，
+  /// B 页先于 A 页 dispose 导致误清掉 A 页刚设置的当前聊天。
+  void clearCurrentChatIfMatches(String chatId) {
+    if (_currentChatId == chatId) {
+      _currentChatId = null;
+    }
+  }
+
   /// 同步角标（从外部未读数更新）
   Future<void> syncBadge(int totalUnread) async {
     if (totalUnread == _lastBadgeCount) return;

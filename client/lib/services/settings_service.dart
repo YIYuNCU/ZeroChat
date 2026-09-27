@@ -804,7 +804,10 @@ class SettingsService extends ChangeNotifier {
 
   /// 更新后台轮询间隔（秒）
   Future<void> updateBackgroundPollIntervalSeconds(int seconds) async {
-    final normalized = seconds.clamp(15, 120);
+    // 下限从 15 提到 60 秒：这个轮询只是 WS 推送的兜底，过短间隔在 Doze
+    // 期间会造成不必要的射频/CPU 唤醒次数，参见
+    // BackgroundRuntimeService._resolveBackgroundTaskPollInterval。
+    final normalized = seconds.clamp(60, 300);
     _backgroundPollIntervalSeconds = normalized;
     await StorageService.setInt('background_poll_interval_seconds', normalized);
     notifyListeners();
@@ -812,7 +815,9 @@ class SettingsService extends ChangeNotifier {
 
   /// 更新后台保活自检间隔（秒）
   Future<void> updateBackgroundWatchdogIntervalSeconds(int seconds) async {
-    final normalized = seconds.clamp(10, 120);
+    // 下限从 10 提到 30 秒：检测服务被杀是低频事件，不需要秒级响应，参见
+    // BackgroundRuntimeService._resolveServiceWatchdogInterval。
+    final normalized = seconds.clamp(30, 180);
     _backgroundWatchdogIntervalSeconds = normalized;
     await StorageService.setInt(
       'background_watchdog_interval_seconds',

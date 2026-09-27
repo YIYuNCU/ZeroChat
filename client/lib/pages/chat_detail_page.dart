@@ -88,6 +88,10 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
 
     _scrollController.addListener(_onScroll);
 
+    // 告知通知服务当前正在查看该聊天，抑制该聊天的系统通知（避免和页内
+    // 实时渲染的消息重复提示）。
+    NotificationService.instance.setCurrentChat(widget.chatId);
+
     _currentRole =
         RoleService.getRoleById(widget.chatId) ?? RoleService.getCurrentRole();
 
@@ -135,6 +139,9 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     if (_chatWindowActivated) {
       ChatController.instance.onChatPageExit(widget.chatId);
     }
+    // 仅当离开的是通知服务记录的那个聊天时才清空，避免 A 页压栈进 B 页、
+    // B 页先 dispose 时误清掉 A 页刚设置的当前聊天。
+    NotificationService.instance.clearCurrentChatIfMatches(widget.chatId);
     _inputBarController.dispose();
     _scrollController.dispose();
     super.dispose();

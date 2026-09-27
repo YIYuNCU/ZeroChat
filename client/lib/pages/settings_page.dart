@@ -243,9 +243,9 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             child: Slider(
               value: seconds.toDouble(),
-              min: 15,
-              max: 120,
-              divisions: 21,
+              min: 60,
+              max: 300,
+              divisions: 24,
               label: '$seconds 秒',
               onChanged: (value) async {
                 await SettingsService.instance
@@ -258,11 +258,11 @@ class _SettingsPageState extends State<SettingsPage> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                '15秒',
+                '60秒',
                 style: TextStyle(color: Color(0xFF888888), fontSize: 12),
               ),
               Text(
-                '120秒',
+                '300秒',
                 style: TextStyle(color: Color(0xFF888888), fontSize: 12),
               ),
             ],
@@ -304,9 +304,9 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             child: Slider(
               value: seconds.toDouble(),
-              min: 10,
-              max: 120,
-              divisions: 22,
+              min: 30,
+              max: 180,
+              divisions: 15,
               label: '$seconds 秒',
               onChanged: (value) async {
                 await SettingsService.instance
@@ -322,11 +322,11 @@ class _SettingsPageState extends State<SettingsPage> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                '10秒',
+                '30秒',
                 style: TextStyle(color: Color(0xFF888888), fontSize: 12),
               ),
               Text(
-                '120秒',
+                '180秒',
                 style: TextStyle(color: Color(0xFF888888), fontSize: 12),
               ),
             ],
