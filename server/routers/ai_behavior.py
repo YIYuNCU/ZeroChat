@@ -344,6 +344,27 @@ def _build_moments_chat_context(role_id: str, max_items: int = 4) -> str:
     return "\n\n".join(parts).strip()
 
 
+def _build_shared_extra_parts(role_id: str) -> List[str]:
+    """构造 chat/proactive/followup 共用的额外上下文片段（朋友圈 + 生理期）。
+
+    这部分内容会拼进 system 消息末尾（见 generate_with_role 的 extra_context），
+    是 provider 前缀缓存能否命中的关键前缀之一。此前 handle_proactive/handle_followup
+    未构造这些片段，导致它们的 system 消息与 handle_chat 的不一致，
+    使主动消息/续写请求永远无法复用聊天路径刚建立的缓存前缀。
+    三个入口必须构造相同的片段，才能共享同一份缓存前缀。
+    """
+    from services.memory_service import _get_menstruation_status
+
+    parts: List[str] = []
+    backend_moments_context = _build_moments_chat_context(role_id)
+    if backend_moments_context:
+        parts.append(backend_moments_context)
+    menstruation_status = _get_menstruation_status(role_id)
+    if menstruation_status is not None:
+        parts.extend(_build_menstruation_chat_context(menstruation_status))
+    return parts
+
+
 # ========== 统一入口 ==========
 
 @router.post("/ai/event", response_model=AIResponse)
@@ -781,11 +802,42 @@ def _build_menstruation_chat_context(menstruation_status: Dict[str, Any]) -> Lis
     ]
 
 
+def _build_followup_budget_hint(
+    role: Dict, role_id: str, event_context: Dict[str, Any]
+) -> Optional[str]:
+    """构造「无回复续写」剩余额度提示，供 handle_chat 在生成主回复时参考。
+
+    continue_if_no_reply 仅对有设备（非 onebot）的场景开放，且需角色启用该功能；
+    这里复用同样的条件，避免在工具实际不可用时误导模型。
+    """
+    origin = str(event_context.get("origin") or "zerochat").strip() or "zerochat"
+    if origin.startswith("onebot"):
+        return None
+    followup_config = role.get("followup_config") or {}
+    if not followup_config.get("enabled", True):
+        return None
+    max_chain = max(1, int(followup_config.get("max_chain", 3)))
+
+    try:
+        from services import scheduler_service
+        current_state = scheduler_service._load_followups().get(role_id) or {}
+        current_chain = int(current_state.get("chain_count", 0))
+    except Exception:
+        current_chain = 0
+
+    if current_chain >= max_chain:
+        return None
+    remaining = max_chain - current_chain
+    return (
+        f"[续写额度] 当前可设置 continue_if_no_reply 的次数还剩 {remaining} 次"
+        f"（上限 {max_chain} 次）。如果这次回复说完后合理预期对方会回应，"
+        "记得在结束时调用它安排一次跟进。"
+    )
+
+
 async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     """处理用户聊天消息"""
-    from services.memory_service import (
-        _get_memory_length, _get_menstruation_status,
-    )
+    from services.memory_service import _get_memory_length
     
     role_id = event.role_id
     user_message = event.content or ""
@@ -805,23 +857,18 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         from services import scheduler_service
         scheduler_service.cancel_followup(role_id)
 
-    search_context = ""
-    # 合并额外上下文
-    extra_parts: List[str] = []
-    backend_moments_context = _build_moments_chat_context(role_id)
-    if backend_moments_context:
-        extra_parts.append(backend_moments_context)
-    if search_context:
-        extra_parts.append(search_context)
-    menstruation_status = _get_menstruation_status(role_id)
-    if menstruation_status is not None:
-        extra_parts.extend(_build_menstruation_chat_context(menstruation_status))
+    # 合并额外上下文（朋友圈 + 生理期，与 proactive/followup 共用同一份构造逻辑，
+    # 保证四类入口的 system 消息前缀一致，能互相复用 provider 的前缀缓存）
+    extra_parts: List[str] = _build_shared_extra_parts(role_id)
     # 外挂 JSON 记录
     attached_json = role.get("attached_json_content", "")
     if not attached_json:
         attached_json = str(event_context.get("attached_json") or "").strip()
     if attached_json:
         extra_parts.append(f"[外挂记录]\n{attached_json}")
+    followup_hint = _build_followup_budget_hint(role, role_id, event_context)
+    if followup_hint:
+        extra_parts.append(followup_hint)
     request_id = str(event_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
 
     # 图片聚合（tool 模式）：客户端把图片以 vision_upload_ids 随本次 ai_event 传来，
@@ -936,6 +983,7 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
         role_id=role_id,
         user_message=trigger_prompt,
         event_context=event.context or {},
+        extra_parts=_build_shared_extra_parts(role_id),
         origin="zerochat",
         user_sender="system",
         include_user_memory=False,
@@ -988,12 +1036,15 @@ async def handle_followup(role: Dict, event: AIEvent) -> AIResponse:
             "如果你觉得还有必要，可以再次设置无回复续写；否则自然收尾即可。"
         )
 
+    extra_parts = _build_shared_extra_parts(role_id)
+    extra_parts.append(chain_hint)
+
     pipeline_result = await _run_memory_ai_pipeline(
         role=role,
         role_id=role_id,
         user_message=base_prompt,
         event_context=ctx,
-        extra_parts=[chain_hint],
+        extra_parts=extra_parts,
         origin="zerochat",
         user_sender="system",
         include_user_memory=False,
