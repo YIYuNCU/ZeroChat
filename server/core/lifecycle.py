@@ -94,6 +94,7 @@ def create_scheduler_event_handler(logger):
                 if chat_id:
                     task_message = str(ctx.get("task_message") or "").strip()
                     final_content = content if content else (task_message or "提醒你该处理一件事啦")
+                    metadata = result.metadata or {}
                     await save_role_chat_message(
                         chat_id,
                         ChatMessage(
@@ -102,6 +103,11 @@ def create_scheduler_event_handler(logger):
                             sender_id=event.role_id,
                             timestamp=datetime.now().isoformat(),
                             type="text",
+                            # 携带 request_id，前端才能按需查询本轮工具调用记录。
+                            # final_content 回退到占位提醒文案时说明本轮没有真实
+                            # AI 回复内容可对应，此时不应关联 request_id。
+                            request_id=(metadata.get("request_id") if content else None),
+                            has_tool_calls=bool(metadata.get("has_tool_calls")) if content else False,
                         ),
                     )
                     await publish_server_push(
@@ -117,6 +123,7 @@ def create_scheduler_event_handler(logger):
                 chat_id = str((event.context or {}).get("chat_id") or event.role_id).strip()
                 if chat_id:
                     message_id = f"{datetime.now().timestamp()}_{event_type}"
+                    metadata = result.metadata or {}
                     await save_role_chat_message(
                         chat_id,
                         ChatMessage(
@@ -125,6 +132,10 @@ def create_scheduler_event_handler(logger):
                             sender_id=event.role_id,
                             timestamp=datetime.now().isoformat(),
                             type="text",
+                            # 携带 request_id，前端才能按需查询本轮工具调用记录
+                            # （例如无回复续写本身链式再触发的 continue_if_no_reply）。
+                            request_id=metadata.get("request_id"),
+                            has_tool_calls=bool(metadata.get("has_tool_calls")),
                         ),
                     )
                     # 复用 proactive_message 推送类型（客户端已按其拉取会话快照）

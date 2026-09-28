@@ -325,25 +325,25 @@ _STATS = {"enabled": True, "stats": [{"name": "好感", "min": 0, "max": 100, "i
 # substitution and both emoji branches. Regenerate only when the text is *meant* to change.
 _GOLDEN = {
     ("chat_minimal", False): (
-        2686, "d77b88262dde92587b9dd53b490a58a1a303cc4b93d080d086ef9c6e2f11c2e1"
+        2877, "f1e5660b9fb437b86b68846c543626a05bfab6f34b3b35e88d05c2aa18511197"
     ),
     ("chat_minimal", True): (
-        2582, "2a0688db83a374b7310a8161e9db41690c10b730aa5822010203118a85bd30d9"
+        2773, "40892f96bf8e7417798b99b398664d773592684398a66610b8be1adaa3897e82"
     ),
     ("chat_full", False): (
-        2722, "4a6387c251a764cb3312854d515053cc87ffc6781e398eed9439d484f2bc26be"
+        2913, "b5439133c7aab0846b337d99679209cd8d6896c7ae4ae3e1cab5cca619964373"
     ),
     ("chat_stats", False): (
-        3314, "f5e4a2dfadb657ead2879993b929784343bbfb350a25c366c630a239bed79514"
+        3505, "86ec5808ae7559f12a40e60c0ce96f61892a6b91a48aa5a13ff5edb7a1197b5f"
     ),
     ("chat_stats_sound_off", True): (
-        3021, "6090aa173d1df8bc30743132cd4cb4eeb02982bbb81b81b28bda671b80206752"
+        3212, "f9de5c5aa11ce462e049ee7abb15ad97bc5e799edcfe9447068e4b9f2bad99aa"
     ),
     ("grok_stats", False): (
-        3792, "c42f96a8dac9cf4c1d069c02fa8457b4c381df55a3d061dea84c7ae01831b3ad"
+        3983, "96c49214eda8fa0627e1f9963041dcf07ceb6d805925dfc79f2aa97f5c4d22cc"
     ),
     ("onebot_main_qq", False): (
-        3947, "4b68480becf51c4a413f0bfbde6dad50af893d883c3b93d1a1e8392252f360ae"
+        4138, "7b7158884382dad3b058c86519f199e06eaa1a37b79d5a84c688fddc1d5d25ae"
     ),
 }
 

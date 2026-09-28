@@ -28,6 +28,7 @@ from services.ai_tools import (
 from services.ai_service import (
     _post_chat,
     _consume_inline_emoji_tool_markup,
+    _consume_inline_continue_if_no_reply_markup,
     _handle_tool_calls,
     _normalize_embedding_url,
     generate_with_role,
@@ -1272,6 +1273,82 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized["content"], "")
         self.assertEqual(normalized["_emojis_called"], [])
         execute.assert_not_awaited()
+
+    async def test_inline_continue_if_no_reply_markup_is_executed_and_stripped(self):
+        # 复现真实故障样式：模型把 continue_if_no_reply 写成正文里的 XML 标签，
+        # 且 prompt 字段被模型自造成 <param name="prompt"> 包裹，而不是走
+        # tool_calls。修复后应真正执行一次续写调用，并把标签从正文剥除。
+        result = {
+            "content": (
+                "<对话>那你打疙瘩，我烧水。</对话>\n"
+                "<数值>a3.5;b:33.5</数值>\n"
+                "<continue_if_no_reply>\n"
+                "<delay_minutes>6</delay_minutes>\n"
+                '<param name="prompt">催一下疙瘩汤进度</param>\n'
+                "</continue_if_no_reply>"
+            )
+        }
+        with patch(
+            "services.ai_service.execute_continue_if_no_reply",
+            return_value="[已设置续写]",
+        ) as execute:
+            normalized = await _consume_inline_continue_if_no_reply_markup(
+                result, {"id": "role-1"}
+            )
+
+        self.assertEqual(
+            normalized["content"],
+            "<对话>那你打疙瘩，我烧水。</对话>\n<数值>a3.5;b:33.5</数值>",
+        )
+        execute.assert_awaited_once_with({"id": "role-1"}, 6.0, "催一下疙瘩汤进度")
+        self.assertEqual(len(normalized["_tool_calls_log"]), 1)
+        logged = normalized["_tool_calls_log"][0]
+        self.assertEqual(logged["name"], "continue_if_no_reply")
+        self.assertEqual(logged["arguments"], {"delay_minutes": 6.0, "prompt": "催一下疙瘩汤进度"})
+        self.assertEqual(logged["result"], "[已设置续写]")
+
+    async def test_inline_continue_if_no_reply_markup_supports_direct_child_tags(self):
+        # 部分模型会直接用 <prompt> 而不是 <param name="prompt">，两种写法都要兼容。
+        result = {
+            "content": (
+                "<continue_if_no_reply>"
+                "<delay_minutes>10</delay_minutes>"
+                "<prompt>问下他在不在</prompt>"
+                "</continue_if_no_reply>"
+            )
+        }
+        with patch(
+            "services.ai_service.execute_continue_if_no_reply",
+            return_value="[已设置续写]",
+        ) as execute:
+            normalized = await _consume_inline_continue_if_no_reply_markup(
+                result, {"id": "role-1"}
+            )
+
+        self.assertEqual(normalized["content"], "")
+        execute.assert_awaited_once_with({"id": "role-1"}, 10.0, "问下他在不在")
+
+    async def test_incomplete_inline_continue_if_no_reply_markup_is_not_executed(self):
+        # 缺 prompt 时不应静默调用工具，但仍要把标签从正文剥除，避免展示乱码给用户，
+        # 并在工具调用历史里留一条失败记录方便排查。
+        result = {
+            "content": "<continue_if_no_reply><delay_minutes>6</delay_minutes></continue_if_no_reply>"
+        }
+        with patch("services.ai_service.execute_continue_if_no_reply") as execute:
+            normalized = await _consume_inline_continue_if_no_reply_markup(
+                result, {"id": "role-1"}
+            )
+
+        self.assertEqual(normalized["content"], "")
+        execute.assert_not_awaited()
+        self.assertEqual(len(normalized["_tool_calls_log"]), 1)
+        self.assertIn("参数不完整", normalized["_tool_calls_log"][0]["result"])
+
+    async def test_no_inline_continue_if_no_reply_markup_is_a_noop(self):
+        result = {"content": "普通回复，没有工具标签"}
+        normalized = await _consume_inline_continue_if_no_reply_markup(result, {"id": "role-1"})
+        self.assertEqual(normalized["content"], "普通回复，没有工具标签")
+        self.assertNotIn("_tool_calls_log", normalized)
 
     async def test_deepseek_tool_call_replays_assistant_message(self):
         result = {

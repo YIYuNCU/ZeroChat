@@ -25,6 +25,41 @@ _INLINE_EMOJI_EMOTION_RE = re.compile(
 )
 _VALID_EMOJI_EMOTION_RE = re.compile(r'^[a-z0-9_-]{1,64}$')
 
+# 少数情况下模型不走 tool_calls 字段，而是把 continue_if_no_reply 当成 XML
+# 标签直接写进正文（可能是自闭合、也可能带子标签，且子标签命名不稳定，
+# 例如把 prompt 包成 <param name="prompt">...</param>）。这里尽量宽松地把
+# 整个块解析出来，真正执行一次续写调用，再从正文里剥除，而不是把这段乱码
+# 原样展示给用户、同时静默丢掉这次工具调用的意图。
+_INLINE_CONTINUE_TOOL_RE = re.compile(
+    r'<\s*continue_if_no_reply\b[^>]*?(?:/\s*>|>(?P<inner>.*?)<\s*/\s*continue_if_no_reply\s*>)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_inline_tool_field(inner: str, field: str) -> Optional[str]:
+    """从 continue_if_no_reply 内联块中取出某个字段的值。
+
+    兼容两种模型常见写法：
+    - 直接子标签：``<delay_minutes>6</delay_minutes>``
+    - 包一层 param：``<param name="delay_minutes">6</param>``
+    """
+    direct_re = re.compile(
+        rf'<\s*{re.escape(field)}\s*>(?P<value>.*?)<\s*/\s*{re.escape(field)}\s*>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = direct_re.search(inner)
+    if match:
+        return match.group("value").strip()
+
+    param_re = re.compile(
+        rf'<\s*param\s+name\s*=\s*["\']{re.escape(field)}["\']\s*>(?P<value>.*?)<\s*/\s*param\s*>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = param_re.search(inner)
+    if match:
+        return match.group("value").strip()
+    return None
+
 
 def _prefer_precise_emoji_deliveries(deliveries: List[Any]) -> List[Any]:
     """Avoid rendering a local fallback beside a precise cloud emoji."""
@@ -62,6 +97,64 @@ async def _consume_inline_emoji_tool_markup(
 
     result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
     result.setdefault("_tool_calls_log", [])
+    return result
+
+
+async def _consume_inline_continue_if_no_reply_markup(
+    result: Dict[str, Any], role_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """处理模型把 continue_if_no_reply 当成 XML 标签直接写进正文的情况。
+
+    正常路径应由 provider 通过 tool_calls 字段返回该调用；一旦模型把它写成
+    正文里的 <continue_if_no_reply>...</continue_if_no_reply> 标签，就既不会
+    真正设置续写计时器，又会把这段标签原样展示给用户。这里尽量解析出
+    delay_minutes/prompt，真正执行一次调用，并把标签从正文中剥除。
+
+    使用模块级 execute_continue_if_no_reply（在文件下方随 ai_tools 一起导入），
+    而非函数内局部 import，以便测试可以直接 patch
+    ``services.ai_service.execute_continue_if_no_reply``。
+    """
+    content = str(result.get("content") or "")
+    matches = list(_INLINE_CONTINUE_TOOL_RE.finditer(content))
+    if not matches:
+        return result
+
+    result["content"] = _INLINE_CONTINUE_TOOL_RE.sub("", content).strip()
+    tool_calls_log = list(result.get("_tool_calls_log") or [])
+
+    for match in matches:
+        inner = match.group("inner") or ""
+        raw_delay = _extract_inline_tool_field(inner, "delay_minutes")
+        prompt = (_extract_inline_tool_field(inner, "prompt") or "").strip()
+
+        delay_minutes: Optional[float] = None
+        if raw_delay is not None:
+            try:
+                delay_minutes = float(raw_delay)
+            except ValueError:
+                delay_minutes = None
+
+        args = {"delay_minutes": delay_minutes, "prompt": prompt}
+        logger.info(
+            "Inline tool markup: continue_if_no_reply [delay_minutes=%s, prompt=%s]",
+            delay_minutes, prompt[:60],
+        )
+
+        if delay_minutes is not None and prompt:
+            tool_result = await execute_continue_if_no_reply(role_data, delay_minutes, prompt)
+        else:
+            tool_result = "参数不完整：delay_minutes 和 prompt 为必填"
+            logger.warning(
+                "Ignoring invalid inline continue_if_no_reply markup: %s", match.group(0)
+            )
+
+        tool_calls_log.append({
+            "name": "continue_if_no_reply",
+            "arguments": args,
+            "result": tool_result,
+        })
+
+    result["_tool_calls_log"] = tool_calls_log
     return result
 
 # 共享 httpx 客户端连接池
@@ -1382,7 +1475,8 @@ async def generate_with_role(
         else:
             result["_tool_calls_log"] = _pre_image_tool_calls_log
 
-    return await _consume_inline_emoji_tool_markup(result, role_data)
+    result = await _consume_inline_emoji_tool_markup(result, role_data)
+    return await _consume_inline_continue_if_no_reply_markup(result, role_data)
 
 
 async def _handle_tool_calls(

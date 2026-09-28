@@ -1026,7 +1026,16 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
         !MessageParts.isNoReplyDirective(message.content)) {
       return true;
     }
-    return RoleService.getRoleById(message.senderId)?.showNoReply ?? false;
+    // 无回复消息若携带工具调用记录且角色开启了工具调用历史展示，仍需渡给
+    // ChatBubble 渲染（由其按 showNoReply 决定文本是否隐藏），否则那次调用
+    // 记录（例如无回复续写）就没有任何入口可查看。
+    final role = RoleService.getRoleById(message.senderId);
+    if (message.hasToolCalls &&
+        message.hasRequestId &&
+        (role?.showToolCalls ?? false)) {
+      return true;
+    }
+    return role?.showNoReply ?? false;
   }
 
   void _scheduleInitialScroll([int remainingFrames = 4]) {

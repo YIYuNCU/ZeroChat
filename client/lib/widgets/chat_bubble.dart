@@ -151,6 +151,13 @@ class ChatBubble extends StatelessWidget {
     if (isSender || !MessageParts.isNoReplyDirective(message.content)) {
       return false;
     }
+    // 即使角色未开启「显示无回复气泡」，只要这条无回复消息携带了工具调用记录
+    // 且角色开启了「显示工具调用历史」，也不能整条隐藏气泡——否则那次调用
+    // （例如无回复续写 continue_if_no_reply）就永远没有入口可查看。
+    // 无回复文本本身仍由 _buildBodyParts 按 showNoReply 单独控制是否显示。
+    if (message.hasToolCalls && message.hasRequestId && _showToolCallsCard) {
+      return false;
+    }
     return !(RoleService.getRoleById(message.senderId)?.showNoReply ?? false);
   }
 

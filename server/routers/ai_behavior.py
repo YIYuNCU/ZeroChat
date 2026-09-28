@@ -992,20 +992,25 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
     )
     if not pipeline_result.get("success"):
         return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
-    if pipeline_result.get("no_reply") is True:
-        return AIResponse(success=True, action="ignore", content=None)
 
+    no_reply = pipeline_result.get("no_reply") is True
     ai_message = pipeline_result.get("reply") or ""
-    
+
+    # 无回复也要保留 content/metadata（尤其 request_id），否则本轮若发生了工具调用
+    # （例如无回复续写自身的链式跟进），落库的记录会因为消息从未创建而无法查看。
+    # lifecycle.py 的调度器分支按 content 是否为空决定要不要落地这条消息，
+    # 这里必须和 handle_chat 保持一致，用 action 区分是否要真正提醒用户，而不是
+    # 丢弃 content。
     return AIResponse(
         success=True,
-        action="reply",
+        action="ignore" if no_reply else "reply",
         content=ai_message,
         metadata={
             "type": "proactive",
             "role_name": role.get("name"),
             "request_id": pipeline_result.get("request_id"),
             "has_tool_calls": pipeline_result.get("has_tool_calls", False),
+            "no_reply": no_reply,
         }
     )
 
@@ -1053,20 +1058,22 @@ async def handle_followup(role: Dict, event: AIEvent) -> AIResponse:
     )
     if not pipeline_result.get("success"):
         return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
-    if pipeline_result.get("no_reply") is True:
-        return AIResponse(success=True, action="ignore", content=None)
 
+    no_reply = pipeline_result.get("no_reply") is True
     ai_message = pipeline_result.get("reply") or ""
 
+    # 同 handle_proactive：无回复也保留 content/metadata，避免本轮工具调用
+    # （例如再次触发的 continue_if_no_reply 链式跟进）因消息从未落库而无法查看。
     return AIResponse(
         success=True,
-        action="reply",
+        action="ignore" if no_reply else "reply",
         content=ai_message,
         metadata={
             "type": "followup",
             "role_name": role.get("name"),
             "request_id": pipeline_result.get("request_id"),
             "has_tool_calls": pipeline_result.get("has_tool_calls", False),
+            "no_reply": no_reply,
         }
     )
 
@@ -1127,20 +1134,22 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
     )
     if not pipeline_result.get("success"):
         return AIResponse(success=False, action="ignore", error=pipeline_result.get("error"))
-    if pipeline_result.get("no_reply") is True:
-        return AIResponse(success=True, action="ignore", content=None)
 
+    no_reply = pipeline_result.get("no_reply") is True
     ai_message = pipeline_result.get("reply") or ""
-    
+
+    # 同 handle_proactive/handle_followup：无回复也保留 content/metadata，
+    # 避免本轮工具调用记录因消息从未落库而无法查看。
     return AIResponse(
         success=True,
-        action="reply",
+        action="ignore" if no_reply else "reply",
         content=ai_message,
         metadata={
             "type": "task",
             "task_id": task_context.get("task_id"),
             "request_id": pipeline_result.get("request_id") or request_id,
             "has_tool_calls": pipeline_result.get("has_tool_calls", False),
+            "no_reply": no_reply,
         }
     )
 
