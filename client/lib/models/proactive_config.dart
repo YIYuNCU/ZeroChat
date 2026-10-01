@@ -1,5 +1,14 @@
+import 'cn_holidays.dart';
+
 /// 星期名称（ISO 1=周一 .. 7=周日）
 const List<String> kWeekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+
+/// 重叠校验用的"日期形态"：(星期, 是否工作日)。
+/// 周一至周五可能是工作日或节假日；周末恒为非工作日（调休补班也算非工作日）。
+final List<({int weekday, bool workday})> _dayStates = [
+  for (var day = 1; day <= 5; day++) (weekday: day, workday: true),
+  for (var day = 1; day <= 7; day++) (weekday: day, workday: false),
+];
 
 bool _isValidDate(String value) {
   final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(value);
@@ -12,7 +21,11 @@ bool _isValidDate(String value) {
   return date.year == year && date.month == month && date.day == day;
 }
 
-/// 一条安静时间规则（可自定义循环：每天 / 每周自选星期 / 指定日期一次）。
+/// 一条安静时间规则
+/// （可自定义循环：每天 / 工作日 / 非工作日 / 每周自选星期 / 指定日期一次）。
+///
+/// 工作日 / 非工作日按中国法定节假日判定，调休补班日算非工作日。
+/// 跨夜规则以"起始日"判定是否生效。
 class QuietRule {
   final int startMinute;
   final int endMinute;
@@ -21,8 +34,19 @@ class QuietRule {
   final String? date;
 
   static const String repeatDaily = 'daily';
+  static const String repeatWorkday = 'workday';
+  static const String repeatNonWorkday = 'non_workday';
   static const String repeatWeekly = 'weekly';
   static const String repeatOnce = 'once';
+
+  /// 全部合法的重复类型（与服务端 VALID_REPEAT_TYPES 一致）。
+  static const List<String> repeatTypes = [
+    repeatDaily,
+    repeatWorkday,
+    repeatNonWorkday,
+    repeatWeekly,
+    repeatOnce,
+  ];
 
   const QuietRule({
     required this.startMinute,
@@ -34,6 +58,56 @@ class QuietRule {
 
   bool get isWeekly => repeatType == repeatWeekly;
   bool get isOnce => repeatType == repeatOnce;
+
+  /// 规则在 [day] 当天是否为生效日。
+  bool appliesOn(DateTime day) {
+    switch (repeatType) {
+      case repeatWeekly:
+        return weekdays.contains(day.weekday); // Dart weekday: 1=周一..7=周日
+      case repeatOnce:
+        return _formatDate(day) == date;
+      case repeatWorkday:
+        return isCnWorkday(day);
+      case repeatNonWorkday:
+        return !isCnWorkday(day);
+      default:
+        return true;
+    }
+  }
+
+  /// 规则在某种日期形态（星期 + 是否工作日）上是否生效；once 恒为 false。
+  bool _appliesOnState(int weekday, bool workday) {
+    switch (repeatType) {
+      case repeatWeekly:
+        return weekdays.contains(weekday);
+      case repeatWorkday:
+        return workday;
+      case repeatNonWorkday:
+        return !workday;
+      case repeatDaily:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /// [at] 是否处于该规则的静默区间（跨夜规则含次日结束段）。
+  bool isQuietAt(DateTime at) {
+    final minute = at.hour * 60 + at.minute;
+    if (startMinute < endMinute) {
+      return appliesOn(at) && startMinute <= minute && minute < endMinute;
+    }
+    // 跨夜：起始日 [start, 1440) 或 次日（结束日）[0, end)
+    if (minute >= startMinute && appliesOn(at)) return true;
+    final previousDay = DateTime(at.year, at.month, at.day - 1);
+    return minute < endMinute && appliesOn(previousDay);
+  }
+
+  static String _formatDate(DateTime day) {
+    final month = day.month.toString().padLeft(2, '0');
+    final dayOfMonth = day.day.toString().padLeft(2, '0');
+    return '${day.year.toString().padLeft(4, '0')}-$month-$dayOfMonth';
+  }
 
   factory QuietRule.fromJson(Map<String, dynamic> json) {
     final startMinute = (json['start_minute'] as num?)?.toInt() ?? 0;
@@ -91,6 +165,10 @@ class QuietRule {
     switch (repeatType) {
       case repeatDaily:
         return '每天 $range';
+      case repeatWorkday:
+        return '工作日 $range';
+      case repeatNonWorkday:
+        return '非工作日 $range';
       case repeatWeekly:
         final names = weekdays.map((day) => kWeekdayNames[day - 1]).join('、');
         return '每周$names $range';
@@ -113,10 +191,13 @@ class QuietRule {
 
 /// 校验安静规则列表。
 /// 结构：时间范围合法；weekly 需有有效星期；once 需有合法日期。
-/// 重叠：同一星期几上的非 once 规则不得重叠或首尾相接（once 为单次例外）。
+/// 重叠：同一天上的非 once 规则不得重叠或首尾相接（once 为单次例外）。
+/// "同一天"按日期形态（星期 + 是否工作日）展开，与服务端校验一致。
 String? validateQuietRules(List<QuietRule> rules) {
-  final buckets = <int, List<({int start, int end})>>{};
   for (final rule in rules) {
+    if (!QuietRule.repeatTypes.contains(rule.repeatType)) {
+      return '不支持的重复类型：${rule.repeatType}';
+    }
     if (rule.startMinute < 0 ||
         rule.startMinute >= 24 * 60 ||
         rule.endMinute < 0 ||
@@ -144,28 +225,40 @@ String? validateQuietRules(List<QuietRule> rules) {
         return '指定日期规则需要有效日期（YYYY-MM-DD）';
       }
     }
-    if (rule.isOnce) continue; // 单次例外不参与跨规则重叠校验
-
-    final days = rule.isWeekly ? rule.weekdays : [1, 2, 3, 4, 5, 6, 7];
-    for (final day in days) {
-      final spans = buckets.putIfAbsent(day, () => []);
-      if (rule.startMinute < rule.endMinute) {
-        spans.add((start: rule.startMinute, end: rule.endMinute));
-      } else {
-        spans.add((start: rule.startMinute, end: 24 * 60));
-        final nextDay = day % 7 + 1;
-        buckets
-            .putIfAbsent(nextDay, () => [])
-            .add((start: 0, end: rule.endMinute));
-      }
-    }
   }
 
-  for (final spans in buckets.values) {
-    final sorted = [...spans]..sort((a, b) => a.start.compareTo(b.start));
-    for (var index = 1; index < sorted.length; index++) {
-      if (sorted[index].start <= sorted[index - 1].end) {
-        return '安静时间不能重叠或首尾相接';
+  // 单次例外不参与跨规则重叠校验
+  final recurring = rules.where((rule) => !rule.isOnce).toList();
+
+  List<({int start, int end})> sameDaySpans(int weekday, bool workday) => [
+    for (final rule in recurring)
+      if (rule._appliesOnState(weekday, workday))
+        (
+          start: rule.startMinute,
+          end: rule.startMinute < rule.endMinute ? rule.endMinute : 24 * 60,
+        ),
+  ];
+
+  List<({int start, int end})> spillSpans(int weekday, bool workday) => [
+    for (final rule in recurring)
+      if (rule.startMinute > rule.endMinute &&
+          rule._appliesOnState(weekday, workday))
+        (start: 0, end: rule.endMinute),
+  ];
+
+  for (final state in _dayStates) {
+    final previousWeekday = (state.weekday + 5) % 7 + 1;
+    final today = sameDaySpans(state.weekday, state.workday);
+    for (final previous in _dayStates) {
+      if (previous.weekday != previousWeekday) continue;
+      final sorted = [
+        ...today,
+        ...spillSpans(previous.weekday, previous.workday),
+      ]..sort((a, b) => a.start.compareTo(b.start));
+      for (var index = 1; index < sorted.length; index++) {
+        if (sorted[index].start <= sorted[index - 1].end) {
+          return '安静时间不能重叠或首尾相接';
+        }
       }
     }
   }

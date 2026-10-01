@@ -2,7 +2,16 @@ import 'package:flutter/material.dart';
 
 import '../models/proactive_config.dart';
 
-/// 打开安静时间编辑器（支持每天 / 每周自选星期 / 指定日期一次）。
+/// 重复类型选项（值, 展示文案）。
+const List<(String, String)> _repeatOptions = [
+  (QuietRule.repeatDaily, '每天'),
+  (QuietRule.repeatWorkday, '工作日'),
+  (QuietRule.repeatNonWorkday, '非工作日'),
+  (QuietRule.repeatWeekly, '每周'),
+  (QuietRule.repeatOnce, '指定日期'),
+];
+
+/// 打开安静时间编辑器（支持每天 / 工作日 / 非工作日 / 每周自选星期 / 指定日期一次）。
 /// 返回 null 表示取消；返回非 null 为编辑后的规则列表。
 Future<List<QuietRule>?> showQuietRuleEditor(
   BuildContext context, {
@@ -187,34 +196,38 @@ Future<QuietRule?> _showRuleEditorDialog(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  SegmentedButton<String>(
-                    segments: const [
-                      ButtonSegment(
-                        value: QuietRule.repeatDaily,
-                        label: Text('每天'),
-                      ),
-                      ButtonSegment(
-                        value: QuietRule.repeatWeekly,
-                        label: Text('每周'),
-                      ),
-                      ButtonSegment(
-                        value: QuietRule.repeatOnce,
-                        label: Text('指定日期'),
-                      ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      for (final (value, label) in _repeatOptions)
+                        ChoiceChip(
+                          label: Text(label),
+                          selected: repeatType == value,
+                          onSelected: (selected) {
+                            if (!selected) return;
+                            setState(() {
+                              repeatType = value;
+                              if (repeatType != QuietRule.repeatWeekly) {
+                                weekdays = [];
+                              }
+                              if (repeatType != QuietRule.repeatOnce) {
+                                date = null;
+                              }
+                            });
+                          },
+                        ),
                     ],
-                    selected: {repeatType},
-                    onSelectionChanged: (selection) {
-                      setState(() {
-                        repeatType = selection.first;
-                        if (repeatType != QuietRule.repeatWeekly) {
-                          weekdays = [];
-                        }
-                        if (repeatType != QuietRule.repeatOnce) {
-                          date = null;
-                        }
-                      });
-                    },
                   ),
+                  if (repeatType == QuietRule.repeatWorkday ||
+                      repeatType == QuietRule.repeatNonWorkday) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '按中国节假日判定：周末与节假日为非工作日，调休补班日也算非工作日。'
+                      '跨夜规则以开始那天为准。',
+                      style: Theme.of(dialogContext).textTheme.bodySmall,
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   if (repeatType == QuietRule.repeatWeekly) ...[
                     Wrap(

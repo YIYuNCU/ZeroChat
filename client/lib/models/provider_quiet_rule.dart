@@ -3,6 +3,7 @@ import 'proactive_config.dart';
 /// 供应商+模型级安静规则。
 /// 扁平 JSON 与服务端 `settings.json` 的 `quiet_rules` 条目一致：
 /// { enabled, api_url, model, start_minute, end_minute, repeat_type, weekdays, date }
+/// repeat_type 取值见 [QuietRule.repeatTypes]（含 workday / non_workday）。
 class ProviderQuietRule {
   final bool enabled;
   final String apiUrl;
@@ -110,34 +111,8 @@ class ProviderQuietRule {
         rule.model.trim().toLowerCase() == model.trim().toLowerCase();
   }
 
-  bool _appliesOn(DateTime day) {
-    switch (repeatType) {
-      case QuietRule.repeatWeekly:
-        return weekdays.contains(day.weekday); // Dart weekday: 1=周一..7=周日
-      case QuietRule.repeatOnce:
-        return _dateString(day) == date;
-      default:
-        return true;
-    }
-  }
-
   /// 当前时刻是否处于该规则的静默区间（跨夜规则含次日结束段）。
-  bool isQuietAt(DateTime at) {
-    if (!enabled) return false;
-    final minute = at.hour * 60 + at.minute;
-    final start = startMinute;
-    final end = endMinute;
-    if (start < end) {
-      return _appliesOn(at) && start <= minute && minute < end;
-    }
-    // 跨夜：起始日 [start, 1440) 或 次日（结束日）[0, end)
-    if (minute >= start && _appliesOn(at)) return true;
-    if (minute < end &&
-        _appliesOn(at.subtract(const Duration(days: 1)))) {
-      return true;
-    }
-    return false;
-  }
+  bool isQuietAt(DateTime at) => enabled && toRule().isQuietAt(at);
 
   /// 从一组规则判断当前是否静默（供群聊 AI↔AI 等客户端自主行为 gating）。
   /// [roleApiUrl]/[roleModel] 为角色级 AI 配置；缺省回退到全局配置。
@@ -164,11 +139,5 @@ class ProviderQuietRule {
       if (rule.isQuietAt(now)) return true;
     }
     return false;
-  }
-
-  static String _dateString(DateTime day) {
-    final month = day.month.toString().padLeft(2, '0');
-    final dayOfMonth = day.day.toString().padLeft(2, '0');
-    return '${day.year}-$month-$dayOfMonth';
   }
 }

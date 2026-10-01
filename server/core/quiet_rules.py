@@ -3,8 +3,12 @@
 
 安静时间从"每天重复的时间段"升级为带循环类型的规则：
 - repeat_type: "daily"（每天）| "weekly"（每周自选星期）| "once"（指定日期一次）
+  | "workday"（工作日）| "non_workday"（非工作日）
 - weekdays: ISO 星期 1=周一 .. 7=周日（weekly 专属）
 - date: YYYY-MM-DD（once 专属）
+
+工作日 / 非工作日按中国法定节假日判定（见 core.cn_holidays），调休补班日算非工作日。
+跨夜规则以"起始日"判定是否生效，例如工作日 23:00-07:00 在周五夜里生效、周日夜里不生效。
 
 本模块同时提供：
 1. pydantic 校验模型（角色级 QuietRule / 供应商级 ProviderQuietRule）
@@ -17,10 +21,31 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from core.cn_holidays import is_cn_workday
+
 logger = logging.getLogger(__name__)
 
-VALID_REPEAT_TYPES = {"daily", "weekly", "once"}
+VALID_REPEAT_TYPES = {"daily", "weekly", "once", "workday", "non_workday"}
 ISO_WEEKDAYS = list(range(1, 8))  # 1=周一 .. 7=周日
+
+# 重叠校验用的"日期形态"：(ISO 星期, 是否工作日)。
+# 周一至周五可能是工作日或节假日；周末恒为非工作日（调休补班也算非工作日）。
+_DAY_STATES = [(day, True) for day in range(1, 6)] + [
+    (day, False) for day in ISO_WEEKDAYS
+]
+
+
+def _rule_applies_on_state(rule: Any, weekday: int, is_workday: bool) -> bool:
+    """规则在某种日期形态上是否生效（不含 once）。rule 可为 pydantic 模型或 dict。"""
+    get = rule.get if isinstance(rule, dict) else lambda key: getattr(rule, key, None)
+    repeat_type = get("repeat_type") or "daily"
+    if repeat_type == "weekly":
+        return weekday in (get("weekdays") or [])
+    if repeat_type == "workday":
+        return is_workday
+    if repeat_type == "non_workday":
+        return not is_workday
+    return repeat_type == "daily"
 
 
 # ========== 结构校验（pydantic） ==========
@@ -76,30 +101,42 @@ class ProviderQuietRule(QuietRule):
 
 
 def validate_quiet_rules(rules: List[QuietRule]) -> None:
-    """校验规则列表：结构 + 同一星期几上的非 once 规则不得重叠/首尾相接。
+    """校验规则列表：结构 + 同一天上的非 once 规则不得重叠/首尾相接。
 
+    "同一天"按日期形态（星期 + 是否工作日）展开：当天生效规则的当日段，
+    加上前一天（任一可能形态）生效的跨夜规则的次日段，逐一组合检查。
     once 规则是"单次例外"，不参与跨规则重叠校验；结构校验已由模型负责。
     """
-    buckets: Dict[int, List] = {day: [] for day in ISO_WEEKDAYS}
-    for rule in rules:
-        if rule.repeat_type == "once":
-            continue
-        days = ISO_WEEKDAYS if rule.repeat_type == "daily" else rule.weekdays
-        for day in days:
-            if rule.start_minute < rule.end_minute:
-                buckets[day].append((rule.start_minute, rule.end_minute))
-            else:
-                buckets[day].append((rule.start_minute, 24 * 60))
-                next_day = day % 7 + 1
-                buckets[next_day].append((0, rule.end_minute))
+    recurring = [rule for rule in rules if rule.repeat_type != "once"]
 
-    for day, spans in buckets.items():
-        spans.sort()
-        for (_, prev_end), (start, _) in zip(spans, spans[1:]):
-            if start <= prev_end:
-                raise ValueError(
-                    f"quiet rules must not overlap or touch on weekday {day}"
-                )
+    def same_day_spans(state):
+        spans = []
+        for rule in recurring:
+            if _rule_applies_on_state(rule, *state):
+                end = rule.end_minute if rule.start_minute < rule.end_minute else 24 * 60
+                spans.append((rule.start_minute, end))
+        return spans
+
+    def spill_spans(state):
+        return [
+            (0, rule.end_minute)
+            for rule in recurring
+            if rule.start_minute > rule.end_minute and _rule_applies_on_state(rule, *state)
+        ]
+
+    for state in _DAY_STATES:
+        weekday = state[0]
+        prev_weekday = (weekday - 2) % 7 + 1
+        today = same_day_spans(state)
+        for prev_state in _DAY_STATES:
+            if prev_state[0] != prev_weekday:
+                continue
+            spans = sorted(today + spill_spans(prev_state))
+            for (_, prev_end), (start, _) in zip(spans, spans[1:]):
+                if start <= prev_end:
+                    raise ValueError(
+                        f"quiet rules must not overlap or touch on weekday {weekday}"
+                    )
 
 
 # ========== 宽容解析（调度器 / 设置读取） ==========
@@ -179,12 +216,20 @@ def provider_rule_matches(rule: Dict, api_url: Any, model: Any) -> bool:
 # ========== 纯时间逻辑（调度器复用） ==========
 
 def rule_applies_on(rule: Dict, dt: datetime) -> bool:
-    """规则在 dt 当天是否"生效日"（daily 恒生效；weekly 按 isoweekday；once 按日期）。"""
+    """规则在 dt 当天是否"生效日"。
+
+    daily 恒生效；weekly 按 isoweekday；once 按日期；
+    workday / non_workday 按中国法定节假日（调休补班日算非工作日）。
+    """
     repeat_type = str(rule.get("repeat_type") or "daily")
     if repeat_type == "weekly":
         return dt.isoweekday() in (rule.get("weekdays") or [])
     if repeat_type == "once":
         return dt.date().isoformat() == str(rule.get("date") or "")
+    if repeat_type == "workday":
+        return is_cn_workday(dt)
+    if repeat_type == "non_workday":
+        return not is_cn_workday(dt)
     return True
 
 
