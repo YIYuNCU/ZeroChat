@@ -733,6 +733,11 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
                 if role_model.show_tool_calls is not None
                 else False
             ),
+            "show_reasoning": (
+                role_model.show_reasoning
+                if role_model.show_reasoning is not None
+                else False
+            ),
             "archived": bool(role_model.archived),
             "tags": role_model.tags or [],
             "gender": role_model.gender or "men",

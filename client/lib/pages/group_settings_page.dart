@@ -666,6 +666,11 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
                           if (messages.isNotEmpty)
                             TextButton(
                               onPressed: () async {
+                                final confirm = await _confirmDestructive(
+                                  '清空聊天记录',
+                                  '确定要清空该群聊的所有聊天记录吗？此操作不可恢复。',
+                                );
+                                if (confirm != true) return;
                                 await MessageStore.instance.clearMessages(
                                   widget.groupId,
                                 );
@@ -878,6 +883,11 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
                               if (memories.isNotEmpty)
                                 TextButton(
                                   onPressed: () async {
+                                    final confirm = await _confirmDestructive(
+                                      '清空核心记忆',
+                                      '确定要清空该群聊的所有核心记忆吗？此操作不可恢复。',
+                                    );
+                                    if (confirm != true) return;
                                     await GroupChatService.updateGroup(
                                       _group!.clearCoreMemory(),
                                     );
@@ -973,6 +983,27 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
       setModalState(() {});
       setState(() {});
     }
+  }
+
+  /// 危险操作二次确认（取消 / 红色确认）。
+  Future<bool?> _confirmDestructive(String title, String content) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(content),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确认', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
   }
 
   void _confirmDissolve() {

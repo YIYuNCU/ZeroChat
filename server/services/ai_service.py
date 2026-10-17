@@ -1500,6 +1500,27 @@ async def _handle_tool_calls(
     # 每项 {"name": str, "arguments": dict, "result": str}。
     tool_calls_log: List[Dict[str, Any]] = list(existing_log or [])
 
+    # 累积每一轮工具调用回合的 reasoning_content（thinking 内容）。前端需要展示
+    # 完整思考链，而不仅是最后一轮的结果；最终按空行拼接后写回 result。
+    reasoning_segments: List[str] = []
+
+    def remember_reasoning(value: Any) -> None:
+        segment = str(value or "")
+        if not segment.strip():
+            return
+        # 同一段 reasoning 不应因重复捕获（例如最后一轮）被追加两次。
+        if reasoning_segments and reasoning_segments[-1] == segment:
+            return
+        reasoning_segments.append(segment)
+
+    def with_accumulated_reasoning(payload: Dict[str, Any]) -> Dict[str, Any]:
+        if reasoning_segments:
+            payload["reasoning_content"] = "\n\n".join(reasoning_segments)
+        return payload
+
+    # 进入循环前 result 来自本轮最初的 API 调用，同样属于完整思考链的一部分。
+    remember_reasoning(result.get("reasoning_content"))
+
     for round_idx in range(max_rounds):
         # DeepSeek requires its original assistant tool-call message, followed
         # by one role=tool message per tool_call_id.
@@ -1714,20 +1735,21 @@ async def _handle_tool_calls(
             default_temp=1.2,
             tools=tools,
         )
+        remember_reasoning(result.get("reasoning_content"))
 
         if not result.get("tool_calls"):
             if recognized_current_image:
                 result["_recognized_current_image"] = True
             result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
             result["_tool_calls_log"] = tool_calls_log
-            return result
+            return with_accumulated_reasoning(result)
 
     logger.warning(f"Tool call loop reached max {max_rounds} rounds, returning last result")
     if recognized_current_image:
         result["_recognized_current_image"] = True
     result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
     result["_tool_calls_log"] = tool_calls_log
-    return result
+    return with_accumulated_reasoning(result)
 
 async def generate_moment_post(
     role_data: Dict,

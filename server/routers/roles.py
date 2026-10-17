@@ -249,6 +249,7 @@ class RoleCreate(BaseModel):
     show_stats: Optional[bool] = None
     show_no_reply: Optional[bool] = None
     show_tool_calls: Optional[bool] = None
+    show_reasoning: Optional[bool] = None
 
     # 归档状态：归档后不能对话、不发朋友圈、不发主动消息
     archived: Optional[bool] = False
@@ -285,6 +286,7 @@ class RoleUpdate(BaseModel):
     show_stats: Optional[bool] = None
     show_no_reply: Optional[bool] = None
     show_tool_calls: Optional[bool] = None
+    show_reasoning: Optional[bool] = None
     archived: Optional[bool] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
@@ -712,6 +714,7 @@ async def create_role(role: RoleCreate, request: Request):
         "show_stats": role.show_stats if role.show_stats is not None else True,
         "show_no_reply": role.show_no_reply if role.show_no_reply is not None else False,
         "show_tool_calls": role.show_tool_calls if role.show_tool_calls is not None else False,
+        "show_reasoning": role.show_reasoning if role.show_reasoning is not None else False,
         "archived": bool(role.archived),
         "tags": role.tags or [],
         "gender": role.gender or "men",
@@ -1394,6 +1397,8 @@ class ChatMessage(BaseModel):
     request_id: Optional[str] = None
     # 本条消息生成过程中是否发生过工具调用（仅展示入口开关，不含明细）。
     has_tool_calls: Optional[bool] = False
+    # 思考链（thinking）内容；是否展示由角色的 show_reasoning 决定。
+    reasoning_content: Optional[str] = None
 
 class ChatMessagesSync(BaseModel):
     """消息同步请求"""
@@ -1633,6 +1638,8 @@ def build_role_items(backend_base_url: str) -> List[Dict[str, Any]]:
             continue
 
         role_copy = dict(role)
+        # 旧档案没有该字段，列表接口也要给出明确的 false，避免客户端解析歧义。
+        role_copy.setdefault("show_reasoning", False)
         cycle_data = role_copy.get("menstruation_cycle")
         if isinstance(cycle_data, dict):
             client_cycle = _client_menstruation_cycle(role_copy) or {}

@@ -523,6 +523,13 @@ class _SettingsPageState extends State<SettingsPage> {
                 leading: const Icon(Icons.delete_outline, color: Colors.red),
                 title: const Text('清除'),
                 onTap: () async {
+                  final confirm = await _confirmDestructive(
+                    type == 'cover' ? '清除朋友圈封面' : '清除聊天背景',
+                    type == 'cover'
+                        ? '确定要清除朋友圈封面吗？清除后将显示默认封面。'
+                        : '确定要清除聊天背景吗？清除后将显示默认背景。',
+                  );
+                  if (confirm != true || !ctx.mounted) return;
                   Navigator.pop(ctx);
                   await _saveImagePath(type, '');
                 },
@@ -531,6 +538,27 @@ class _SettingsPageState extends State<SettingsPage> {
             const SizedBox(height: 12),
           ],
         ),
+      ),
+    );
+  }
+
+  /// 危险操作二次确认（取消 / 红色确认）。
+  Future<bool?> _confirmDestructive(String title, String content) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(content),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确认', style: TextStyle(color: Colors.red)),
+          ),
+        ],
       ),
     );
   }

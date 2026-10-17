@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'dart:async';
 import '../models/message.dart';
 import '../models/emoji_item.dart';
 import '../models/role.dart';
@@ -55,17 +56,12 @@ class ChatDetailPage extends StatefulWidget {
 class _ChatDetailPageState extends State<ChatDetailPage> {
   final ScrollController _scrollController = ScrollController();
   final InputBarController _inputBarController = InputBarController();
-  static const int _messagePageSize = 50;
 
-  int _visibleMessageCount = _messagePageSize;
-  int _lastTotalMessageCount = 0;
   bool _isLoadingMoreMessages = false;
   bool _isUserNearBottom = true;
-  bool _loadMoreConfirmNeeded = false;
   double _lastKeyboardInset = 0;
   double _lastEmojiPanelHeight = 300;
   bool _isSwitchingEmojiToKeyboard = false;
-  DateTime? _lastLoadMoreConfirmTime;
   bool _showTyping = false;
   bool _isEmojiPanelVisible = false;
   bool _initialScrollPending = true;
@@ -74,6 +70,11 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   int _pageSession = 0;
   final Set<String> _scheduledPlaceholderRepairs = <String>{};
   bool _chatWindowActivated = false;
+  int _lastTotalMessageCount = 0;
+  final Map<String, GlobalKey> _messageKeys = <String, GlobalKey>{};
+  String? _anchorMessageId;
+  double _anchorAlignment = 0;
+  bool _isPagingMessages = false;
 
   /// 当前引用状态
   QuoteState? _quoteState;
@@ -133,6 +134,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   void dispose() {
     _pageSession++;
     _scheduledPlaceholderRepairs.clear();
+    _messageKeys.clear();
     _scrollController.removeListener(_onScroll);
     SettingsService.instance.removeListener(_onSettingsChanged);
     ChatController.instance.unregisterTypingCallback(widget.chatId);
@@ -459,79 +461,135 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     final distanceToBottom = position.maxScrollExtent - position.pixels;
     _isUserNearBottom = distanceToBottom < 120;
 
-    if (position.pixels > 120 && _loadMoreConfirmNeeded) {
-      setState(() {
-        _loadMoreConfirmNeeded = false;
-        _lastLoadMoreConfirmTime = null;
-      });
+    // 首次进入时列表从 offset 0 开始，随后会滚到底部；此时不能把 0
+    // 误判为用户上拉到顶而立即加载历史。
+    if (_initialScrollPending || _isPagingMessages) return;
+
+    if (position.pixels <= 120 &&
+        MessageStore.instance.hasOlderMessages(widget.chatId)) {
+      unawaited(_loadOlderMessages());
+      return;
     }
-
-    if (position.pixels <= 60) {
-      if (!_loadMoreConfirmNeeded) {
-        setState(() {
-          _loadMoreConfirmNeeded = true;
-          _lastLoadMoreConfirmTime = DateTime.now();
-        });
-        return;
-      }
-
-      final confirmAt = _lastLoadMoreConfirmTime;
-      if (confirmAt != null &&
-          DateTime.now().difference(confirmAt) <
-              const Duration(milliseconds: 350)) {
-        return;
-      }
-
-      _loadMoreMessages();
+    if (distanceToBottom <= 120 &&
+        MessageStore.instance.hasNewerMessages(widget.chatId)) {
+      unawaited(_loadNewerMessages());
     }
   }
 
-  Future<void> _loadMoreMessages() async {
+  /// 记录当前视口最上方可见的消息，用于插入/裁剪后恢复滚动位置。
+  void _captureScrollAnchor() {
+    _anchorMessageId = null;
+    if (!_scrollController.hasClients) return;
+    final viewport = _scrollController.position.context.storageContext
+        .findRenderObject();
+    if (viewport is! RenderBox) return;
+    final viewportTop = viewport.localToGlobal(Offset.zero).dy;
+    for (final message in MessageStore.instance.getMessages(widget.chatId)) {
+      final context = _messageKeys[message.id]?.currentContext;
+      if (context == null) continue;
+      final box = context.findRenderObject();
+      if (box is! RenderBox || !box.hasSize || box.size.height <= 0) continue;
+      final top = box.localToGlobal(Offset.zero).dy;
+      if (top + box.size.height <= viewportTop + 1) continue;
+      _anchorMessageId = message.id;
+      _anchorAlignment = ((viewportTop - top) / box.size.height).clamp(
+        0.0,
+        1.0,
+      );
+      return;
+    }
+  }
+
+  /// 已构建消息的平均高度，用于锚点不可见时的滚动位置估算。
+  double _averageRenderedMessageHeight() {
+    var total = 0.0;
+    var count = 0;
+    for (final key in _messageKeys.values) {
+      final context = key.currentContext;
+      if (context == null) continue;
+      final box = context.findRenderObject();
+      if (box is! RenderBox || !box.hasSize || box.size.height <= 0) continue;
+      total += box.size.height;
+      count += 1;
+    }
+    return count == 0 ? 64 : total / count;
+  }
+
+  Future<void> _loadOlderMessages() async {
     if (_isLoadingMoreMessages || !_scrollController.hasClients) return;
+    if (!MessageStore.instance.hasOlderMessages(widget.chatId)) return;
+    await _loadPage(older: true);
+  }
 
-    final residentMessageCount = MessageStore.instance
-        .getMessages(widget.chatId)
-        .length;
-    final hasOlderOnDisk = MessageStore.instance.hasOlderMessages(
-      widget.chatId,
-    );
-    if (_visibleMessageCount >= residentMessageCount && !hasOlderOnDisk) return;
+  Future<void> _loadNewerMessages() async {
+    if (_isLoadingMoreMessages || !_scrollController.hasClients) return;
+    if (!MessageStore.instance.hasNewerMessages(widget.chatId)) return;
+    await _loadPage(older: false);
+  }
 
-    final oldMaxScrollExtent = _scrollController.position.maxScrollExtent;
+  Future<void> _loadPage({required bool older}) async {
+    if (!_scrollController.hasClients) return;
+    _captureScrollAnchor();
     final oldPixels = _scrollController.position.pixels;
+    final averageHeight = _averageRenderedMessageHeight();
 
     setState(() {
       _isLoadingMoreMessages = true;
-      _loadMoreConfirmNeeded = false;
-      _lastLoadMoreConfirmTime = null;
+      _isPagingMessages = true;
     });
 
-    var added = 0;
-    if (_visibleMessageCount < residentMessageCount) {
-      added = _messagePageSize;
-    } else {
-      added = await MessageStore.instance.loadOlderMessages(widget.chatId);
-    }
+    final added = older
+        ? await MessageStore.instance.loadOlderMessages(widget.chatId)
+        : await MessageStore.instance.loadNewerMessages(widget.chatId);
     if (!mounted) return;
-    setState(() {
-      _visibleMessageCount += added;
-      final currentResidentCount = MessageStore.instance
-          .getMessages(widget.chatId)
-          .length;
-      if (_visibleMessageCount > currentResidentCount) {
-        _visibleMessageCount = currentResidentCount;
-      }
-    });
+    if (added == 0) {
+      setState(() {
+        _isLoadingMoreMessages = false;
+        _isPagingMessages = false;
+      });
+      return;
+    }
 
+    // 滑动窗口会卸载另一端；同步清掉已不在窗口内的 GlobalKey，避免
+    // 长时间翻页后 key 表无限增长。
+    final residentIds = MessageStore.instance
+        .getMessages(widget.chatId)
+        .map((message) => message.id)
+        .toSet();
+    _messageKeys.removeWhere((id, _) => !residentIds.contains(id));
+
+    setState(() {});
+
+    // 先按平均高度把视口粗略移到原来的内容附近，再在下一帧用锚点
+    // 精确对齐。这样即使锚点暂时没有被 ListView 构建，也不会跳到列表顶部。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        final newMaxScrollExtent = _scrollController.position.maxScrollExtent;
-        final delta = newMaxScrollExtent - oldMaxScrollExtent;
-        _scrollController.jumpTo(oldPixels + delta);
-      }
-      if (mounted) {
-        setState(() => _isLoadingMoreMessages = false);
-      }
+      if (!mounted || !_scrollController.hasClients) return;
+      final target = older
+          ? oldPixels + added * averageHeight
+          : oldPixels - added * averageHeight;
+      _scrollController.jumpTo(
+        target
+            .clamp(0.0, _scrollController.position.maxScrollExtent)
+            .toDouble(),
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final anchorId = _anchorMessageId;
+        final anchorContext = anchorId == null
+            ? null
+            : _messageKeys[anchorId]?.currentContext;
+        if (anchorContext != null) {
+          Scrollable.ensureVisible(
+            anchorContext,
+            alignment: _anchorAlignment,
+            duration: Duration.zero,
+          );
+        }
+        setState(() {
+          _isLoadingMoreMessages = false;
+          _isPagingMessages = false;
+        });
+      });
     });
   }
 
@@ -539,7 +597,12 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     final hasNewMessages = totalMessagesCount > _lastTotalMessageCount;
     _lastTotalMessageCount = totalMessagesCount;
 
-    if (!hasNewMessages || _isMultiSelectMode || !_isUserNearBottom) return;
+    if (!hasNewMessages ||
+        _isPagingMessages ||
+        _isMultiSelectMode ||
+        !_isUserNearBottom) {
+      return;
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -661,36 +724,23 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   initialData: MessageStore.instance.getMessages(widget.chatId),
                   builder: (context, snapshot) {
                     final messages = snapshot.data ?? [];
-                    final totalMessagesCount = messages.length;
-                    final currentVisibleCount =
-                        totalMessagesCount < _visibleMessageCount
-                        ? totalMessagesCount
-                        : _visibleMessageCount;
-                    final visibleStart =
-                        totalMessagesCount - currentVisibleCount;
                     final visibleMessages = messages
-                        .sublist(visibleStart)
                         .where(_shouldRenderMessage)
                         .toList();
-                    final hasMoreMessages =
-                        totalMessagesCount > currentVisibleCount ||
-                        MessageStore.instance.hasOlderMessages(widget.chatId);
-                    final remainingMessageCount =
-                        MessageStore.instance.getMessageCount(widget.chatId) -
-                        currentVisibleCount;
+                    final hasOlderMessages = MessageStore.instance
+                        .hasOlderMessages(widget.chatId);
+                    final hasNewerMessages = MessageStore.instance
+                        .hasNewerMessages(widget.chatId);
+                    final olderMessageCount = MessageStore.instance
+                        .olderMessageCount(widget.chatId);
+                    final newerMessageCount = MessageStore.instance
+                        .newerMessageCount(widget.chatId);
+                    final totalMessagesCount = MessageStore.instance
+                        .getMessageCount(widget.chatId);
 
-                    if (!hasMoreMessages && _loadMoreConfirmNeeded) {
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (mounted) {
-                          setState(() {
-                            _loadMoreConfirmNeeded = false;
-                            _lastLoadMoreConfirmTime = null;
-                          });
-                        }
-                      });
-                    }
-
-                    if (visibleMessages.isEmpty) {
+                    if (visibleMessages.isEmpty &&
+                        !hasOlderMessages &&
+                        !hasNewerMessages) {
                       return const Center(
                         child: Text(
                           '暂无消息',
@@ -713,11 +763,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                     // Defer network-backed repairs until after this frame.
                     _schedulePlaceholderRepair(visibleMessages);
 
-                    _handleAutoScroll(totalMessagesCount);
+                    if (!_isPagingMessages) {
+                      _handleAutoScroll(totalMessagesCount);
+                    }
 
+                    final topLoaderCount = hasOlderMessages ? 1 : 0;
                     final messageIndices = <String, int>{
                       for (var i = 0; i < visibleMessages.length; i++)
-                        visibleMessages[i].id: i + (hasMoreMessages ? 1 : 0),
+                        visibleMessages[i].id: i + topLoaderCount,
                     };
 
                     return ListView.builder(
@@ -727,18 +780,18 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                       controller: _scrollController,
                       padding: const EdgeInsets.symmetric(vertical: 10),
                       itemCount:
-                          visibleMessages.length + (hasMoreMessages ? 1 : 0),
+                          visibleMessages.length +
+                          topLoaderCount +
+                          (hasNewerMessages ? 1 : 0),
                       itemBuilder: (context, index) {
-                        if (hasMoreMessages && index == 0) {
+                        if (hasOlderMessages && index == 0) {
                           return Padding(
                             padding: const EdgeInsets.only(top: 6, bottom: 10),
                             child: Center(
                               child: Text(
                                 _isLoadingMoreMessages
-                                    ? '正在加载更多消息...'
-                                    : _loadMoreConfirmNeeded
-                                    ? '继续上划，加载更早的 $remainingMessageCount 条消息'
-                                    : '上划查看更早消息（$remainingMessageCount 条）',
+                                    ? '正在加载更早的消息...'
+                                    : '上划查看更早消息（$olderMessageCount 条）',
                                 style: const TextStyle(
                                   color: Color(0xFF999999),
                                   fontSize: 12,
@@ -748,43 +801,65 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                           );
                         }
 
-                        final adjustedIndex = hasMoreMessages
-                            ? index - 1
-                            : index;
+                        if (hasNewerMessages &&
+                            index == topLoaderCount + visibleMessages.length) {
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 10, bottom: 6),
+                            child: Center(
+                              child: Text(
+                                _isLoadingMoreMessages
+                                    ? '正在加载更新消息...'
+                                    : '下滑加载更新消息（$newerMessageCount 条）',
+                                style: const TextStyle(
+                                  color: Color(0xFF999999),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          );
+                        }
+
+                        final adjustedIndex = index - topLoaderCount;
                         final message = visibleMessages[adjustedIndex];
                         final showTime = _shouldShowTime(
                           visibleMessages,
                           adjustedIndex,
                         );
 
-                        return Column(
+                        return KeyedSubtree(
                           key: ValueKey(message.id),
-                          children: [
-                            if (showTime)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 10,
-                                ),
-                                child: Container(
+                          child: Column(
+                            key: _messageKeys.putIfAbsent(
+                              message.id,
+                              () => GlobalKey(),
+                            ),
+                            children: [
+                              if (showTime)
+                                Padding(
                                   padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 4,
+                                    vertical: 10,
                                   ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFCECECE),
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text(
-                                    _formatTime(message.timestamp),
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      color: Colors.white,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFCECECE),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      _formatTime(message.timestamp),
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.white,
+                                      ),
                                     ),
                                   ),
                                 ),
-                              ),
-                            _buildMessageBubble(message),
-                          ],
+                              _buildMessageBubble(message),
+                            ],
+                          ),
                         );
                       },
                     );
@@ -1033,6 +1108,10 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     if (message.hasToolCalls &&
         message.hasRequestId &&
         (role?.showToolCalls ?? false)) {
+      return true;
+    }
+    // 同理，开启「显示思维链」后，无回复消息的思考过程也应可查看。
+    if (message.hasReasoning && (role?.showReasoning ?? false)) {
       return true;
     }
     return role?.showNoReply ?? false;

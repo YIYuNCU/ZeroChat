@@ -13,6 +13,8 @@ pluginManagement {
     repositories {
         // Gradle Plugin Portal is intermittently unreachable on some networks.
         maven(url = "https://maven.aliyun.com/repository/gradle-plugin")
+        // Maven Central is intermittently slow/unreachable on some networks.
+        maven(url = "https://maven.aliyun.com/repository/public")
         // Google Maven is intermittently unreachable on some networks.
         maven(url = "https://maven.aliyun.com/repository/google")
         google()

@@ -43,6 +43,9 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   late Role _currentRole;
   List<String> _backendCoreMemory = [];
 
+  /// 当前角色（[_currentRole.id]）的向量记忆条数，按角色显式读取/刷新。
+  int _vectorMemoryCount = 0;
+
   /// 按 id 倒序排序记忆列表（最新的在最前），不依赖服务端返回顺序
   static List<Map<String, dynamic>> _sortMemoryDesc(
     List<Map<String, dynamic>> list,
@@ -62,6 +65,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   void initState() {
     super.initState();
     _currentRole = widget.currentRole ?? RoleService.getCurrentRole();
+    _vectorMemoryCount = MemoryService.vectorMemoryCountFor(_currentRole.id);
     _loadBackendCoreMemory();
   }
 
@@ -70,6 +74,17 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
     if (!mounted) return;
     setState(() {
       _backendCoreMemory = MemoryService.getCoreMemory(roleId: _currentRole.id);
+      _vectorMemoryCount = MemoryService.vectorMemoryCountFor(_currentRole.id);
+    });
+  }
+
+  /// 用 MemoryService 中当前角色的缓存值刷新向量记忆计数（不触发网络请求）。
+  void _refreshVectorMemoryCountFromCache() {
+    if (!mounted) return;
+    final count = MemoryService.vectorMemoryCountFor(_currentRole.id);
+    if (count == _vectorMemoryCount) return;
+    setState(() {
+      _vectorMemoryCount = count;
     });
   }
 
@@ -235,7 +250,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    '${MemoryService.vectorMemoryCount} 条',
+                    '$_vectorMemoryCount 条',
                     style: const TextStyle(
                       color: Color(0xFF888888),
                       fontSize: 15,
@@ -392,7 +407,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    _currentRole.attachedJsonContent != null
+                    _currentRole.attachedJsonContent?.isNotEmpty == true
                         ? '已导入 (${_currentRole.attachedJsonContent!.length} 字)'
                         : '未导入',
                     style: const TextStyle(
@@ -681,6 +696,14 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
       return;
     }
 
+    final confirm = await _confirmDialog(
+      '恢复跟随全局背景',
+      '确定要移除该角色的专属聊天背景，恢复为跟随全局背景吗？',
+    );
+    if (confirm != true) {
+      return;
+    }
+
     _currentRole = _currentRole.copyWith(chatBackgroundUrl: '');
     await RoleService.updateRole(_currentRole);
     if (!mounted) {
@@ -734,6 +757,11 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                           if (currentMessages.isNotEmpty)
                             TextButton(
                               onPressed: () async {
+                                final confirm = await _confirmDialog(
+                                  '清空聊天记录',
+                                  '确定要清空本会话的所有聊天记录吗？此操作不可恢复。',
+                                );
+                                if (confirm != true) return;
                                 await MessageStore.instance.clearMessages(
                                   widget.chatId,
                                 );
@@ -1439,6 +1467,14 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               };
               await pager.load(more: more, force: true);
               if (!mounted || !context.mounted) return;
+              final serverTotal = pager.totalCount;
+              if (serverTotal != null) {
+                MemoryService.setVectorMemoryCountFor(
+                  _currentRole.id,
+                  serverTotal,
+                );
+              }
+              _refreshVectorMemoryCountFromCache();
               setModalState(() {
                 items = _sortMemoryDesc(pager.items);
                 loading = false;
@@ -1450,6 +1486,8 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
               // 首次构建时触发加载
               reload();
             }
+
+            final totalCount = pager.totalCount ?? items.length;
 
             return DraggableScrollableSheet(
               initialChildSize: 0.6,
@@ -1464,12 +1502,29 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(
-                            '向量记忆 (${items.length} 条)',
-                            style: const TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w500,
-                            ),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '向量记忆 ($totalCount 条)',
+                                style: const TextStyle(
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              if (totalCount > items.length)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Text(
+                                    '已加载 ${items.length}/$totalCount',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF888888),
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                           if (items.isNotEmpty)
                             TextButton(
@@ -1478,12 +1533,12 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                                   '清空向量记忆',
                                   '确定要清空所有向量记忆吗？这将删除 AI 自动生成的语义记忆。',
                                 );
-                                if (confirm == true) {
-                                  await MemoryService.clearVectorMemory(
-                                    roleId: _currentRole.id,
-                                  );
-                                  await reload();
-                                }
+                                if (confirm != true) return;
+                                await MemoryService.clearVectorMemory(
+                                  roleId: _currentRole.id,
+                                );
+                                _refreshVectorMemoryCountFromCache();
+                                await reload();
                               },
                               child: const Text(
                                 '清空',
@@ -1584,6 +1639,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                                                   id,
                                                   roleId: _currentRole.id,
                                                 );
+                                                _refreshVectorMemoryCountFromCache();
                                                 await reload();
                                               },
                                       ),
@@ -1694,6 +1750,11 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                               if (memories.isNotEmpty)
                                 TextButton(
                                   onPressed: () async {
+                                    final confirm = await _confirmDialog(
+                                      '清空核心记忆',
+                                      '确定要清空该角色的所有核心记忆吗？此操作不可恢复。',
+                                    );
+                                    if (confirm != true) return;
                                     await _persistCoreMemory(const <String>[]);
                                     setModalState(() {});
                                     setState(() {});
@@ -2225,35 +2286,16 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   /// 清除外挂 JSON
-  void _clearAttachedJson() async {
-    final updated = _currentRole.copyWith(attachedJsonContent: '');
-    // 设为空字符串后再设为 null
-    final cleared = Role(
-      id: updated.id,
-      name: updated.name,
-      description: updated.description,
-      systemPrompt: updated.systemPrompt,
-      avatarUrl: updated.avatarUrl,
-      aiModel: updated.aiModel,
-      aiApiUrl: updated.aiApiUrl,
-      aiApiKey: updated.aiApiKey,
-      aiTemperature: updated.aiTemperature,
-      gender: updated.gender,
-      menstruationCycle: updated.menstruationCycle,
-      temperature: updated.temperature,
-      topP: updated.topP,
-      frequencyPenalty: updated.frequencyPenalty,
-      presencePenalty: updated.presencePenalty,
-      maxContextRounds: updated.maxContextRounds,
-      maxContextLength: updated.maxContextLength,
-      allowWebSearch: updated.allowWebSearch,
-      coreMemory: updated.coreMemory,
-      summaryEveryNRounds: updated.summaryEveryNRounds,
-      proactiveConfig: updated.proactiveConfig,
-      followupConfig: updated.followupConfig,
-      stickerConfig: updated.stickerConfig,
+  Future<void> _clearAttachedJson() async {
+    final confirm = await _confirmDialog(
+      '清除外挂记录',
+      '确定要清除该角色已导入的外挂记录吗？此操作不可恢复。',
     );
+    if (confirm != true) return;
+    // 使用 copyWith 保留角色的其它全部设置；空字符串表示「未导入」。
+    final cleared = _currentRole.copyWith(attachedJsonContent: '');
     await RoleService.updateRole(cleared);
+    if (!mounted) return;
     setState(() {
       _currentRole = cleared;
     });
@@ -2277,7 +2319,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
                 _importJsonFile();
               },
             ),
-            if (_currentRole.attachedJsonContent != null) ...[
+            if (_currentRole.attachedJsonContent?.isNotEmpty == true) ...[
               ListTile(
                 leading: const Icon(Icons.visibility),
                 title: const Text('查看内容'),

@@ -61,6 +61,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late bool _showStats;
   late bool _showNoReply;
   late bool _showToolCalls;
+  late bool _showReasoning;
   late bool _archived;
 
   @override
@@ -135,6 +136,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _showStats = widget.role.showStats;
     _showNoReply = widget.role.showNoReply;
     _showToolCalls = widget.role.showToolCalls;
+    _showReasoning = widget.role.showReasoning;
     _archived = widget.role.archived;
   }
 
@@ -658,6 +660,13 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                 subtitle: '在气泡下方显示本次回复调用的工具、参数与结果',
                 value: _showToolCalls,
                 onChanged: (v) => setState(() => _showToolCalls = v),
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildSwitchRow(
+                title: '显示思维链',
+                subtitle: '在气泡中展示模型本次回复的思考过程（默认折叠）',
+                value: _showReasoning,
+                onChanged: (v) => setState(() => _showReasoning = v),
               ),
             ],
           ),
@@ -1187,10 +1196,12 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       modelsUrl = modelsUrl.replaceFirst(RegExp(r'/models/?$'), '');
       modelsUrl = modelsUrl.endsWith('/') ? modelsUrl : '$modelsUrl/';
       final parsedModelsUrl = Uri.parse(modelsUrl);
-      final zhipu = parsedModelsUrl.host.toLowerCase() == 'open.bigmodel.cn' ||
+      final zhipu =
+          parsedModelsUrl.host.toLowerCase() == 'open.bigmodel.cn' ||
           parsedModelsUrl.host.toLowerCase() == 'api.z.ai' ||
           parsedModelsUrl.host.toLowerCase().endsWith('.bigmodel.cn');
-      if (!modelsUrl.endsWith('v1/') && !(zhipu && modelsUrl.toLowerCase().contains('/api/paas/v4/'))) {
+      if (!modelsUrl.endsWith('v1/') &&
+          !(zhipu && modelsUrl.toLowerCase().contains('/api/paas/v4/'))) {
         modelsUrl += 'v1/';
       }
       modelsUrl += 'models';
@@ -1236,7 +1247,33 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     }
   }
 
-  void _resetToDefault() {
+  /// 危险操作二次确认（取消 / 红色确认）。
+  Future<bool?> _confirmDestructive(String title, String content) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(content),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确认', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _resetToDefault() async {
+    final confirm = await _confirmDestructive(
+      '重置为默认值',
+      '确定要将上下文设置（最大上下文轮数、最大上下文长度）恢复为默认值吗？',
+    );
+    if (confirm != true || !mounted) return;
     setState(() {
       _maxContextRounds = 60;
       _maxContextLength = 12000;
@@ -1396,6 +1433,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       showStats: _showStats,
       showNoReply: _showNoReply,
       showToolCalls: _showToolCalls,
+      showReasoning: _showReasoning,
       archived: _archived,
     );
     await SettingsService.instance.setSelectedModelProfileForRole(

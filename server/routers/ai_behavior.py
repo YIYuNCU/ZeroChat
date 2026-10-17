@@ -700,6 +700,8 @@ async def _run_memory_ai_pipeline(
         # 工具调用明细已按 request_id 落库，不再随管道结果一并返回；
         # 客户端展开卡片时按需通过独立接口查询。
         "has_tool_calls": bool(result.get("_tool_calls_log")),
+        # 思考链（thinking）内容，供客户端按角色 show_reasoning 展示。
+        "reasoning_content": result.get("reasoning_content"),
     }
 
 def _resolve_vision_uploads(upload_ids: List[str]) -> tuple[List[str], List[Path]]:
@@ -965,6 +967,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             "emojis_called": [] if no_reply else pipeline_result.get("emojis_called", []),
             "no_reply": no_reply,
             "has_tool_calls": pipeline_result.get("has_tool_calls", False),
+            "reasoning_content": pipeline_result.get("reasoning_content"),
         }
     )
 
@@ -1011,6 +1014,7 @@ async def handle_proactive(role: Dict, event: AIEvent) -> AIResponse:
             "request_id": pipeline_result.get("request_id"),
             "has_tool_calls": pipeline_result.get("has_tool_calls", False),
             "no_reply": no_reply,
+            "reasoning_content": pipeline_result.get("reasoning_content"),
         }
     )
 
@@ -1074,6 +1078,7 @@ async def handle_followup(role: Dict, event: AIEvent) -> AIResponse:
             "request_id": pipeline_result.get("request_id"),
             "has_tool_calls": pipeline_result.get("has_tool_calls", False),
             "no_reply": no_reply,
+            "reasoning_content": pipeline_result.get("reasoning_content"),
         }
     )
 
@@ -1150,6 +1155,7 @@ async def handle_task(role: Dict, event: AIEvent) -> AIResponse:
             "request_id": pipeline_result.get("request_id") or request_id,
             "has_tool_calls": pipeline_result.get("has_tool_calls", False),
             "no_reply": no_reply,
+            "reasoning_content": pipeline_result.get("reasoning_content"),
         }
     )
 

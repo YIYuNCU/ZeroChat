@@ -83,6 +83,9 @@ class Role {
   // 是否在聊天界面显示本次回复涉及的工具调用历史（角色独立）
   final bool showToolCalls;
 
+  // 是否在 AI 消息气泡中展示模型思考过程（角色独立，默认关闭）
+  final bool showReasoning;
+
   // 是否已归档：归档后不能对话、不发朋友圈、不发主动消息
   final bool archived;
 
@@ -131,6 +134,7 @@ class Role {
     this.showStats = true,
     this.showNoReply = false,
     this.showToolCalls = false,
+    this.showReasoning = false,
     this.archived = false,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -206,6 +210,7 @@ class Role {
     bool? showStats,
     bool? showNoReply,
     bool? showToolCalls,
+    bool? showReasoning,
     bool? archived,
     DateTime? updatedAt,
   }) {
@@ -259,6 +264,7 @@ class Role {
       showStats: showStats ?? this.showStats,
       showNoReply: showNoReply ?? this.showNoReply,
       showToolCalls: showToolCalls ?? this.showToolCalls,
+      showReasoning: showReasoning ?? this.showReasoning,
       archived: archived ?? this.archived,
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
@@ -373,6 +379,7 @@ class Role {
       showStats: json['show_stats'] as bool? ?? true,
       showNoReply: json['show_no_reply'] as bool? ?? false,
       showToolCalls: json['show_tool_calls'] as bool? ?? false,
+      showReasoning: json['show_reasoning'] as bool? ?? false,
       archived: json['archived'] as bool? ?? false,
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'] as String)
@@ -426,6 +433,7 @@ class Role {
       'show_stats': showStats,
       'show_no_reply': showNoReply,
       'show_tool_calls': showToolCalls,
+      'show_reasoning': showReasoning,
       'archived': archived,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),

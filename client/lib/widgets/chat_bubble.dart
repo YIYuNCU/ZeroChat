@@ -158,6 +158,7 @@ class ChatBubble extends StatelessWidget {
     if (message.hasToolCalls && message.hasRequestId && _showToolCallsCard) {
       return false;
     }
+    if (_showReasoningCard) return false;
     return !(RoleService.getRoleById(message.senderId)?.showNoReply ?? false);
   }
 
@@ -237,12 +238,20 @@ class ChatBubble extends StatelessWidget {
             _buildQuoteBlock(),
             const SizedBox(height: 6),
           ],
+          // 思考过程（角色开启「显示思维链」时展示，默认折叠）
+          if (_showReasoningCard) ...[
+            _ThinkingChainCard(reasoning: message.reasoningContent!),
+            const SizedBox(height: 6),
+          ],
           // 正文按标签的原始顺序逐片段渲染。
           ..._buildBodyParts(),
           // 工具调用历史（角色开启「显示工具调用历史」且本条消息携带记录时展示）
           if (_showToolCallsCard) ...[
             const SizedBox(height: 6),
-            _ToolCallsCard(roleId: message.senderId, requestId: message.requestId!),
+            _ToolCallsCard(
+              roleId: message.senderId,
+              requestId: message.requestId!,
+            ),
           ],
         ],
       ),
@@ -256,6 +265,12 @@ class ChatBubble extends StatelessWidget {
       return false;
     }
     return RoleService.getRoleById(message.senderId)?.showToolCalls ?? false;
+  }
+
+  /// 是否显示思考过程卡片：仅 AI 消息、角色开启该设置、且本条消息有内容。
+  bool get _showReasoningCard {
+    if (isSender || !message.hasReasoning) return false;
+    return RoleService.getRoleById(message.senderId)?.showReasoning ?? false;
   }
 
   /// 构建消息正文各片段（对话/动作/声音/心理/事实/数值）。
@@ -1024,6 +1039,84 @@ class _TransferStickerContentState extends State<_TransferStickerContent> {
   }
 }
 
+/// 思考过程卡片：默认折叠，展开后直接展示该条 AI 回复的推理文本。
+class _ThinkingChainCard extends StatefulWidget {
+  final String reasoning;
+
+  const _ThinkingChainCard({required this.reasoning});
+
+  @override
+  State<_ThinkingChainCard> createState() => _ThinkingChainCardState();
+}
+
+class _ThinkingChainCardState extends State<_ThinkingChainCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF4F1FA),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0xFFE4DDF2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.psychology_outlined,
+                    size: 14,
+                    color: Color(0xFF6A5A8C),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    _expanded ? '收起思考过程' : '思考过程',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF6A5A8C),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 16,
+                    color: const Color(0xFF6A5A8C),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 240),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                child: Text(
+                  widget.reasoning,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    height: 1.45,
+                    color: Color(0xFF555555),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 工具调用历史卡片：默认折叠，仅显示入口。点击展开时才向服务端按需查询
 /// 该次回复的工具调用明细（首次查询后本地缓存，见 [ToolCallService]）。
 class _ToolCallsCard extends StatefulWidget {
@@ -1086,10 +1179,7 @@ class _ToolCallsCardState extends State<_ToolCallsCard> {
             borderRadius: BorderRadius.circular(6),
             onTap: _toggleExpanded,
             child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 8,
-                vertical: 6,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1188,10 +1278,7 @@ class _ToolCallsCardState extends State<_ToolCallsCard> {
               padding: const EdgeInsets.only(top: 2),
               child: Text(
                 argumentsText,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF888888),
-                ),
+                style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
               ),
             ),
           if (result.isNotEmpty)
@@ -1199,10 +1286,7 @@ class _ToolCallsCardState extends State<_ToolCallsCard> {
               padding: const EdgeInsets.only(top: 2),
               child: Text(
                 result,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF4F7892),
-                ),
+                style: const TextStyle(fontSize: 12, color: Color(0xFF4F7892)),
               ),
             ),
         ],

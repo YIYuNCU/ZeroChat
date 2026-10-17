@@ -48,11 +48,15 @@ class _AiReply {
   // 本次回复生成过程中是否发生过工具调用（明细按需查询，这里只是入口开关）
   final bool hasToolCalls;
 
+  // 模型思考过程（可能为空；是否展示由角色 showReasoning 决定）
+  final String? reasoning;
+
   const _AiReply(
     this.content,
     this.emojisCalled, [
     this.requestId,
     this.hasToolCalls = false,
+    this.reasoning,
   ]);
 }
 
@@ -1026,6 +1030,7 @@ class ChatController extends ChangeNotifier {
         toolEmotions: rawReply.emojisCalled,
         requestId: rawReply.requestId,
         hasToolCalls: rawReply.hasToolCalls,
+        reasoning: rawReply.reasoning,
       );
     }
 
@@ -1120,6 +1125,7 @@ class ChatController extends ChangeNotifier {
             toolEmotions: rawReply.emojisCalled,
             requestId: rawReply.requestId,
             hasToolCalls: rawReply.hasToolCalls,
+            reasoning: rawReply.reasoning,
           );
           anySpokeInRound = true;
           if (MessageParts.isNoReplyDirective(rawReply.content)) {
@@ -1324,6 +1330,7 @@ class ChatController extends ChangeNotifier {
         toolEmotions: _extractToolEmotions(metadata),
         requestId: metadata?['request_id']?.toString(),
         hasToolCalls: _extractHasToolCalls(metadata),
+        reasoning: _extractReasoning(metadata),
       );
       debugPrint('ChatController: recovered reply stored for task $taskId');
 
@@ -1419,6 +1426,11 @@ class ChatController extends ChangeNotifier {
 
   bool _extractHasToolCalls(Map<String, dynamic>? metadata) {
     return metadata?['has_tool_calls'] as bool? ?? false;
+  }
+
+  String? _extractReasoning(Map<String, dynamic>? metadata) {
+    final value = metadata?['reasoning_content']?.toString().trim();
+    return value == null || value.isEmpty ? null : value;
   }
 
   List<dynamic> _extractToolEmotions(Map<String, dynamic>? metadata) {
@@ -1687,6 +1699,7 @@ class ChatController extends ChangeNotifier {
         _extractToolEmotions(submitResponse.metadata),
         submitResponse.metadata?['request_id']?.toString(),
         _extractHasToolCalls(submitResponse.metadata),
+        _extractReasoning(submitResponse.metadata),
       );
     }
 
@@ -1746,6 +1759,7 @@ class ChatController extends ChangeNotifier {
             _extractToolEmotions(metadata),
             metadata?['request_id']?.toString(),
             _extractHasToolCalls(metadata),
+            _extractReasoning(metadata),
           );
         }
 
@@ -1804,6 +1818,7 @@ class ChatController extends ChangeNotifier {
                     _extractToolEmotions(metadata),
                     metadata?['request_id']?.toString(),
                     _extractHasToolCalls(metadata),
+                    _extractReasoning(metadata),
                   );
                 }
               }
@@ -1876,6 +1891,7 @@ class ChatController extends ChangeNotifier {
     List<dynamic> toolEmotions = const <dynamic>[],
     String? requestId,
     bool hasToolCalls = false,
+    String? reasoning,
   }) async {
     final segments = SegmentSender.splitMessage(rawReply);
     final availableEmojiCategories = await _loadAvailableEmojiCategories(
@@ -1929,6 +1945,7 @@ class ChatController extends ChangeNotifier {
         // 每个分段消息都重复展示同一份调用历史入口。
         requestId: isLast ? requestId : null,
         hasToolCalls: isLast && hasToolCalls,
+        reasoningContent: isLast ? reasoning : null,
       );
 
       await MessageStore.instance.addMessage(chatId, aiMessage);

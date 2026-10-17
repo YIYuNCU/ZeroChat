@@ -8,13 +8,18 @@ import 'package:zerochat/services/role_service.dart';
 import 'package:zerochat/services/storage_service.dart';
 import 'package:zerochat/widgets/chat_bubble.dart';
 
-Message _message(String content, {String senderId = 'role-1'}) {
+Message _message(
+  String content, {
+  String senderId = 'role-1',
+  String? reasoning,
+}) {
   return Message(
     id: 'message-1',
     senderId: senderId,
     receiverId: 'me',
     content: content,
     timestamp: DateTime(2026, 7, 14),
+    reasoningContent: reasoning,
   );
 }
 
@@ -40,6 +45,13 @@ void main() {
         name: 'AI',
         systemPrompt: 'test',
         showNoReply: true,
+      ).toJson(),
+      Role(
+        id: 'role-2',
+        name: 'AI-reasoning',
+        systemPrompt: 'test',
+        showNoReply: true,
+        showReasoning: true,
       ).toJson(),
     ]);
     await StorageService.setString(StorageService.keyCurrentRoleId, 'role-1');
@@ -134,5 +146,62 @@ void main() {
 
     expect(find.text('无回复'), findsNothing);
     expect(find.byIcon(Icons.notifications_off_outlined), findsNothing);
+  });
+
+  testWidgets('thinking chain is hidden when the role setting is disabled', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _bubble(_message('回复内容', reasoning: '先分析再回答'), isSender: false),
+    );
+
+    expect(find.text('思考过程'), findsNothing);
+    expect(find.text('先分析再回答'), findsNothing);
+    expect(find.text('回复内容'), findsOneWidget);
+  });
+
+  testWidgets('thinking chain expands for roles that enable it', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _bubble(
+        _message('回复内容', senderId: 'role-2', reasoning: '先分析再回答'),
+        isSender: false,
+      ),
+    );
+
+    expect(find.text('思考过程'), findsOneWidget);
+    expect(find.text('先分析再回答'), findsNothing);
+
+    await tester.tap(find.text('思考过程'));
+    await tester.pump();
+
+    expect(find.text('先分析再回答'), findsOneWidget);
+    expect(find.text('收起思考过程'), findsOneWidget);
+
+    await tester.tap(find.text('收起思考过程'));
+    await tester.pump();
+    expect(find.text('先分析再回答'), findsNothing);
+  });
+
+  testWidgets('no-reply message with reasoning is not fully hidden', (
+    tester,
+  ) async {
+    final role = RoleService.getRoleById('role-2')!;
+    await RoleService.updateRoleLocal(role.copyWith(showNoReply: false));
+
+    await tester.pumpWidget(
+      _bubble(
+        _message(
+          MessageParts.noReplyDirective,
+          senderId: 'role-2',
+          reasoning: '判断后决定不回复',
+        ),
+        isSender: false,
+      ),
+    );
+
+    expect(find.text('思考过程'), findsOneWidget);
+    expect(find.text('无回复'), findsNothing);
   });
 }

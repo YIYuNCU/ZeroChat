@@ -108,6 +108,11 @@ def create_scheduler_event_handler(logger):
                             # AI 回复内容可对应，此时不应关联 request_id。
                             request_id=(metadata.get("request_id") if content else None),
                             has_tool_calls=bool(metadata.get("has_tool_calls")) if content else False,
+                            # 与 request_id 同一判定：占位提醒文案没有真实 AI 回复，
+                            # 不能把上一轮/空思考链挂到这条消息上。
+                            reasoning_content=(
+                                metadata.get("reasoning_content") if content else None
+                            ),
                         ),
                     )
                     await publish_server_push(
@@ -136,6 +141,7 @@ def create_scheduler_event_handler(logger):
                             # （例如无回复续写本身链式再触发的 continue_if_no_reply）。
                             request_id=metadata.get("request_id"),
                             has_tool_calls=bool(metadata.get("has_tool_calls")),
+                            reasoning_content=metadata.get("reasoning_content"),
                         ),
                     )
                     # 复用 proactive_message 推送类型（客户端已按其拉取会话快照）

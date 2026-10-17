@@ -17,6 +17,10 @@ class MemoryPageSession {
   String? version;
   int? cursor;
   bool hasMore = false;
+
+  /// 服务端返回的总条数（分页响应中的 `count`）。
+  /// 与 [items] 不同：多页加载时 [items] 只包含已加载的行，而这里是完整总数。
+  int? totalCount;
   bool busy = false;
   String? error;
   void Function()? onCached;
@@ -46,16 +50,22 @@ class MemoryPageSession {
                   version = page['version']?.toString();
                   cursor = page['next_cursor'] as int?;
                   hasMore = page['has_more'] == true;
+                  totalCount = MemoryService.mergePageTotalCount(
+                    totalCount,
+                    page,
+                  );
                   onCached?.call();
                 }
               },
       );
+      totalCount = MemoryService.mergePageTotalCount(totalCount, page);
       if (page['reset_required'] == true) {
         page = await MemoryService.readMemoryPage(
           roleId: roleId,
           vector: vector,
           force: true,
         );
+        totalCount = MemoryService.mergePageTotalCount(totalCount, page);
         more = false;
       }
       final rows = (page[vector ? 'items' : 'short_term'] as List)
@@ -67,6 +77,7 @@ class MemoryPageSession {
       version = page['version']?.toString();
       cursor = page['next_cursor'] as int?;
       hasMore = page['has_more'] == true;
+      totalCount = MemoryService.mergePageTotalCount(totalCount, page);
       error = null;
     } catch (e) {
       error = '同步失败，已保留现有记忆，可重试';
@@ -100,6 +111,29 @@ class MemoryService {
     onCached: onCached,
   );
 
+  /// 解析分页响应中的服务端总数（`count`）。
+  /// 缺失或非法时返回 null，调用方应保留上一次已知的总数。
+  @visibleForTesting
+  static int? pageTotalCount(Map<String, dynamic>? page) {
+    final raw = page?['count'];
+    if (raw is int) return raw >= 0 ? raw : null;
+    if (raw is num) {
+      final value = raw.toInt();
+      return value >= 0 ? value : null;
+    }
+    if (raw is String) {
+      final value = int.tryParse(raw.trim());
+      return value != null && value >= 0 ? value : null;
+    }
+    return null;
+  }
+
+  /// 合并分页总数：新页返回非空 `count` 时覆盖旧值，否则保留旧值。
+  /// 多页加载时服务端每一页都会带总数，因此以最新非空值为准。
+  @visibleForTesting
+  static int? mergePageTotalCount(int? current, Map<String, dynamic>? page) =>
+      pageTotalCount(page) ?? current;
+
   /// 短期记忆：按会话ID存储的对话历史
   static final Map<String, Map<String, List<Message>>> _localShortTermByScope =
       {};
@@ -120,12 +154,22 @@ class MemoryService {
   static set _coreMemory(List<String> value) =>
       _coreByRole[_coreKey(RoleService.currentRoleId)] = value;
 
-  /// 向量记忆数量（后端向量记忆库）
+  /// 向量记忆数量（后端向量记忆库），按 roleId 隔离缓存。
   static final Map<String, int> _vectorCounts = {};
+
+  /// 读取指定角色的向量记忆数量。
+  static int vectorMemoryCountFor(String roleId) =>
+      _vectorCounts[_coreKey(roleId)] ?? 0;
+
+  /// 写入指定角色的向量记忆数量（只影响该角色，不依赖全局当前角色）。
+  static void setVectorMemoryCountFor(String roleId, int count) =>
+      _vectorCounts[_coreKey(roleId)] = count;
+
+  /// 当前全局角色的向量记忆数量（兼容旧调用方，内部走显式 roleId API）。
   static int get vectorMemoryCount =>
-      _vectorCounts[_coreKey(RoleService.currentRoleId)] ?? 0;
+      vectorMemoryCountFor(RoleService.currentRoleId);
   static set vectorMemoryCount(int value) =>
-      _vectorCounts[_coreKey(RoleService.currentRoleId)] = value;
+      setVectorMemoryCountFor(RoleService.currentRoleId, value);
 
   /// 短期记忆的最大条数（每个会话）
   static int maxShortTermSize = 100;
@@ -237,13 +281,15 @@ class MemoryService {
         memories = [];
       }
       _coreByRole[key] = memories;
-      // 读取向量记忆数量
-      if (response['vector_memory_count'] is int) {
-        _vectorCounts[key] = response['vector_memory_count'] as int;
+      // 读取向量记忆数量（必须写回请求的 rid，而不是全局当前角色）
+      final rawVectorCount = response['vector_memory_count'];
+      if (rawVectorCount is int) {
+        setVectorMemoryCountFor(rid, rawVectorCount);
       }
       await StorageService.setStringList(key, memories);
       debugPrint(
-        'MemoryService: Core memory refreshed from backend for role $rid, vector memories: $vectorMemoryCount',
+        'MemoryService: Core memory refreshed from backend for role $rid, '
+        'vector memories: ${vectorMemoryCountFor(rid)}',
       );
     } catch (e) {
       debugPrint('MemoryService: Refresh core memory from backend failed: $e');
@@ -482,12 +528,19 @@ class MemoryService {
         {'role_id': rid},
       );
       final items = response['items'];
+      final serverCount = pageTotalCount(response);
+      if (serverCount != null) {
+        setVectorMemoryCountFor(rid, serverCount);
+      }
       if (items is List) {
         final list = items
             .whereType<Map>()
             .map((e) => Map<String, dynamic>.from(e))
             .toList();
-        vectorMemoryCount = list.length;
+        // 服务端未返回总数字段时退回已加载条数（非分页响应的 count 即列表长度）
+        if (serverCount == null) {
+          setVectorMemoryCountFor(rid, list.length);
+        }
         return list;
       }
       return [];
@@ -506,8 +559,9 @@ class MemoryService {
         {'role_id': rid, 'memory_id': memoryId},
       );
       final bool success = response['success'] == true;
-      if (response['vector_memory_count'] is int) {
-        vectorMemoryCount = response['vector_memory_count'] as int;
+      final rawCount = response['vector_memory_count'];
+      if (rawCount is int) {
+        setVectorMemoryCountFor(rid, rawCount);
       }
       return success;
     } catch (e) {
@@ -545,7 +599,7 @@ class MemoryService {
       );
       final bool success = response['success'] == true;
       if (success) {
-        _vectorCounts[_coreKey(roleId)] = 0;
+        setVectorMemoryCountFor(roleId, 0);
       }
       debugPrint('MemoryService: Vector memory cleared for role $roleId');
       return success;

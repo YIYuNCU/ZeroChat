@@ -33,12 +33,20 @@ class MessageStore extends ChangeNotifier {
   final Map<String, int> _messageCounts = {};
   final Set<String> _knownChatIds = {};
   final Map<String, int> _activeChatWindowCounts = <String, int>{};
-  final Set<String> _expandedChatWindows = {};
+
+  /// 每个聊天当前驻留窗口在完整归档中的起始下标。
+  final Map<String, int> _windowStarts = <String, int>{};
   final Map<String, Future<void>> _loadingFutures = {};
   String? _archiveDirectoryPath;
 
-  static const int residentMessageLimit = 200;
-  static const int historyPageSize = 50;
+  /// 首次进入聊天时加载的消息数。
+  static const int initialResidentMessageLimit = 200;
+
+  /// 同时驻留内存的消息上限；超过后按滑动窗口卸载另一端。
+  static const int residentMessageLimit = 400;
+
+  /// 单次上拉/下拉加载的消息数。
+  static const int historyPageSize = 200;
   static const String _archiveChatIdsKey = 'message_store_archive_chat_ids_v1';
   static const String _archiveCountsKey = 'message_store_archive_counts_v1';
 
@@ -89,7 +97,7 @@ class MessageStore extends ChangeNotifier {
       _knownChatIds.clear();
       _unreadCounts.clear();
       _activeChatWindowCounts.clear();
-      _expandedChatWindows.clear();
+      _windowStarts.clear();
       _archiveDirectoryPath = null;
       _cachedHash = null;
       _hashRevision = -1;
@@ -243,14 +251,25 @@ class MessageStore extends ChangeNotifier {
       if (!_messages.containsKey(chatId)) {
         await _loadMessages(chatId);
       }
-      _messages[chatId]!.add(messageToStore);
-      _trimResidentMessages(chatId);
+      // 窗口不在最新端时，新消息只写入归档；只有用户自己发出的消息才需要
+      // 立即贴回最新端（否则用户看不到刚发的内容）。其它来源的新消息
+      // （例如 AI 主动消息）不应把正在看历史的用户强行拽回列表末尾。
+      final wasAtLatest = !hasNewerMessages(chatId);
+      final followLatest = messageToStore.senderId == 'me';
+      if (wasAtLatest) {
+        _messages[chatId]!.add(messageToStore);
+        _trimResidentMessages(chatId);
+      }
       _lastMessages[chatId] = messageToStore;
       _localMessageRevision += 1;
       await _appendMessagesToArchive(chatId, [messageToStore]);
+      if (!wasAtLatest && followLatest) {
+        await _reloadResidentTail(chatId);
+      }
       _notifyMessageUpdate(chatId);
       if (!_activeChatWindowCounts.containsKey(chatId)) {
         _messages.remove(chatId);
+        _windowStarts.remove(chatId);
       }
     });
     debugPrint(
@@ -277,14 +296,24 @@ class MessageStore extends ChangeNotifier {
       if (!_messages.containsKey(chatId)) {
         await _loadMessages(chatId);
       }
-      _messages[chatId]!.addAll(messagesToStore);
-      _trimResidentMessages(chatId);
+      final wasAtLatest = !hasNewerMessages(chatId);
+      final followLatest = messagesToStore.any(
+        (message) => message.senderId == 'me',
+      );
+      if (wasAtLatest) {
+        _messages[chatId]!.addAll(messagesToStore);
+        _trimResidentMessages(chatId);
+      }
       _lastMessages[chatId] = messagesToStore.last;
       _localMessageRevision += 1;
       await _appendMessagesToArchive(chatId, messagesToStore);
+      if (!wasAtLatest && followLatest) {
+        await _reloadResidentTail(chatId);
+      }
       _notifyMessageUpdate(chatId);
       if (!_activeChatWindowCounts.containsKey(chatId)) {
         _messages.remove(chatId);
+        _windowStarts.remove(chatId);
       }
     });
     for (final message in messagesToStore) {
@@ -300,14 +329,15 @@ class MessageStore extends ChangeNotifier {
       if (messages == null) return false;
       final existed = messages.any((message) => message.id == messageId);
       if (!existed) return false;
+      final wasAtLatest = !hasNewerMessages(chatId);
       messages.removeWhere((m) => m.id == messageId);
-      if (messages.isEmpty) {
-        _lastMessages.remove(chatId);
-      } else {
-        _lastMessages[chatId] = messages.last;
-      }
       _localMessageRevision += 1;
       await _removeArchivedMessage(chatId, messageId);
+      if (messages.isEmpty) {
+        await _reloadResidentTail(chatId);
+      } else if (wasAtLatest) {
+        _lastMessages[chatId] = messages.last;
+      }
       _notifyMessageUpdate(chatId);
       return true;
     });
@@ -520,15 +550,42 @@ class MessageStore extends ChangeNotifier {
     return messages.sublist(start);
   }
 
-  /// 获取消息数量
+  /// 获取消息数量（完整归档，不只是驻留窗口）。
   int getMessageCount(String chatId) {
     return _messageCounts[chatId] ?? _messages[chatId]?.length ?? 0;
   }
 
-  bool hasOlderMessages(String chatId) {
-    return getMessageCount(chatId) > (_messages[chatId]?.length ?? 0);
+  /// 当前驻留窗口在完整归档中的起始下标。
+  int _windowStart(String chatId) {
+    final total = getMessageCount(chatId);
+    final residentLength = _messages[chatId]?.length ?? 0;
+    final explicit = _windowStarts[chatId];
+    final start = explicit ?? (total - residentLength);
+    return start.clamp(0, total).toInt();
   }
 
+  /// 窗口之前、尚未加载到内存的消息数。
+  int olderMessageCount(String chatId) {
+    return _windowStart(chatId);
+  }
+
+  /// 窗口之后、尚未加载到内存的消息数。
+  int newerMessageCount(String chatId) {
+    final total = getMessageCount(chatId);
+    final end = _windowStart(chatId) + (_messages[chatId]?.length ?? 0);
+    return (total - end).clamp(0, total).toInt();
+  }
+
+  bool hasOlderMessages(String chatId) {
+    return olderMessageCount(chatId) > 0;
+  }
+
+  bool hasNewerMessages(String chatId) {
+    return newerMessageCount(chatId) > 0;
+  }
+
+  /// 上拉加载更早的消息。窗口始终连续；如果总长度超过上限，
+  /// 会卸载最新的一端，形成向历史方向滑动的窗口。
   Future<int> loadOlderMessages(
     String chatId, {
     int count = historyPageSize,
@@ -536,38 +593,106 @@ class MessageStore extends ChangeNotifier {
     await ensureLoaded(chatId);
     return _withArchiveMutation(() async {
       final resident = _messages[chatId];
-      if (resident == null) return 0;
-      if (resident.isEmpty) return 0;
+      if (resident == null || resident.isEmpty) return 0;
 
-      final firstResidentIndex = getMessageCount(chatId) - resident.length;
-      if (firstResidentIndex <= 0) return 0;
+      final windowStart = _windowStart(chatId);
+      if (windowStart <= 0) return 0;
 
-      final start = (firstResidentIndex - count)
-          .clamp(0, firstResidentIndex)
-          .toInt();
+      final start = (windowStart - count).clamp(0, windowStart).toInt();
       final page = await MessageArchiveService.read(
         (await _archiveFile(chatId)).path,
         start: start,
-        count: firstResidentIndex - start,
+        count: windowStart - start,
       );
       final older = page.messages;
       if (!identical(_messages[chatId], resident)) return 0;
-      if (older.isNotEmpty) _expandedChatWindows.add(chatId);
+      if (older.isEmpty) return 0;
+
       resident.insertAll(0, older);
+      _windowStarts[chatId] = start;
+      final overflow = resident.length - residentMessageLimit;
+      if (overflow > 0) {
+        resident.removeRange(resident.length - overflow, resident.length);
+      }
       _notifyMessageUpdate(chatId);
       return older.length;
     });
   }
 
+  /// 下拉加载更新的消息。如果总长度超过上限，会卸载最旧的一端。
+  Future<int> loadNewerMessages(
+    String chatId, {
+    int count = historyPageSize,
+  }) async {
+    await ensureLoaded(chatId);
+    return _withArchiveMutation(() async {
+      final resident = _messages[chatId];
+      if (resident == null) return 0;
+
+      final total = getMessageCount(chatId);
+      if (resident.isEmpty) {
+        await _reloadResidentTail(chatId);
+        _notifyMessageUpdate(chatId);
+        return _messages[chatId]?.length ?? 0;
+      }
+
+      final windowStart = _windowStart(chatId);
+      final end = windowStart + resident.length;
+      if (end >= total) return 0;
+
+      final pageEnd = (end + count).clamp(end, total).toInt();
+      final page = await MessageArchiveService.read(
+        (await _archiveFile(chatId)).path,
+        start: end,
+        count: pageEnd - end,
+      );
+      final newer = page.messages;
+      if (!identical(_messages[chatId], resident)) return 0;
+      if (newer.isEmpty) return 0;
+
+      resident.addAll(newer);
+      _windowStarts[chatId] = windowStart;
+      final overflow = resident.length - residentMessageLimit;
+      if (overflow > 0) {
+        resident.removeRange(0, overflow);
+        _windowStarts[chatId] = windowStart + overflow;
+      }
+      if (_windowStart(chatId) + resident.length >= total &&
+          resident.isNotEmpty) {
+        _lastMessages[chatId] = resident.last;
+      }
+      _notifyMessageUpdate(chatId);
+      return newer.length;
+    });
+  }
+
+  Future<void> _reloadResidentTail(
+    String chatId, {
+    int limit = residentMessageLimit,
+  }) async {
+    final page = await MessageArchiveService.read(
+      (await _archiveFile(chatId)).path,
+      count: limit,
+    );
+    _messages[chatId] = page.messages;
+    _messageCounts[chatId] = page.total;
+    _windowStarts[chatId] = page.total - page.messages.length;
+    if (page.messages.isEmpty) {
+      _lastMessages.remove(chatId);
+    } else {
+      _lastMessages[chatId] = page.messages.last;
+    }
+  }
+
   void releaseChatWindow(String chatId) {
     final count = _activeChatWindowCounts[chatId] ?? 0;
-    if (count <= 1) _expandedChatWindows.remove(chatId);
     if (count > 1) {
       _activeChatWindowCounts[chatId] = count - 1;
       return;
     }
     _activeChatWindowCounts.remove(chatId);
     _messages.remove(chatId);
+    _windowStarts.remove(chatId);
     final streamController = _streamControllers.remove(chatId);
     if (streamController != null) {
       unawaited(streamController.close());
@@ -579,12 +704,12 @@ class MessageStore extends ChangeNotifier {
         (_activeChatWindowCounts[chatId] ?? 0) + 1;
   }
 
-  /// 获取最后一条消息
+  /// 获取最后一条消息。窗口可能停留在历史位置，此时以归档末尾索引为准。
   Message? getLastMessage(String chatId) {
+    final last = _lastMessages[chatId];
+    if (last != null) return last;
     final messages = _messages[chatId];
-    return messages != null && messages.isNotEmpty
-        ? messages.last
-        : _lastMessages[chatId];
+    return messages != null && messages.isNotEmpty ? messages.last : null;
   }
 
   /// 清空指定聊天的消息
@@ -592,6 +717,7 @@ class MessageStore extends ChangeNotifier {
     _messages[chatId]?.clear();
     _lastMessages.remove(chatId);
     _messageCounts[chatId] = 0;
+    _windowStarts[chatId] = 0;
     _knownChatIds.add(chatId);
     _localMessageRevision += 1;
     await _withArchiveMutation(
@@ -606,6 +732,7 @@ class MessageStore extends ChangeNotifier {
       _messages.remove(chatId);
       _lastMessages.remove(chatId);
       _messageCounts.remove(chatId);
+      _windowStarts.remove(chatId);
       _knownChatIds.remove(chatId);
       _unreadCounts.remove(chatId);
       _localMessageRevision += 1;
@@ -643,6 +770,7 @@ class MessageStore extends ChangeNotifier {
       _messageCounts.clear();
       _knownChatIds.clear();
       _unreadCounts.clear();
+      _windowStarts.clear();
       _localMessageRevision += 1;
 
       final cachedDirectoryPath = _archiveDirectoryPath;
@@ -740,7 +868,7 @@ class MessageStore extends ChangeNotifier {
     final file = await _archiveFile(chatId);
     var page = await MessageArchiveService.read(
       file.path,
-      count: residentMessageLimit,
+      count: initialResidentMessageLimit,
     );
     if (page.total == 0 && !await file.exists()) {
       final legacy = await _readLegacyMessages(chatId);
@@ -755,6 +883,7 @@ class MessageStore extends ChangeNotifier {
     _knownChatIds.add(chatId);
     _messageCounts[chatId] = page.total;
     _messages[chatId] = page.messages;
+    _windowStarts[chatId] = page.total - page.messages.length;
     if (page.messages.isNotEmpty) {
       _lastMessages[chatId] = page.messages.last;
     } else {
@@ -876,20 +1005,20 @@ class MessageStore extends ChangeNotifier {
 
   List<Message> _residentTail(
     List<Message> archive, {
-    int limit = residentMessageLimit,
+    int limit = initialResidentMessageLimit,
   }) {
     final start = archive.length > limit ? archive.length - limit : 0;
     return List<Message>.from(archive.sublist(start));
   }
 
+  /// 新消息追加到末尾后，从最旧的一端卸载超出上限的消息。
   void _trimResidentMessages(String chatId) {
-    if (_expandedChatWindows.contains(chatId) &&
-        _activeChatWindowCounts.containsKey(chatId)) {
-      return;
-    }
     final resident = _messages[chatId];
     if (resident == null || resident.length <= residentMessageLimit) return;
-    resident.removeRange(0, resident.length - residentMessageLimit);
+    final currentStart = _windowStart(chatId);
+    final removeCount = resident.length - residentMessageLimit;
+    resident.removeRange(0, removeCount);
+    _windowStarts[chatId] = currentStart + removeCount;
   }
 
   Future<void> _persistArchiveIndex() async {
@@ -1011,6 +1140,7 @@ class MessageStore extends ChangeNotifier {
                     map['quote_content']?.toString(),
                 requestId: map['request_id']?.toString(),
                 hasToolCalls: map['has_tool_calls'] as bool? ?? false,
+                reasoningContent: map['reasoning_content']?.toString(),
               ),
             );
           }
@@ -1043,6 +1173,7 @@ class MessageStore extends ChangeNotifier {
                     message.id.contains('_followup')),
           );
           final newUnreadCount = newBackgroundMessages.length;
+          final previousTotal = getMessageCount(chatId);
           await _writeArchivedMessages(chatId, messages);
           if (messages.isNotEmpty) {
             _lastMessages[chatId] = messages.last;
@@ -1050,18 +1181,28 @@ class MessageStore extends ChangeNotifier {
             _lastMessages.remove(chatId);
           }
           if (_activeChatWindowCounts.containsKey(chatId)) {
-            final previousWindowSize =
-                _messages[chatId]?.length ?? residentMessageLimit;
-            _messages[chatId] = _residentTail(
-              messages,
-              limit:
-                  _expandedChatWindows.contains(chatId) &&
-                      previousWindowSize > residentMessageLimit
-                  ? previousWindowSize
-                  : residentMessageLimit,
-            );
+            final previousStart = _windowStarts[chatId];
+            final previousLength = _messages[chatId]?.length ?? 0;
+            final previousWasAtLatest =
+                previousStart == null ||
+                previousStart + previousLength >= previousTotal;
+            if (previousWasAtLatest || previousLength == 0) {
+              final limit = previousLength > initialResidentMessageLimit
+                  ? previousLength
+                  : initialResidentMessageLimit;
+              final tail = _residentTail(messages, limit: limit);
+              _messages[chatId] = tail;
+              _windowStarts[chatId] = messages.length - tail.length;
+            } else {
+              final total = messages.length;
+              final start = previousStart.clamp(0, total).toInt();
+              final end = (start + previousLength).clamp(start, total).toInt();
+              _messages[chatId] = messages.sublist(start, end);
+              _windowStarts[chatId] = start;
+            }
           } else {
             _messages.remove(chatId);
+            _windowStarts.remove(chatId);
           }
           if (messages.isNotEmpty) {
             final lastMessage = messages.last;
@@ -1173,7 +1314,16 @@ class MessageStore extends ChangeNotifier {
       for (final message in serverMessages) message.id: message,
     };
     for (final message in localMessages) {
-      if (message.sendStatus != MessageSendStatus.sent) {
+      final serverMessage = merged[message.id];
+      if (serverMessage != null) {
+        // 服务端旧记录可能还没有 reasoning_content；本地刚生成、尚未完成
+        // 服务端持久化的消息不应因为一次快照同步丢掉思考过程。
+        if (!serverMessage.hasReasoning && message.hasReasoning) {
+          merged[message.id] = serverMessage.copyWith(
+            reasoningContent: message.reasoningContent,
+          );
+        }
+      } else if (message.sendStatus != MessageSendStatus.sent) {
         merged.putIfAbsent(message.id, () => message);
       }
     }
@@ -1204,6 +1354,9 @@ class MessageStore extends ChangeNotifier {
             'quote_content': message.quotedPreviewText,
             if (message.requestId != null) 'request_id': message.requestId,
             'has_tool_calls': message.hasToolCalls,
+            if (message.reasoningContent != null &&
+                message.reasoningContent!.isNotEmpty)
+              'reasoning_content': message.reasoningContent,
           },
         });
 

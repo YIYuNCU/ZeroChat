@@ -520,6 +520,7 @@ class RoleService {
               showStats: json['show_stats'] as bool? ?? true,
               showNoReply: json['show_no_reply'] as bool? ?? false,
               showToolCalls: json['show_tool_calls'] as bool? ?? false,
+              showReasoning: json['show_reasoning'] as bool? ?? false,
               archived: json['archived'] as bool? ?? false,
               proactiveConfig: json['proactive_config'] is Map
                   ? ProactiveConfig.fromJson(
@@ -581,6 +582,7 @@ class RoleService {
                   showStats: backendRole.showStats,
                   showNoReply: backendRole.showNoReply,
                   showToolCalls: backendRole.showToolCalls,
+                  showReasoning: backendRole.showReasoning,
                   archived: backendRole.archived,
                   proactiveConfig: backendRole.proactiveConfig,
                   followupConfig: backendRole.followupConfig,
@@ -677,6 +679,7 @@ class RoleService {
     'show_stats': role.showStats,
     'show_no_reply': role.showNoReply,
     'show_tool_calls': role.showToolCalls,
+    'show_reasoning': role.showReasoning,
     'archived': role.archived,
     'max_context_rounds': role.maxContextRounds,
     'max_context_length': role.maxContextLength,

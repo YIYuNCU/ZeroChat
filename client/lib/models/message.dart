@@ -25,6 +25,9 @@ class Message {
   /// 本条消息生成过程中是否发生过工具调用（仅作展示入口开关，不含明细）。
   final bool hasToolCalls;
 
+  /// 模型思考过程（仅 AI 消息可能非空，是否展示由角色设置决定）。
+  final String? reasoningContent;
+
   Message({
     required this.id,
     required this.senderId,
@@ -38,6 +41,7 @@ class Message {
     this.quotedPreviewText,
     this.requestId,
     this.hasToolCalls = false,
+    this.reasoningContent,
   });
 
   /// 创建带引用的消息
@@ -84,6 +88,7 @@ class Message {
       quotedPreviewText: json['quoted_preview_text'] as String?,
       requestId: json['request_id'] as String?,
       hasToolCalls: json['has_tool_calls'] as bool? ?? false,
+      reasoningContent: json['reasoning_content'] as String?,
     );
   }
 
@@ -101,6 +106,8 @@ class Message {
       'quoted_preview_text': quotedPreviewText,
       if (requestId != null) 'request_id': requestId,
       'has_tool_calls': hasToolCalls,
+      if (reasoningContent != null && reasoningContent!.isNotEmpty)
+        'reasoning_content': reasoningContent,
     };
   }
 
@@ -128,6 +135,7 @@ class Message {
     String? quotedPreviewText,
     String? requestId,
     bool? hasToolCalls,
+    String? reasoningContent,
   }) {
     return Message(
       id: id ?? this.id,
@@ -142,6 +150,7 @@ class Message {
       quotedPreviewText: quotedPreviewText ?? this.quotedPreviewText,
       requestId: requestId ?? this.requestId,
       hasToolCalls: hasToolCalls ?? this.hasToolCalls,
+      reasoningContent: reasoningContent ?? this.reasoningContent,
     );
   }
 
@@ -150,6 +159,10 @@ class Message {
 
   /// 是否携带可用于查询工具调用历史的 request_id
   bool get hasRequestId => requestId != null && requestId!.isNotEmpty;
+
+  /// 是否有可展示的思考过程
+  bool get hasReasoning =>
+      reasoningContent != null && reasoningContent!.trim().isNotEmpty;
 }
 
 /// 消息类型枚举
@@ -165,8 +178,10 @@ enum MessageType {
 enum MessageSendStatus {
   /// 已写入本地、正在同步到后端（在途）。
   sending,
+
   /// 已成功同步到后端。
   sent,
+
   /// 同步最终失败，可手动重发。
   failed,
 }
