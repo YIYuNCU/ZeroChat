@@ -79,14 +79,17 @@ async def _schedule_flush(key: Tuple[str, int, str]):
 
     role_id = key[0]
     try:
-        reply_text, image_paths = await _process_and_reply(role_id, transformed, buf.message_id)
+        reply_text, image_paths, voices = await _process_and_reply(role_id, transformed, buf.message_id)
     except Exception as e:
         logger.error(f"OneBot AI 处理失败: role={role_id}, error={e}", exc_info=True)
         return
 
-    if reply_text or image_paths:
+    if reply_text or image_paths or voices:
         try:
-            await _send_reply(buf.conn, transformed, reply_text, message_id=buf.message_id, image_paths=image_paths)
+            await _send_reply(
+                buf.conn, transformed, reply_text, message_id=buf.message_id,
+                image_paths=image_paths, voices=voices, role_id=role_id,
+            )
             logger.info(
                 f"OneBot 回复发送: role={role_id}, "
                 f"target={transformed['origin']}, "
@@ -311,8 +314,8 @@ async def _process_and_reply(
     role_id: str,
     transformed: Dict[str, Any],
     message_id: Optional[int],
-) -> Tuple[str, List[Path]]:
-    """调用 AI 处理消息，返回 (回复文本, 表情图片路径列表)"""
+) -> Tuple[str, List[Path], List[Dict[str, Any]]]:
+    """调用 AI 处理消息，返回 (回复文本, 表情图片路径列表, 语音投递列表)"""
     from routers.ai_behavior import AIEvent, AIEventType, handle_ai_event
 
     # ===== 图片识别预处理 =====
@@ -353,14 +356,16 @@ async def _process_and_reply(
     elif isinstance(result, dict):
         result_dict = result
     else:
-        return "", []
+        return "", [], []
 
     if result_dict.get("success"):
         reply_text = result_dict.get("content") or ""
-        emojis_called = (result_dict.get("metadata") or {}).get("emojis_called") or []
+        metadata = result_dict.get("metadata") or {}
+        emojis_called = metadata.get("emojis_called") or []
         image_paths = _resolve_emojis(emojis_called, role_id)
-        return reply_text, image_paths
-    return "", []
+        voices = [v for v in (metadata.get("voice_messages") or []) if isinstance(v, dict)]
+        return reply_text, image_paths, voices
+    return "", [], []
 
 
 def _strip_action_descriptions(text: str) -> str:
@@ -567,9 +572,12 @@ async def _send_reply(
     raw: bool = False,
     message_id: Optional[int] = None,
     image_paths: Optional[List[Path]] = None,
+    voices: Optional[List[Dict[str, Any]]] = None,
+    role_id: str = "",
 ):
-    """通过 WebSocket 连接发送回复到 QQ（消息数组格式：reply + @ + text + image）"""
-    if not reply_text.strip():
+    """通过 WebSocket 连接发送回复到 QQ（消息数组格式：reply + @ + text + image，语音另发）"""
+    voice_items = voices or []
+    if not reply_text.strip() and not voice_items:
         return
 
     if raw:
@@ -578,29 +586,69 @@ async def _send_reply(
         clean_reply = _strip_action_descriptions(reply_text)
 
     paths = image_paths or []
-    if not clean_reply and not paths:
-        return
+    if clean_reply or paths:
+        server_url = transformed.get("_server_url", SERVER_URL_FALLBACK)
+        segments = _build_message_segments(
+            reply_text=clean_reply,
+            message_id=message_id,
+            origin=transformed["origin"],
+            user_id=transformed["user_id"],
+            image_paths=paths,
+            server_url=server_url,
+        )
+        await _send_segments(conn, transformed, segments)
 
-    server_url = transformed.get("_server_url", SERVER_URL_FALLBACK)
-    segments = _build_message_segments(
-        reply_text=clean_reply,
-        message_id=message_id,
-        origin=transformed["origin"],
-        user_id=transformed["user_id"],
-        image_paths=paths,
-        server_url=server_url,
-    )
+    await _send_voice_records(conn, transformed, role_id, voice_items)
 
+
+async def _send_segments(conn, transformed: Dict[str, Any], segments: List[Dict[str, Any]]):
+    """按会话类型发送一组消息段，返回 OneBot 响应。"""
     if transformed["origin"] == "onebot_group":
-        await conn.send_action("send_group_msg", {
+        return await conn.send_action("send_group_msg", {
             "group_id": transformed["group_id"],
             "message": segments,
         })
-    else:
-        await conn.send_action("send_private_msg", {
-            "user_id": transformed["user_id"],
-            "message": segments,
-        })
+    return await conn.send_action("send_private_msg", {
+        "user_id": transformed["user_id"],
+        "message": segments,
+    })
+
+
+#: QQ 语音单条上限（base64 内联发送，过大的文件跳过）。
+_ONEBOT_VOICE_MAX_BYTES = 4 * 1024 * 1024
+
+
+async def _send_voice_records(
+    conn, transformed: Dict[str, Any], role_id: str, voices: List[Dict[str, Any]],
+):
+    """把 AI 语音以 record 段（base64）单独发送；失败时降级为文字转写。
+
+    QQ 语音不能与文本混发，因此每条语音独立一条消息。
+    """
+    from services import tts_service
+
+    for item in voices:
+        spoken = str(item.get("text") or "").strip()
+        delivered = False
+        try:
+            path = tts_service.voice_file_path(role_id, str(item.get("filename") or ""))
+            if path.is_file() and path.stat().st_size <= _ONEBOT_VOICE_MAX_BYTES:
+                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+                response = await _send_segments(
+                    conn, transformed,
+                    [{"type": "record", "data": {"file": f"base64://{encoded}"}}],
+                )
+                delivered = _onebot_ok(response)
+        except Exception as e:  # noqa: BLE001 - 语音失败不影响其余回复
+            logger.warning(f"OneBot 语音发送失败: {type(e).__name__}")
+        if not delivered and spoken:
+            await _send_segments(conn, transformed, [{"type": "text", "data": {"text": f"[语音] {spoken}"}}])
+
+
+def _onebot_ok(response: Any) -> bool:
+    if not isinstance(response, dict):
+        return False
+    return response.get("status") == "ok" or response.get("retcode") == 0
 
 
 # ========== 系统指令 ==========
@@ -1518,7 +1566,7 @@ async def handle_onebot_event(
 
     # AI 处理
     try:
-        reply_text, image_paths = await _process_and_reply(role_id, transformed, event.message_id)
+        reply_text, image_paths, voices = await _process_and_reply(role_id, transformed, event.message_id)
         reply_text = _strip_action_descriptions(reply_text)
     except Exception as e:
         logger.error(f"OneBot AI 处理失败: {e}", exc_info=True)
@@ -1526,9 +1574,12 @@ async def handle_onebot_event(
 
     # 如果有 WS 连接，尝试通过 WS 发送回复
     conn = ws_manager.get_connection(role_id)
-    if conn and (reply_text or image_paths):
+    if conn and (reply_text or image_paths or voices):
         try:
-            await _send_reply(conn, transformed, reply_text, message_id=event.message_id, image_paths=image_paths)
+            await _send_reply(
+                conn, transformed, reply_text, message_id=event.message_id,
+                image_paths=image_paths, voices=voices, role_id=role_id,
+            )
         except Exception as e:
             logger.error(f"OneBot WS 回复发送失败: {e}")
 

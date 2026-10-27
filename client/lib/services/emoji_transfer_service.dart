@@ -12,6 +12,9 @@ import 'storage_service.dart';
 import 'secure_backend_client.dart';
 
 /// Downloads protected emoji assets over the encrypted WebSocket in bounded chunks.
+///
+/// 语音消息的音频（`ws-emoji://voice/<role_id>/<filename>`）复用同一套下载与缓存：
+/// 传输与缓存逻辑不依赖文件类型，扩展名取自服务端返回的文件名。
 class EmojiTransferService {
   EmojiTransferService._();
 

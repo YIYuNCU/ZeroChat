@@ -4,6 +4,7 @@ import 'dart:async';
 import '../models/message.dart';
 import '../models/emoji_item.dart';
 import '../models/role.dart';
+import '../models/voice_message.dart';
 import '../core/message_parts.dart';
 import '../widgets/chat_bubble.dart';
 import '../widgets/remote_media_image.dart';
@@ -14,6 +15,7 @@ import '../services/role_service.dart';
 import '../services/favorite_service.dart';
 import '../services/notification_service.dart';
 import '../services/settings_service.dart';
+import '../services/voice_playback_service.dart';
 import 'chat_settings_page.dart';
 import 'group_settings_page.dart';
 import 'share_screenshot_page.dart';
@@ -144,6 +146,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     // 仅当离开的是通知服务记录的那个聊天时才清空，避免 A 页压栈进 B 页、
     // B 页先 dispose 时误清掉 A 页刚设置的当前聊天。
     NotificationService.instance.clearCurrentChatIfMatches(widget.chatId);
+    // 离开聊天页时停止正在播放的语音。
+    unawaited(VoicePlaybackService.instance.stop());
     _inputBarController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -301,12 +305,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
         ? '我'
         : (RoleService.getRoleById(message.senderId)?.name ?? widget.chatName);
 
+    // 语音消息引用它所说的文字，而不是内部 JSON。
+    final quoteText = VoiceMessage.plainText(message);
     setState(() {
       _quoteState = QuoteState(
         messageId: message.id,
-        content: message.content.length > 50
-            ? '${message.content.substring(0, 50)}...'
-            : message.content,
+        content: quoteText.length > 50
+            ? '${quoteText.substring(0, 50)}...'
+            : quoteText,
         senderName: senderName,
       );
     });
@@ -381,8 +387,10 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   /// 复制消息（剥离格式标签后只复制对话文本）
   void _copyMessage(Message message) {
     final isMe = message.senderId == 'me';
-    final text = MessageParts.previewText(message.content, isUserMessage: isMe);
-    final copyText = text.trim().isNotEmpty ? text : message.content;
+    // 语音消息复制它所说的文字，而不是内部 JSON。
+    final source = VoiceMessage.plainText(message);
+    final text = MessageParts.previewText(source, isUserMessage: isMe);
+    final copyText = text.trim().isNotEmpty ? text : source;
     Clipboard.setData(ClipboardData(text: copyText));
     if (!mounted) return;
     ScaffoldMessenger.of(
@@ -441,11 +449,12 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     }
 
     final isMe = message.senderId == 'me';
-    final body = MessageParts.previewText(message.content, isUserMessage: isMe);
+    final source = VoiceMessage.plainText(message);
+    final body = MessageParts.previewText(source, isUserMessage: isMe);
     final ok = await NotificationService.instance.scheduleReminder(
       id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       title: '来自「$senderName」的提醒',
-      body: body.trim().isNotEmpty ? body : message.content,
+      body: body.trim().isNotEmpty ? body : source,
       triggerTime: triggerTime,
     );
     if (!mounted) return;

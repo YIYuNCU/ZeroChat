@@ -5,8 +5,10 @@ import 'remote_media_image.dart';
 import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/stats_config.dart';
+import '../models/voice_message.dart';
 import '../core/message_parts.dart';
 import '../services/sticker_service.dart';
+import '../services/voice_playback_service.dart';
 import '../services/emoji_transfer_service.dart';
 import '../services/settings_service.dart';
 import '../services/secure_backend_client.dart';
@@ -147,6 +149,9 @@ class ChatBubble extends StatelessWidget {
   /// 是否是图片消息
   bool get _isImage => message.type == MessageType.image;
 
+  /// 是否是语音消息
+  bool get _isVoice => message.type == MessageType.voice;
+
   bool get _isHiddenNoReply {
     if (isSender || !MessageParts.isNoReplyDirective(message.content)) {
       return false;
@@ -170,7 +175,59 @@ class ChatBubble extends StatelessWidget {
     if (_isImage) {
       return _buildImageContent(context);
     }
+    if (_isVoice) {
+      return _buildVoiceContent(context);
+    }
     return _buildTextContent(context);
+  }
+
+  /// 构建语音内容：点击播放，可展开「转文字」
+  Widget _buildVoiceContent(BuildContext context) {
+    final voice = VoiceMessage.fromMessage(message);
+    final maxWidth = MediaQuery.of(context).size.width * 0.65;
+    final color = isSender ? const Color(0xFF95EC69) : Colors.white;
+    if (voice == null) {
+      // 内容损坏时退化为占位文案，避免把 JSON 原文渲染到气泡里。
+      return Container(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: _buildDialogue(VoiceMessage.previewLabel),
+      );
+    }
+    return _VoiceBubble(
+      key: ValueKey('voice-bubble-${message.id}'),
+      messageId: message.id,
+      voice: voice,
+      isSender: isSender,
+      maxWidth: maxWidth,
+      color: color,
+      headers: [
+        // 引用块（如果有）
+        if (message.hasQuote) ...[
+          _buildQuoteBlock(),
+          const SizedBox(height: 6),
+        ],
+        // 思考过程（角色开启「显示思维链」时展示，默认折叠）
+        if (_showReasoningCard) ...[
+          _ThinkingChainCard(reasoning: message.reasoningContent!),
+          const SizedBox(height: 6),
+        ],
+      ],
+      footers: [
+        // 工具调用历史（角色开启「显示工具调用历史」且本条消息携带记录时展示）
+        if (_showToolCallsCard) ...[
+          const SizedBox(height: 6),
+          _ToolCallsCard(
+            roleId: message.senderId,
+            requestId: message.requestId!,
+          ),
+        ],
+      ],
+    );
   }
 
   /// 构建图片内容
@@ -1291,6 +1348,166 @@ class _ToolCallsCardState extends State<_ToolCallsCard> {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// 语音气泡：点击播放/停止，可展开「转文字」查看所说内容。
+///
+/// 播放状态由全局 [VoicePlaybackService] 维护（同一时间只播放一条）。
+class _VoiceBubble extends StatefulWidget {
+  final String messageId;
+  final VoiceMessage voice;
+  final bool isSender;
+  final double maxWidth;
+  final Color color;
+
+  /// 气泡内语音条之前 / 之后的附加内容（引用块、思考过程、工具调用等）。
+  final List<Widget> headers;
+  final List<Widget> footers;
+
+  const _VoiceBubble({
+    super.key,
+    required this.messageId,
+    required this.voice,
+    required this.isSender,
+    required this.maxWidth,
+    required this.color,
+    this.headers = const [],
+    this.footers = const [],
+  });
+
+  @override
+  State<_VoiceBubble> createState() => _VoiceBubbleState();
+}
+
+class _VoiceBubbleState extends State<_VoiceBubble> {
+  bool _showText = false;
+
+  Future<void> _onTap() async {
+    final ok = await VoicePlaybackService.instance.toggle(
+      messageId: widget.messageId,
+      reference: widget.voice.ref,
+    );
+    if (!ok && mounted) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('语音加载失败，请稍后重试')),
+      );
+    }
+  }
+
+  Widget _buildIcon(VoicePlaybackStatus status) {
+    switch (status) {
+      case VoicePlaybackStatus.loading:
+        return const SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        );
+      case VoicePlaybackStatus.playing:
+        return const Icon(
+          Icons.graphic_eq,
+          size: 22,
+          color: Color(0xFF07C160),
+        );
+      case VoicePlaybackStatus.idle:
+        return const Icon(Icons.volume_up_rounded, size: 22);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final voice = widget.voice;
+    final hasText = voice.text.trim().isNotEmpty;
+    // 语音条宽度随时长增长，限制在气泡可用宽度内。
+    final seconds = ((voice.durationMs ?? 0) / 1000)
+        .ceil()
+        .clamp(0, 60)
+        .toInt();
+    final maxBar = widget.maxWidth - 20 < 72.0 ? 72.0 : widget.maxWidth - 20;
+    final barWidth = (72.0 + seconds * 3).clamp(72.0, maxBar).toDouble();
+
+    return ListenableBuilder(
+      listenable: VoicePlaybackService.instance,
+      builder: (context, _) {
+        final status = VoicePlaybackService.instance.statusOf(
+          widget.messageId,
+        );
+        final label = voice.durationLabel;
+        final children = <Widget>[
+          _buildIcon(status),
+          if (label.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 15, color: Color(0xFF000000)),
+            ),
+          ],
+        ];
+        return Container(
+          constraints: BoxConstraints(maxWidth: widget.maxWidth),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          decoration: BoxDecoration(
+            color: widget.color,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ...widget.headers,
+              Semantics(
+                button: true,
+                label: label.isEmpty ? '语音消息' : '语音消息 $label',
+                child: GestureDetector(
+                  key: const ValueKey('voice-play'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _onTap,
+                  child: SizedBox(
+                    width: barWidth,
+                    height: 28,
+                    child: Row(
+                      mainAxisAlignment: widget.isSender
+                          ? MainAxisAlignment.end
+                          : MainAxisAlignment.start,
+                      children: widget.isSender
+                          ? children.reversed.toList()
+                          : children,
+                    ),
+                  ),
+                ),
+              ),
+              if (hasText) ...[
+                const SizedBox(height: 4),
+                GestureDetector(
+                  key: const ValueKey('voice-toggle-text'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => setState(() => _showText = !_showText),
+                  child: Text(
+                    _showText ? '收起文字' : '转文字',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF576B95),
+                    ),
+                  ),
+                ),
+              ],
+              if (hasText && _showText) ...[
+                const SizedBox(height: 6),
+                Text(
+                  voice.text,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    color: Color(0xFF000000),
+                    height: 1.4,
+                  ),
+                ),
+              ],
+              ...widget.footers,
+            ],
+          ),
+        );
+      },
     );
   }
 }

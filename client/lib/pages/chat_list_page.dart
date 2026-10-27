@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/chat_info.dart';
+import '../models/voice_message.dart';
 import '../core/message_parts.dart';
 import '../services/chat_list_service.dart';
 import '../services/role_service.dart';
@@ -102,6 +103,8 @@ class _ChatListPageState extends State<ChatListPage> {
         return '[图片]';
       case MessageType.image:
         return '[图片]';
+      case MessageType.voice:
+        return VoiceMessage.previewLabel;
       default:
         return MessageParts.previewText(
           message.content,

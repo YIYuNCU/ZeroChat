@@ -8,6 +8,7 @@ import '../models/stats_config.dart';
 import '../services/secure_backend_client.dart';
 import '../services/settings_service.dart';
 import '../widgets/role_prompt_overrides_section.dart';
+import '../widgets/role_voice_section.dart';
 
 /// 角色参数设置页面
 /// 调整 AI 角色的参数配置
@@ -325,6 +326,15 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
 
           // 按角色的提示词覆盖（直接编辑 md 全文）
           RolePromptOverridesSection(
+            roleName: widget.role.name,
+            metadata: _metadata,
+            onChanged: (metadata) => setState(() => _metadata = metadata),
+          ),
+
+          const SizedBox(height: 10),
+
+          // 按角色的语音（TTS）配置：开关、音色、风格
+          RoleVoiceSection(
             roleName: widget.role.name,
             metadata: _metadata,
             onChanged: (metadata) => setState(() => _metadata = metadata),

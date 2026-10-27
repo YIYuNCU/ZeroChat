@@ -1168,6 +1168,7 @@ def _build_system_prompt(
     is_onebot: bool = False,
     include_runtime_context: bool = True,
     settings: Optional[Dict[str, Any]] = None,
+    enable_voice: bool = False,
 ) -> str:
     """Build system prompt from role data and the configurable prompt registry."""
     parts: List[str] = []
@@ -1237,6 +1238,9 @@ def _build_system_prompt(
     tool_policy = prompt(prompt_config.CHAT_TOOL_RULES_ID)
     if _emoji_plugin is not None and getattr(_emoji_plugin, "PROMPT", ""):
         tool_policy = f"{tool_policy}\n\n{_emoji_plugin.PROMPT}"
+    if enable_voice:
+        # 仅在语音工具开放时并入；默认关闭，保证未启用时提示词逐字节不变。
+        tool_policy = f"{tool_policy}\n\n{prompt(prompt_config.CHAT_VOICE_RULES_ID)}"
     rules.append(_prompt_section("tool_policy", tool_policy))
     parts.append(_prompt_section("system_rules", "\n\n".join(rules)))
 
@@ -1354,6 +1358,7 @@ from services.ai_tools import (
     _BLOCK_USER_TOOL,
     _SEARCH_MEMORY_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
+    _SEND_VOICE_MESSAGE_TOOL,
     _WEB_SEARCH_TOOL,
     _WRITE_MEMORY_TOOL,
     _RECOGNIZE_IMAGE_TOOL,
@@ -1364,6 +1369,7 @@ from services.ai_tools import (
     execute_block_user,
     execute_search_memory,
     execute_send_emotion_emoji,
+    execute_send_voice_message,
     execute_web_search,
     execute_write_memory,
     execute_recognize_image,
@@ -1389,12 +1395,14 @@ async def generate_with_role(
     stats_current: Optional[Dict[str, Any]] = None,
     vision_context: Optional[Dict[str, Any]] = None,
     envelope: Optional[ChatEnvelope] = None,
+    enable_voice: bool = False,
 ) -> Dict[str, Any]:
     """
     以角色身份生成回复
 
     vision_context: 工具模式识图上下文，包含本次和同一会话上一批图片。
     envelope: 对话信封，携带会话与发送人信息（见 services/chat_envelope.py）。
+    enable_voice: 开放 send_voice_message 工具（调用方已确认 TTS 可用）。
     """
     messages = []
     is_onebot = origin.startswith("onebot")
@@ -1405,6 +1413,7 @@ async def generate_with_role(
         None,
         is_onebot=is_onebot,
         include_runtime_context=False,
+        enable_voice=enable_voice,
     )
     system_parts = [system_content] if system_content else []
     if extra_context:
@@ -1450,6 +1459,8 @@ async def generate_with_role(
         active_tools.extend(_CONTINUE_IF_NO_REPLY_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
+    if enable_voice:
+        active_tools.extend(_SEND_VOICE_MESSAGE_TOOL)
     # 工具模式识图：本次消息附带图片时，开放 recognize_image 供模型调用。
     image_data_urls = list((vision_context or {}).get("image_data_urls") or [])
     previous_image_data_urls = list((vision_context or {}).get("previous_image_data_urls") or [])
@@ -1531,6 +1542,8 @@ async def _handle_tool_calls(
     """
     # 元素可为 str（情绪名，走随机）或 dict（精确云端文件 {category, filename}）
     emojis_called: List[Any] = []
+    # send_voice_message 合成成功的语音投递信息：{text, ref, filename, duration_ms, mime}
+    voices_called: List[Dict[str, Any]] = []
     recognized_current_image = False
     max_rounds = 5
     # 结构化工具调用历史，供前端「工具调用历史」功能展示：
@@ -1657,6 +1670,19 @@ async def _handle_tool_calls(
                         messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: search_memory -> {err}")
 
+                elif func_name == "send_voice_message":
+                    voice_text = str(args.get("text", "")).strip()
+                    voice_style = str(args.get("style", "")).strip()
+                    # 只记录长度，避免把私密内容与配置写进日志
+                    logger.info(f"Tool call: send_voice_message [chars={len(voice_text)}]")
+                    tool_result, delivery = await execute_send_voice_message(
+                        role_data, voice_text, voice_style, len(voices_called),
+                    )
+                    if delivery:
+                        voices_called.append(delivery)
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: send_voice_message -> {tool_result[:100]}")
+
                 elif func_name == "send_emotion_emoji":
                     emotion = str(args.get("emotion", "")).strip()
                     logger.info(f"Tool call: send_emotion_emoji [emotion={emotion}]")
@@ -1778,6 +1804,7 @@ async def _handle_tool_calls(
             if recognized_current_image:
                 result["_recognized_current_image"] = True
             result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
+            result["_voices_called"] = voices_called
             result["_tool_calls_log"] = tool_calls_log
             return with_accumulated_reasoning(result)
 
@@ -1785,6 +1812,7 @@ async def _handle_tool_calls(
     if recognized_current_image:
         result["_recognized_current_image"] = True
     result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
+    result["_voices_called"] = voices_called
     result["_tool_calls_log"] = tool_calls_log
     return with_accumulated_reasoning(result)
 

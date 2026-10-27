@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/message.dart';
+import '../models/voice_message.dart';
 import 'message_parts.dart';
 import '../services/sticker_service.dart';
 import '../services/storage_service.dart';
@@ -1209,12 +1210,14 @@ class MessageStore extends ChangeNotifier {
             ChatListService.instance.updateChat(
               chatId: chatId,
               // 预览只保留对话，剥离动作等格式化片段。
-              lastMessage: lastMessage.type == MessageType.text
-                  ? MessageParts.previewText(
-                      lastMessage.content,
-                      isUserMessage: lastMessage.senderId == 'me',
-                    )
-                  : '[图片]',
+              lastMessage: switch (lastMessage.type) {
+                MessageType.text => MessageParts.previewText(
+                  lastMessage.content,
+                  isUserMessage: lastMessage.senderId == 'me',
+                ),
+                MessageType.voice => VoiceMessage.previewLabel,
+                _ => '[图片]',
+              },
               lastMessageTime: lastMessage.timestamp,
               unreadIncrement: newUnreadCount,
             );
@@ -1446,6 +1449,10 @@ class MessageStore extends ChangeNotifier {
           // 图片消息的 content 是本地文件路径，喂给模型无意义，用占位符替代
           if (m.type == MessageType.image) {
             buffer.write('[图片]');
+          } else if (m.type == MessageType.voice) {
+            // 语音消息的 content 是 JSON（含传输引用），模型只需要它所说的文字；
+            // 不加「[语音]」前缀，避免模型在后续回复里模仿这种格式。
+            buffer.write(VoiceMessage.plainText(m));
           } else {
             buffer.write(m.content);
           }

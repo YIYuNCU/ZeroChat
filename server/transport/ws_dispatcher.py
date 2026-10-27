@@ -21,7 +21,7 @@ from core.utils import (
 )
 from routers import roles, settings
 from services import settings_service
-from services import prompt_config_service, summary_config_service
+from services import prompt_config_service, summary_config_service, tts_service
 
 
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -103,6 +103,14 @@ def _resolve_emoji_reference(reference: str) -> Path:
         root = roles.get_role_emojis_dir(role_id)
         category_dir = ensure_direct_child_path(root, category, "category")
         path = ensure_direct_child_path(category_dir, filename, "filename")
+    elif parsed.netloc == "voice" and len(parts) == 2:
+        # AI 语音消息：ws-emoji://voice/<role_id>/<filename>，复用表情的分块下载通道。
+        role_id = _safe_segment(parts[0], "role_id")
+        filename = _safe_segment(parts[1], "filename")
+        try:
+            path = tts_service.voice_file_path(role_id, filename)
+        except ValueError as exc:
+            raise ValueError("invalid voice reference") from exc
     elif parsed.netloc == "user" and len(parts) == 1:
         emoji_id = parts[0].strip()
         with roles._get_user_emoji_connection() as conn:
@@ -476,6 +484,40 @@ async def _handle_settings_summary_get(payload: dict) -> dict:
         entry["effective_model"] = resolved.get("model", "")
         result[kind] = entry
     return {"summaries": result}
+
+
+async def _handle_settings_tts_get(payload: dict) -> dict:
+    """返回语音合成配置（API Key 掩码）。"""
+    return {"tts": tts_service.public_tts_config()}
+
+
+async def _handle_settings_tts_update(payload: dict) -> dict:
+    updates = payload.get("updates")
+    if not isinstance(updates, dict):
+        return {"success": False, "error": "updates missing"}
+    if not tts_service.update_tts_config(updates):
+        return {"success": False, "error": "Failed to save settings"}
+    return {"success": True, "tts": tts_service.public_tts_config()}
+
+
+async def _handle_settings_tts_test(payload: dict) -> dict:
+    """用当前配置合成一句固定短语，仅报告结果，不返回音频。"""
+    import time as _time
+
+    resolved = tts_service.resolve_tts_config(None)
+    if not resolved["configured"]:
+        return {"success": False, "error": "语音合成未配置完整"}
+    started = _time.monotonic()
+    try:
+        audio = await tts_service.synthesize(resolved, "你好，这是一条语音合成测试。")
+    except tts_service.TTSError as exc:
+        return {"success": False, "error": str(exc)}
+    return {
+        "success": True,
+        "latency_ms": int((_time.monotonic() - started) * 1000),
+        "size": len(audio.data),
+        "duration_ms": audio.duration_ms,
+    }
 
 
 async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
@@ -1118,6 +1160,15 @@ async def _dispatch_ws_action(action: str, payload: dict, websocket: WebSocket, 
 
     if action == "settings_summary_get":
         return await _handle_settings_summary_get(payload)
+
+    if action == "settings_tts_get":
+        return await _handle_settings_tts_get(payload)
+
+    if action == "settings_tts_update":
+        return await _handle_settings_tts_update(payload)
+
+    if action == "settings_tts_test":
+        return await _handle_settings_tts_test(payload)
 
     if action == "settings_avatar_upload":
         return await _handle_settings_avatar_upload(payload, backend_base_url)

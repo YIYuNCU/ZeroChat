@@ -12,6 +12,7 @@ import '../services/secure_backend_client.dart';
 import '../services/secure_websocket_client.dart';
 import '../services/settings_service.dart';
 import '../widgets/quiet_rule_editor.dart';
+import 'tts_settings_page.dart';
 
 class ApiSettingsPage extends StatelessWidget {
   const ApiSettingsPage({super.key});
@@ -179,6 +180,17 @@ class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
                 title: '模型安静时间',
                 subtitle: '${settings.providerQuietRules.length} 条规则',
                 onTap: () => _push(context, const ProviderQuietRulesPage()),
+              ),
+            ],
+          ),
+          const _SectionGap(),
+          _Section(
+            children: [
+              _NavigationRow(
+                icon: Icons.record_voice_over_outlined,
+                title: '语音合成（TTS）',
+                subtitle: '让角色发送语音消息',
+                onTap: () => _push(context, const TtsSettingsPage()),
               ),
             ],
           ),

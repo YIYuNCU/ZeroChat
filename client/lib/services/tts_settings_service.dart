@@ -1,0 +1,274 @@
+import 'package:flutter/foundation.dart';
+
+import 'secure_websocket_client.dart';
+
+/// 发送一次后端 WebSocket 请求；测试里可注入假实现。
+typedef TtsRequest =
+    Future<Map<String, dynamic>> Function(
+      String action,
+      Map<String, dynamic> payload, {
+      Duration? timeout,
+    });
+
+/// 某个 TTS 供应商的一个配置字段。
+class TtsProviderField {
+  /// 与服务端配置一致的 key，例如 `api_url`。
+  final String key;
+  final String label;
+  final String hint;
+
+  /// 密钥字段：服务端只返回 `<key>_masked`，只有用户输入了新值才会提交。
+  final bool secret;
+
+  /// 数值字段：提交时按数字发送，无法解析则不提交。
+  final bool numeric;
+
+  const TtsProviderField(
+    this.key,
+    this.label,
+    this.hint, {
+    this.secret = false,
+    this.numeric = false,
+  });
+}
+
+/// TTS 供应商的字段声明（页面据此生成表单，提交据此组装 payload）。
+class TtsProviderSpec {
+  final String id;
+  final String label;
+  final List<TtsProviderField> fields;
+
+  const TtsProviderSpec(this.id, this.label, this.fields);
+}
+
+/// 支持的 TTS 供应商；顺序即页面展示顺序。
+const List<TtsProviderSpec> ttsProviderSpecs = [
+  TtsProviderSpec('mimo', 'MiMo', [
+    TtsProviderField('api_url', '接口地址', 'API 地址'),
+    TtsProviderField('api_key', 'API Key', '', secret: true),
+    TtsProviderField('model', '模型', '模型名称'),
+    TtsProviderField('voice', '默认音色', '音色名称'),
+    TtsProviderField('style', '默认风格', '语气/风格描述（可选）'),
+  ]),
+  TtsProviderSpec('qwen', 'Qwen', [
+    TtsProviderField('api_url', '接口地址', 'API 地址'),
+    TtsProviderField('api_key', 'API Key', '', secret: true),
+    TtsProviderField('model', '模型', '模型名称'),
+    TtsProviderField('voice', '默认音色', '音色名称'),
+    TtsProviderField('language_type', '语言类型', '例如 Chinese'),
+    TtsProviderField('style', '默认风格', '语气/风格描述（可选）'),
+  ]),
+  TtsProviderSpec('gpt_sovits', 'GPT-SoVITS', [
+    TtsProviderField('api_url', '接口地址', 'http://127.0.0.1:9880'),
+    TtsProviderField('ref_audio_path', '参考音频', '服务端可访问的参考音频路径'),
+    TtsProviderField('prompt_text', '参考文本', '参考音频对应的文字'),
+    TtsProviderField('prompt_lang', '参考语言', 'zh'),
+    TtsProviderField('text_lang', '合成语言', 'zh'),
+    TtsProviderField('text_split_method', '切分方式', 'cut5'),
+    TtsProviderField('speed_factor', '语速', '1.0', numeric: true),
+  ]),
+];
+
+/// 后端返回的 TTS 全局设置（`settings_tts_get`）。
+class TtsSettings {
+  final bool enabled;
+
+  /// 当前使用的供应商 id：`mimo` / `qwen` / `gpt_sovits`。
+  final String provider;
+  final int timeoutSeconds;
+  final int maxChars;
+
+  /// 后端判断当前供应商配置是否完整可用。
+  final bool configured;
+
+  /// 各供应商的字段值（均为字符串）；密钥字段以 `<key>_masked` 存放脱敏值。
+  final Map<String, Map<String, String>> providers;
+
+  const TtsSettings({
+    this.enabled = false,
+    this.provider = 'mimo',
+    this.timeoutSeconds = 30,
+    this.maxChars = 200,
+    this.configured = false,
+    this.providers = const {},
+  });
+
+  /// 解析 `settings_tts_get` 的响应（`{tts: {...}}`；也兼容直接传入 tts 对象）。
+  factory TtsSettings.fromResponse(Map<String, dynamic> response) {
+    final raw = response['tts'];
+    final json = raw is Map ? Map<String, dynamic>.from(raw) : response;
+    final providers = <String, Map<String, String>>{};
+    for (final spec in ttsProviderSpecs) {
+      final section = json[spec.id];
+      final map = section is Map ? section : const {};
+      final values = <String, String>{};
+      for (final field in spec.fields) {
+        final key = field.secret ? '${field.key}_masked' : field.key;
+        final value = map[key];
+        values[key] = value == null ? '' : value.toString();
+      }
+      providers[spec.id] = values;
+    }
+    final provider = (json['provider'] ?? '').toString();
+    return TtsSettings(
+      enabled: json['enabled'] == true,
+      provider: ttsProviderSpecs.any((spec) => spec.id == provider)
+          ? provider
+          : ttsProviderSpecs.first.id,
+      timeoutSeconds: _readInt(json['timeout_seconds'], 30),
+      maxChars: _readInt(json['max_chars'], 200),
+      configured: json['configured'] == true,
+      providers: providers,
+    );
+  }
+
+  /// 指定供应商某字段的当前值（密钥字段取脱敏值）。
+  String valueOf(String provider, String key) =>
+      providers[provider]?[key] ?? '';
+
+  static int _readInt(dynamic value, int fallback) {
+    if (value is num) return value.round();
+    return int.tryParse(value?.toString().trim() ?? '') ?? fallback;
+  }
+}
+
+/// `settings_tts_test` 的结果。
+class TtsTestResult {
+  final bool success;
+  final int? latencyMs;
+  final int? size;
+  final int? durationMs;
+  final String error;
+
+  const TtsTestResult({
+    required this.success,
+    this.latencyMs,
+    this.size,
+    this.durationMs,
+    this.error = '',
+  });
+
+  factory TtsTestResult.fromResponse(Map<String, dynamic> response) {
+    int? readInt(dynamic value) =>
+        value is num ? value.round() : int.tryParse('${value ?? ''}');
+    return TtsTestResult(
+      success: response['success'] == true,
+      latencyMs: readInt(response['latency_ms']),
+      size: readInt(response['size']),
+      durationMs: readInt(response['duration_ms']),
+      error: (response['error'] ?? '').toString(),
+    );
+  }
+
+  /// 展示给用户的一句话结果。
+  String get summary {
+    if (!success) return error.isEmpty ? '测试失败' : '测试失败：$error';
+    final parts = <String>[
+      if (latencyMs != null) '耗时 ${latencyMs}ms',
+      if (size != null) '大小 ${(size! / 1024).toStringAsFixed(1)}KB',
+      if (durationMs != null) '时长 ${(durationMs! / 1000).toStringAsFixed(1)}s',
+    ];
+    return parts.isEmpty ? '测试成功' : '测试成功：${parts.join('，')}';
+  }
+}
+
+/// TTS 全局设置的读取 / 保存 / 测试（经加密 WebSocket 与后端交互）。
+class TtsSettingsService {
+  TtsSettingsService({TtsRequest? request})
+    : _request = request ?? _defaultRequest;
+
+  static final TtsSettingsService instance = TtsSettingsService();
+
+  final TtsRequest _request;
+
+  static Future<Map<String, dynamic>> _defaultRequest(
+    String action,
+    Map<String, dynamic> payload, {
+    Duration? timeout,
+  }) {
+    if (timeout == null) {
+      return SecureWebSocketClient.instance.request(action, payload);
+    }
+    return SecureWebSocketClient.instance.request(
+      action,
+      payload,
+      timeout: timeout,
+    );
+  }
+
+  /// 读取当前设置；失败时抛出异常。
+  Future<TtsSettings> load() async {
+    final response = await _request('settings_tts_get', const {});
+    return TtsSettings.fromResponse(response);
+  }
+
+  /// 组装 `settings_tts_update` 的 `updates`。
+  ///
+  /// [providers] 为各供应商表单当前值（字符串）。密钥字段只在用户输入了新值
+  /// （非空）时才提交，缺省即保留服务端原值；数值字段无法解析时不提交。
+  @visibleForTesting
+  static Map<String, dynamic> buildUpdates({
+    required bool enabled,
+    required String provider,
+    required int timeoutSeconds,
+    required int maxChars,
+    required Map<String, Map<String, String>> providers,
+  }) {
+    final updates = <String, dynamic>{
+      'enabled': enabled,
+      'provider': provider,
+      'timeout_seconds': timeoutSeconds,
+      'max_chars': maxChars,
+    };
+    for (final spec in ttsProviderSpecs) {
+      final values = providers[spec.id] ?? const <String, String>{};
+      final section = <String, dynamic>{};
+      for (final field in spec.fields) {
+        final raw = (values[field.key] ?? '').trim();
+        if (field.secret) {
+          if (raw.isNotEmpty) section[field.key] = raw;
+        } else if (field.numeric) {
+          final number = double.tryParse(raw);
+          if (number != null) section[field.key] = number;
+        } else {
+          section[field.key] = raw;
+        }
+      }
+      updates[spec.id] = section;
+    }
+    return updates;
+  }
+
+  /// 保存设置；失败时抛出异常。
+  Future<void> save({
+    required bool enabled,
+    required String provider,
+    required int timeoutSeconds,
+    required int maxChars,
+    required Map<String, Map<String, String>> providers,
+  }) async {
+    final response = await _request('settings_tts_update', {
+      'updates': buildUpdates(
+        enabled: enabled,
+        provider: provider,
+        timeoutSeconds: timeoutSeconds,
+        maxChars: maxChars,
+        providers: providers,
+      ),
+    });
+    if (response['success'] == false) {
+      final error = (response['error'] ?? '').toString();
+      throw StateError(error.isEmpty ? '保存失败' : error);
+    }
+  }
+
+  /// 用已保存的配置合成一句测试语音（耗时较长，使用更长的请求超时）。
+  Future<TtsTestResult> test() async {
+    final response = await _request(
+      'settings_tts_test',
+      const {},
+      timeout: const Duration(seconds: 90),
+    );
+    return TtsTestResult.fromResponse(response);
+  }
+}

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../models/message.dart';
+import '../models/voice_message.dart';
 import '../models/role.dart';
 import '../models/chat_context.dart';
 import '../models/provider_quiet_rule.dart';
@@ -51,13 +52,26 @@ class _AiReply {
   // 模型思考过程（可能为空；是否展示由角色 showReasoning 决定）
   final String? reasoning;
 
+  // 服务端 TTS 合成的语音消息（metadata['voice_messages']），没有则为空
+  final List<VoiceMessage> voiceMessages;
+
   const _AiReply(
     this.content,
     this.emojisCalled, [
     this.requestId,
     this.hasToolCalls = false,
     this.reasoning,
+    this.voiceMessages = const <VoiceMessage>[],
   ]);
+
+  /// 用于上下文 / 预览的回复文字：正文为空（全部转成语音）时退回语音所说内容。
+  String get effectiveText {
+    if (content.trim().isNotEmpty) return content;
+    return voiceMessages
+        .map((voice) => voice.text.trim())
+        .where((text) => text.isNotEmpty)
+        .join(' ');
+  }
 }
 
 /// 聊天核心引擎
@@ -873,8 +887,10 @@ class ChatController extends ChangeNotifier {
     );
 
     String contentToSend;
+    var voiceMessages = const <VoiceMessage>[];
     if (response.success && response.content != null) {
       contentToSend = response.content!;
+      voiceMessages = VoiceMessage.listFromMetadata(response.metadata);
     } else if (response.ignored) {
       debugPrint('ChatController: AI chose not to send scheduled task message');
       return;
@@ -886,7 +902,13 @@ class ChatController extends ChangeNotifier {
     }
 
     // 分段发送
-    await _sendSegmentsQueued(chatId, roleId, contentToSend, isGroup: false);
+    await _sendSegmentsQueued(
+      chatId,
+      roleId,
+      contentToSend,
+      isGroup: false,
+      voiceMessages: voiceMessages,
+    );
 
     // 更新聊天列表
     _updateChatList(chatId);
@@ -1031,6 +1053,7 @@ class ChatController extends ChangeNotifier {
         requestId: rawReply.requestId,
         hasToolCalls: rawReply.hasToolCalls,
         reasoning: rawReply.reasoning,
+        voiceMessages: rawReply.voiceMessages,
       );
     }
 
@@ -1130,6 +1153,7 @@ class ChatController extends ChangeNotifier {
             requestId: rawReply.requestId,
             hasToolCalls: rawReply.hasToolCalls,
             reasoning: rawReply.reasoning,
+            voiceMessages: rawReply.voiceMessages,
           );
           anySpokeInRound = true;
           if (MessageParts.isNoReplyDirective(rawReply.content)) {
@@ -1138,7 +1162,8 @@ class ChatController extends ChangeNotifier {
           context.incrementConsecutiveCount(role.id);
           lastSpeakerId = role.id;
           lastSpeakerRole = role;
-          lastMessage = rawReply.content;
+          // 正文全部转成语音时，下一位发言者看到的是语音所说的文字。
+          lastMessage = rawReply.effectiveText;
         }
       }
 
@@ -1310,13 +1335,14 @@ class ChatController extends ChangeNotifier {
           ? Map<String, dynamic>.from(payload['metadata'])
           : null;
       final requestId = metadata?['request_id']?.toString().trim();
+      final voiceMessages = VoiceMessage.listFromMetadata(metadata);
 
       await MemoryService.appendJsonMemoryPair(
         roleId: roleId,
         userContent: userMessage,
         // 无回复仍是一次有效的 assistant 结果，需要进入记忆/数据库；
         // 是否显示气泡由聊天页面按当前角色的 showNoReply 设置控制。
-        assistantContent: content,
+        assistantContent: _memoryTextFor(content, voiceMessages),
         requestId: (requestId != null && requestId.isNotEmpty)
             ? requestId
             : null,
@@ -1336,6 +1362,7 @@ class ChatController extends ChangeNotifier {
         requestId: metadata?['request_id']?.toString(),
         hasToolCalls: _extractHasToolCalls(metadata),
         reasoning: _extractReasoning(metadata),
+        voiceMessages: voiceMessages,
       );
       debugPrint('ChatController: recovered reply stored for task $taskId');
 
@@ -1729,6 +1756,7 @@ class ChatController extends ChangeNotifier {
         submitResponse.metadata?['request_id']?.toString(),
         _extractHasToolCalls(submitResponse.metadata),
         _extractReasoning(submitResponse.metadata),
+        VoiceMessage.listFromMetadata(submitResponse.metadata),
       );
     }
 
@@ -1771,7 +1799,10 @@ class ChatController extends ChangeNotifier {
           await MemoryService.appendJsonMemoryPair(
             roleId: role.id,
             userContent: userMessage,
-            assistantContent: content,
+            assistantContent: _memoryTextFor(
+              content,
+              VoiceMessage.listFromMetadata(metadata),
+            ),
             requestId: (requestId != null && requestId.isNotEmpty)
                 ? requestId
                 : null,
@@ -1789,6 +1820,7 @@ class ChatController extends ChangeNotifier {
             metadata?['request_id']?.toString(),
             _extractHasToolCalls(metadata),
             _extractReasoning(metadata),
+            VoiceMessage.listFromMetadata(metadata),
           );
         }
 
@@ -1832,7 +1864,10 @@ class ChatController extends ChangeNotifier {
                   await MemoryService.appendJsonMemoryPair(
                     roleId: role.id,
                     userContent: userMessage,
-                    assistantContent: content,
+                    assistantContent: _memoryTextFor(
+                      content,
+                      VoiceMessage.listFromMetadata(metadata),
+                    ),
                     requestId: (requestId != null && requestId.isNotEmpty)
                         ? requestId
                         : null,
@@ -1848,6 +1883,7 @@ class ChatController extends ChangeNotifier {
                     metadata?['request_id']?.toString(),
                     _extractHasToolCalls(metadata),
                     _extractReasoning(metadata),
+                    VoiceMessage.listFromMetadata(metadata),
                   );
                 }
               }
@@ -1921,7 +1957,9 @@ class ChatController extends ChangeNotifier {
     String? requestId,
     bool hasToolCalls = false,
     String? reasoning,
+    List<VoiceMessage> voiceMessages = const <VoiceMessage>[],
   }) async {
+    // 空正文（例如全部转成了语音）不产生文字气泡，只发送语音消息。
     final segments = SegmentSender.splitMessage(rawReply);
     final availableEmojiCategories = await _loadAvailableEmojiCategories(
       roleId,
@@ -1979,39 +2017,22 @@ class ChatController extends ChangeNotifier {
 
       await MessageStore.instance.addMessage(chatId, aiMessage);
 
-      // 更新未读并发送通知
-      if (!_typingCallbacks.containsKey(chatId)) {
-        MessageStore.instance.incrementUnread(chatId);
-        ChatListService.instance.incrementUnread(chatId);
-
-        // 发送本地通知（去除格式标记，仅展示 AI 实际说出的内容）
-        final role = RoleService.getRoleById(roleId);
-        final notificationParts = MessageParts.parse(
-          displayText,
-          allowFact: false,
-        );
-        final notifyDialogue = notificationParts.dialogue;
-        NotificationService.instance.showMessageNotification(
-          chatId: chatId,
-          senderName: role?.name ?? 'AI',
-          message: notifyDialogue.trim().isNotEmpty
-              ? notifyDialogue
-              : notificationParts.plainText,
-        );
-
-        // 更新角标
-        final totalUnread = ChatListService.instance.totalUnreadCount;
-        NotificationService.instance.setBadgeCount(totalUnread);
-      }
+      // 更新未读并发送通知（去除格式标记，仅展示 AI 实际说出的内容）
+      final notificationParts = MessageParts.parse(
+        displayText,
+        allowFact: false,
+      );
+      final notifyDialogue = notificationParts.dialogue;
+      _notifyIncomingAiMessage(
+        chatId,
+        roleId,
+        notifyDialogue.trim().isNotEmpty
+            ? notifyDialogue
+            : notificationParts.plainText,
+      );
 
       // 更新上下文
-      final context = _contexts[chatId];
-      if (context != null) {
-        _contexts[chatId] = context.copyWith(
-          messageCount: MessageStore.instance.getMessageCount(chatId),
-          lastMessageTime: DateTime.now(),
-        );
-      }
+      _refreshContextAfterAiMessage(chatId);
 
       debugPrint('ChatController: Sent segment ${i + 1}/${segments.length}');
 
@@ -2033,6 +2054,42 @@ class ChatController extends ChangeNotifier {
           Duration(milliseconds: 100 + _random.nextInt(200)),
         );
       }
+    }
+
+    // 语音消息紧跟文字分段之后发送；正文全部转成语音时 segments 为空，
+    // 此时 request_id / 工具调用 / 思考过程改挂在最后一条语音上。
+    for (var v = 0; v < voiceMessages.length; v++) {
+      final voice = voiceMessages[v];
+      final carriesMeta = segments.isEmpty && v == voiceMessages.length - 1;
+
+      // 与文字分段一致：非本轮第一条消息前延迟（单聊显示 typing，群聊不显示）
+      if (segments.isNotEmpty || v > 0) {
+        if (!isGroup) {
+          _setTyping(chatId, true);
+        }
+        final delay = 500 + _random.nextInt(1001); // 500-1500ms
+        await Future.delayed(Duration(milliseconds: delay));
+      }
+
+      await MessageStore.instance.addMessage(
+        chatId,
+        Message(
+          id: '${DateTime.now().microsecondsSinceEpoch}_voice_${v}_${voice.ref.hashCode}',
+          senderId: roleId,
+          receiverId: 'me',
+          content: voice.toContent(),
+          type: MessageType.voice,
+          timestamp: DateTime.now(),
+          requestId: carriesMeta ? requestId : null,
+          hasToolCalls: carriesMeta && hasToolCalls,
+          reasoningContent: carriesMeta ? reasoning : null,
+        ),
+      );
+      _notifyIncomingAiMessage(chatId, roleId, VoiceMessage.previewLabel);
+      _refreshContextAfterAiMessage(chatId);
+      debugPrint(
+        'ChatController: Sent voice message ${v + 1}/${voiceMessages.length}',
+      );
     }
 
     // A tool call is valid even when the final model text does not echo its
@@ -2077,6 +2134,44 @@ class ChatController extends ChangeNotifier {
     if (!isGroup) {
       _hideTyping(chatId);
     }
+  }
+
+  /// 聊天页不在前台时：累加未读、弹本地通知并刷新角标。
+  void _notifyIncomingAiMessage(String chatId, String roleId, String body) {
+    if (_typingCallbacks.containsKey(chatId)) return;
+    MessageStore.instance.incrementUnread(chatId);
+    ChatListService.instance.incrementUnread(chatId);
+
+    final role = RoleService.getRoleById(roleId);
+    NotificationService.instance.showMessageNotification(
+      chatId: chatId,
+      senderName: role?.name ?? 'AI',
+      message: body,
+    );
+
+    // 更新角标
+    final totalUnread = ChatListService.instance.totalUnreadCount;
+    NotificationService.instance.setBadgeCount(totalUnread);
+  }
+
+  /// AI 消息落库后刷新聊天上下文的消息数与最近消息时间。
+  void _refreshContextAfterAiMessage(String chatId) {
+    final context = _contexts[chatId];
+    if (context != null) {
+      _contexts[chatId] = context.copyWith(
+        messageCount: MessageStore.instance.getMessageCount(chatId),
+        lastMessageTime: DateTime.now(),
+      );
+    }
+  }
+
+  /// 写入记忆的 assistant 文本：正文为空（全部转成语音）时用语音所说内容。
+  static String _memoryTextFor(String content, List<VoiceMessage> voices) {
+    if (content.trim().isNotEmpty || voices.isEmpty) return content;
+    return voices
+        .map((voice) => voice.text.trim())
+        .where((text) => text.isNotEmpty)
+        .join(' ');
   }
 
   /// 精确表情投递：按 category/filename 构造稳定的 ws-emoji 引用，
@@ -2220,6 +2315,8 @@ class ChatController extends ChangeNotifier {
         return '[图片]';
       case MessageType.image:
         return '[图片]';
+      case MessageType.voice:
+        return VoiceMessage.previewLabel;
       default:
         // 预览只展示对话，剥离动作/声音/心理/数值等格式化片段。
         return MessageParts.previewText(

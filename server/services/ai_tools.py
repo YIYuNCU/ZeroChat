@@ -710,6 +710,61 @@ _SEND_EMOTION_EMOJI_TOOL = [{
 }]
 
 
+"""
+语音消息工具：让 AI 把一段话用 TTS 合成为真实语音发给用户。
+仅当 TTS 已启用并配置、角色未关闭语音、且处于聊天场景时开放（见 ai_service.generate_with_role）。
+"""
+_SEND_VOICE_MESSAGE_TOOL = [{
+    "type": "function",
+    "function": {
+        "name": "send_voice_message",
+        "description": "把一段话合成为语音消息发给用户（真实音频，不是文字）。适合用户想听你说话、情绪浓烈、简短亲密的场合；不要每轮都用，单次回复最多 1-2 条。text 只写要说出口的纯口语，不要带任何标签、表情符号或动作描述。语音发出后不要在文字回复里重复同样的内容。",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "要朗读的内容，纯口语文字，简短自然（建议不超过 100 字）。"
+                },
+                "style": {
+                    "type": "string",
+                    "description": "语气/情绪提示，例如「温柔低声」「开心活泼」；不需要时传空字符串。"
+                }
+            },
+            "required": ["text", "style"],
+            "additionalProperties": False,
+        }
+    }
+}]
+
+
+async def execute_send_voice_message(
+    role_data: Dict, text: str, style: str, issued_count: int = 0,
+) -> tuple:
+    """合成并保存语音，返回 (给模型的结果描述, 投递信息或 None)。永不抛出。"""
+    from services import tts_service
+
+    if issued_count >= tts_service.MAX_VOICES_PER_TURN:
+        return (
+            f"语音发送失败：单次回复最多发送 {tts_service.MAX_VOICES_PER_TURN} 条语音，请改用文字回复。",
+            None,
+        )
+    try:
+        delivery = await tts_service.synthesize_for_role(role_data, text, style)
+    except tts_service.TTSError as exc:
+        return f"语音发送失败：{exc}。请改用文字回复。", None
+    except Exception:  # noqa: BLE001 - 工具执行器不得让整轮对话失败
+        logger.exception("send_voice_message 执行异常")
+        return "语音发送失败：内部错误。请改用文字回复。", None
+    seconds = delivery.get("duration_ms")
+    duration_hint = f"（约 {max(1, round(seconds / 1000))} 秒）" if seconds else ""
+    return (
+        f"语音已发送{duration_hint}。不要在文字回复中重复这段话；可以追加简短文字，也可以不再回复文字。",
+        delivery,
+    )
+
+
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 # 云端表情专用分类：不参与情绪随机抽取与情绪列举

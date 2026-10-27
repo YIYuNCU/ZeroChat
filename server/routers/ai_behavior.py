@@ -484,6 +484,20 @@ async def detect_intent(request: IntentDetectRequest):
 
 # ========== 聊天处理 ==========
 
+def _with_voice_transcripts(
+    reply: str, voice_messages: List[Dict[str, Any]], plain: bool,
+) -> str:
+    """把已发出的语音转写并入助手记忆文本（App 用 <对话> 块，OneBot 用纯文本）。"""
+    lines = []
+    for item in voice_messages:
+        spoken = str(item.get("text") or "").strip()
+        if spoken:
+            lines.append(f"[语音] {spoken}" if plain else f"<对话>[语音] {spoken}</对话>")
+    if not lines:
+        return reply
+    return "\n".join(part for part in (reply.strip(), *lines) if part)
+
+
 async def _run_memory_ai_pipeline(
     role: Dict,
     role_id: str,
@@ -502,6 +516,7 @@ async def _run_memory_ai_pipeline(
     trigger_summary_after_reply: bool = True,
     vision_context: Optional[Dict[str, Any]] = None,
     envelope: Optional[ChatEnvelope] = None,
+    allow_voice: bool = False,
 ) -> Dict[str, Any]:
     from services.ai_service import generate_with_role, is_no_reply_directive
     from services.memory_service import (
@@ -597,6 +612,15 @@ async def _run_memory_ai_pipeline(
         except Exception as e:
             logger.warning("数值状态读取失败：%s", e)
 
+    # 语音工具仅在调用方允许（聊天路径）且 TTS 已启用并配置、角色未关闭时开放。
+    enable_voice = False
+    if allow_voice:
+        from services import tts_service
+        enable_voice = tts_service.is_voice_available(role)
+
+    generate_kwargs: Dict[str, Any] = {}
+    if enable_voice:
+        generate_kwargs["enable_voice"] = True
     result = await generate_with_role(
         role_data=role,
         user_message=user_message,
@@ -609,6 +633,7 @@ async def _run_memory_ai_pipeline(
         stats_current=stats_current,
         vision_context=vision_context,
         envelope=envelope,
+        **generate_kwargs,
     )
 
     vector_memories_count = len(vector_memories)
@@ -627,6 +652,13 @@ async def _run_memory_ai_pipeline(
 
     ai_reply = _sanitize_reply_content(result.get("content") or "")
     no_reply = is_no_reply_directive(ai_reply)
+    voice_messages = [
+        item for item in (result.get("_voices_called") or []) if isinstance(item, dict)
+    ]
+    if voice_messages and no_reply:
+        # 语音已经发出：不能再按"无回复"丢弃本轮，也不要把控制指令当文字发出去。
+        no_reply = False
+        ai_reply = ""
 
     # 数值系统：从回复中解析数值块并按上下限裁剪后持久化
     if stats_current is not None and not no_reply:
@@ -660,12 +692,16 @@ async def _run_memory_ai_pipeline(
         )
     # 无回复指令是内部控制信号：保留用户输入，但不能污染助手短期记忆。
     if include_assistant_memory and not no_reply:
+        # 语音转写写入助手记忆，让模型在后续轮次记得自己说过什么。
+        assistant_memory_content = _with_voice_transcripts(
+            ai_reply, voice_messages, origin.startswith("onebot"),
+        )
         await _run_db(
             role_id, functools.partial(
                 append_short_term,
                 role_id,
                 "assistant",
-                ai_reply,
+                assistant_memory_content,
                 task_id=task_id,
                 request_id=normalized_request_id,
                 json_memory=attached_json,
@@ -701,6 +737,7 @@ async def _run_memory_ai_pipeline(
         "new_core": new_core,
         "vector_memory_count": vector_memories_count,
         "emojis_called": result.get("_emojis_called", []),
+        "voice_messages": voice_messages,
         # 工具调用明细已按 request_id 落库，不再随管道结果一并返回；
         # 客户端展开卡片时按需通过独立接口查询。
         "has_tool_calls": bool(result.get("_tool_calls_log")),
@@ -943,6 +980,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             trigger_summary_after_reply=True,
             vision_context=vision_context,
             envelope=envelope,
+            allow_voice=True,
         )
     finally:
         # 识图工具在管道内执行，必须等管道返回后再清理图片目录
@@ -981,6 +1019,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             "role_name": role.get("name"),
             "request_id": pipeline_result.get("request_id") or request_id,
             "emojis_called": [] if no_reply else pipeline_result.get("emojis_called", []),
+            "voice_messages": [] if no_reply else pipeline_result.get("voice_messages", []),
             "no_reply": no_reply,
             "has_tool_calls": pipeline_result.get("has_tool_calls", False),
             "reasoning_content": pipeline_result.get("reasoning_content"),

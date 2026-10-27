@@ -182,6 +182,8 @@ class SettingsUpdate(BaseModel):
 async def get_settings(include_secrets: bool = Query(False)):
     """获取全局设置"""
     settings = summary_config_service.load_settings_with_summary_configs()
+    # 语音合成配置含 API Key，只通过 WS 动作 settings_tts_get/update 读写，不在此处返回。
+    settings.pop("tts_config", None)
 
     # 默认隐藏敏感信息，避免泄露；用于新安装客户端全量同步时可显式请求明文
     if not include_secrets:

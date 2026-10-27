@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/favorite_collection.dart';
+import '../models/message.dart';
+import '../models/voice_message.dart';
 import '../services/favorite_service.dart';
 
 /// 收藏详情页面
@@ -268,7 +270,11 @@ class _FavoriteDetailPageState extends State<FavoriteDetailPage> {
                         ],
                         // 正文
                         Text(
-                          message.content,
+                          // 语音快照的 content 是内部 JSON，这里展示所说的文字。
+                          message.type == MessageType.voice
+                              ? '${VoiceMessage.previewLabel} ${VoiceMessage.parseContent(message.content)?.text ?? ''}'
+                                    .trim()
+                              : message.content,
                           style: const TextStyle(
                             fontSize: 17,
                             color: Color(0xFF000000),

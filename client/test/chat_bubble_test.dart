@@ -1,12 +1,38 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:zerochat/core/message_parts.dart';
 import 'package:zerochat/models/message.dart';
 import 'package:zerochat/models/role.dart';
+import 'package:zerochat/models/voice_message.dart';
 import 'package:zerochat/services/role_service.dart';
 import 'package:zerochat/services/storage_service.dart';
+import 'package:zerochat/services/voice_player.dart';
+import 'package:zerochat/services/voice_playback_service.dart';
 import 'package:zerochat/widgets/chat_bubble.dart';
+
+/// 测试用假播放器：记录播放的文件，并可手动触发播放完成。
+class _FakeVoicePlayer implements VoicePlayer {
+  final StreamController<void> _complete = StreamController<void>.broadcast();
+  final List<String> played = [];
+  int stops = 0;
+
+  @override
+  Stream<void> get onComplete => _complete.stream;
+
+  @override
+  Future<void> play(String filePath) async => played.add(filePath);
+
+  @override
+  Future<void> stop() async => stops++;
+
+  @override
+  Future<void> dispose() => _complete.close();
+
+  void finish() => _complete.add(null);
+}
 
 Message _message(
   String content, {
@@ -182,6 +208,123 @@ void main() {
     await tester.tap(find.text('收起思考过程'));
     await tester.pump();
     expect(find.text('先分析再回答'), findsNothing);
+  });
+
+  group('voice bubble', () {
+    const ref = 'ws-emoji://voice/role-1/a.mp3';
+    late _FakeVoicePlayer player;
+    late VoicePlaybackService previous;
+
+    Message voiceMessage({String? content}) => Message(
+      id: 'voice-1',
+      senderId: 'role-1',
+      receiverId: 'me',
+      content:
+          content ??
+          const VoiceMessage(text: '今天辛苦了', ref: ref, durationMs: 2300).toContent(),
+      type: MessageType.voice,
+      timestamp: DateTime(2026, 7, 14),
+    );
+
+    void installService({String? path = '/cache/a.mp3'}) {
+      VoicePlaybackService.instance = VoicePlaybackService(
+        playerFactory: () => player,
+        resolver: (_) async => path,
+      );
+    }
+
+    setUp(() {
+      previous = VoicePlaybackService.instance;
+      player = _FakeVoicePlayer();
+      installService();
+    });
+
+    tearDown(() {
+      VoicePlaybackService.instance = previous;
+    });
+
+    testWidgets('shows duration and hides the JSON content', (tester) async {
+      await tester.pumpWidget(_bubble(voiceMessage(), isSender: false));
+
+      expect(find.text('3"'), findsOneWidget);
+      expect(find.byIcon(Icons.volume_up_rounded), findsOneWidget);
+      expect(find.textContaining('"kind"'), findsNothing);
+      expect(find.textContaining('ws-emoji://'), findsNothing);
+      // 文字默认折叠。
+      expect(find.text('今天辛苦了'), findsNothing);
+    });
+
+    testWidgets('transcript can be expanded and collapsed', (tester) async {
+      await tester.pumpWidget(_bubble(voiceMessage(), isSender: false));
+
+      await tester.tap(find.text('转文字'));
+      await tester.pump();
+      expect(find.text('今天辛苦了'), findsOneWidget);
+      expect(find.text('收起文字'), findsOneWidget);
+
+      await tester.tap(find.text('收起文字'));
+      await tester.pump();
+      expect(find.text('今天辛苦了'), findsNothing);
+    });
+
+    testWidgets('tapping plays the resolved file and resets on completion', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_bubble(voiceMessage(), isSender: false));
+
+      await tester.tap(find.byKey(const ValueKey('voice-play')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(player.played, ['/cache/a.mp3']);
+      expect(find.byIcon(Icons.graphic_eq), findsOneWidget);
+
+      player.finish();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byIcon(Icons.volume_up_rounded), findsOneWidget);
+      expect(find.byIcon(Icons.graphic_eq), findsNothing);
+    });
+
+    testWidgets('tapping again while playing stops playback', (tester) async {
+      await tester.pumpWidget(_bubble(voiceMessage(), isSender: false));
+
+      await tester.tap(find.byKey(const ValueKey('voice-play')));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byIcon(Icons.graphic_eq), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('voice-play')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(player.stops, greaterThan(0));
+      expect(find.byIcon(Icons.volume_up_rounded), findsOneWidget);
+    });
+
+    testWidgets('shows a hint when the audio cannot be loaded', (tester) async {
+      installService(path: null);
+      await tester.pumpWidget(_bubble(voiceMessage(), isSender: false));
+
+      await tester.tap(find.byKey(const ValueKey('voice-play')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(player.played, isEmpty);
+      expect(find.text('语音加载失败，请稍后重试'), findsOneWidget);
+      expect(find.byIcon(Icons.volume_up_rounded), findsOneWidget);
+    });
+
+    testWidgets('corrupt voice content falls back to a placeholder', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _bubble(voiceMessage(content: '{broken'), isSender: false),
+      );
+
+      expect(find.text('[语音]'), findsOneWidget);
+      expect(find.text('{broken'), findsNothing);
+    });
   });
 
   testWidgets('no-reply message with reasoning is not fully hidden', (
