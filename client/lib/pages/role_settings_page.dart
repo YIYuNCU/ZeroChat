@@ -19,10 +19,32 @@ class RoleSettingsPage extends StatefulWidget {
   State<RoleSettingsPage> createState() => _RoleSettingsPageState();
 }
 
+/// 一组示例对话的输入控制器。
+class _ExampleControllers {
+  final TextEditingController user;
+  final TextEditingController assistant;
+
+  _ExampleControllers({String user = '', String assistant = ''})
+    : user = TextEditingController(text: user),
+      assistant = TextEditingController(text: assistant);
+
+  void dispose() {
+    user.dispose();
+    assistant.dispose();
+  }
+}
+
 class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _nameController;
   late TextEditingController _descController;
   late TextEditingController _promptController;
+  late TextEditingController _identityController;
+  late TextEditingController _personalityController;
+  late TextEditingController _relationshipController;
+  late TextEditingController _scenarioController;
+  late TextEditingController _speakingStyleController;
+  late TextEditingController _boundariesController;
+  final List<_ExampleControllers> _examples = [];
   late TextEditingController _aiModelController;
   late TextEditingController _aiApiUrlController;
   late TextEditingController _aiApiKeyController;
@@ -70,6 +92,20 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _nameController = TextEditingController(text: widget.role.name);
     _descController = TextEditingController(text: widget.role.description);
     _promptController = TextEditingController(text: widget.role.systemPrompt);
+    final card = widget.role.personaCard;
+    _identityController = TextEditingController(text: card.identity);
+    _personalityController = TextEditingController(text: card.personality);
+    _relationshipController = TextEditingController(text: card.relationship);
+    _scenarioController = TextEditingController(text: card.scenario);
+    _speakingStyleController = TextEditingController(text: card.speakingStyle);
+    _boundariesController = TextEditingController(text: card.boundaries);
+    for (final example in card.exampleDialogues.take(
+      PersonaCard.maxExamples,
+    )) {
+      _examples.add(
+        _ExampleControllers(user: example.user, assistant: example.assistant),
+      );
+    }
     _aiModelController = TextEditingController(text: widget.role.aiModel);
     _aiApiUrlController = TextEditingController(text: widget.role.aiApiUrl);
     _aiApiKeyController = TextEditingController(text: widget.role.aiApiKey);
@@ -145,6 +181,15 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _nameController.dispose();
     _descController.dispose();
     _promptController.dispose();
+    _identityController.dispose();
+    _personalityController.dispose();
+    _relationshipController.dispose();
+    _scenarioController.dispose();
+    _speakingStyleController.dispose();
+    _boundariesController.dispose();
+    for (final example in _examples) {
+      example.dispose();
+    }
     _aiModelController.dispose();
     _aiApiUrlController.dispose();
     _aiApiKeyController.dispose();
@@ -207,9 +252,55 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
 
           const SizedBox(height: 10),
 
-          // 系统提示词
+          // 结构化人设
           _buildSection(
-            title: '系统提示词 (System Prompt)',
+            title: '结构化人设',
+            children: [
+              _buildPersonaField(
+                label: '身份与背景',
+                controller: _identityController,
+                hintText: '角色是谁、来历与背景',
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildPersonaField(
+                label: '性格与价值观',
+                controller: _personalityController,
+                hintText: '性格特点、价值观与行为倾向',
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildPersonaField(
+                label: '与用户的关系',
+                controller: _relationshipController,
+                hintText: '与用户的关系及相处方式',
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildPersonaField(
+                label: '当前情境',
+                controller: _scenarioController,
+                hintText: '对话发生的场景与处境',
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildPersonaField(
+                label: '说话方式',
+                controller: _speakingStyleController,
+                hintText: '语气、口癖、措辞习惯',
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildPersonaField(
+                label: '禁区',
+                controller: _boundariesController,
+                hintText: '角色不会做或不会说的内容',
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildExampleEditor(),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 补充设定（原系统提示词）
+          _buildSection(
+            title: '补充设定（自由文本）',
             children: [
               Padding(
                 padding: const EdgeInsets.all(16),
@@ -217,7 +308,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                   controller: _promptController,
                   maxLines: 5,
                   decoration: const InputDecoration(
-                    hintText: '定义 AI 的角色、性格和行为...',
+                    hintText: '以上结构化字段之外的补充内容',
                     border: OutlineInputBorder(),
                   ),
                 ),
@@ -992,6 +1083,110 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     );
   }
 
+  Widget _buildPersonaField({
+    required String label,
+    required TextEditingController controller,
+    String? hintText,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: TextField(
+        controller: controller,
+        minLines: 2,
+        maxLines: 6,
+        maxLength: PersonaCard.maxFieldLength,
+        decoration: InputDecoration(
+          labelText: label,
+          hintText: hintText,
+          alignLabelWithHint: true,
+          border: const OutlineInputBorder(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildExampleEditor() {
+    final canAdd = _examples.length < PersonaCard.maxExamples;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '示例对话（${_examples.length}/${PersonaCard.maxExamples}）',
+                  style: const TextStyle(fontSize: 16),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: canAdd
+                    ? () => setState(() => _examples.add(_ExampleControllers()))
+                    : null,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('添加'),
+              ),
+            ],
+          ),
+          const Text(
+            '用几组对话示范角色的语气与反应',
+            style: TextStyle(fontSize: 12, color: Color(0xFF888888)),
+          ),
+          for (var i = 0; i < _examples.length; i++) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Text(
+                  '示例 ${i + 1}',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF888888),
+                  ),
+                ),
+                const Spacer(),
+                IconButton(
+                  tooltip: '删除示例 ${i + 1}',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.delete_outline, size: 20),
+                  onPressed: () {
+                    final removed = _examples[i];
+                    setState(() => _examples.removeAt(i));
+                    // 等本帧重建后再释放，避免 TextField 仍引用已释放的控制器。
+                    WidgetsBinding.instance.addPostFrameCallback(
+                      (_) => removed.dispose(),
+                    );
+                  },
+                ),
+              ],
+            ),
+            TextField(
+              controller: _examples[i].user,
+              minLines: 1,
+              maxLines: 4,
+              maxLength: PersonaCard.maxExampleLength,
+              decoration: const InputDecoration(
+                labelText: '用户说',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _examples[i].assistant,
+              minLines: 1,
+              maxLines: 4,
+              maxLength: PersonaCard.maxExampleLength,
+              decoration: const InputDecoration(
+                labelText: '角色回',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _buildTextField({
     required String label,
     required TextEditingController controller,
@@ -1389,6 +1584,23 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       name: _nameController.text,
       description: _descController.text,
       systemPrompt: _promptController.text,
+      personaCard: PersonaCard(
+        identity: _identityController.text,
+        personality: _personalityController.text,
+        relationship: _relationshipController.text,
+        scenario: _scenarioController.text,
+        speakingStyle: _speakingStyleController.text,
+        boundaries: _boundariesController.text,
+        exampleDialogues: [
+          for (final example in _examples)
+            if (example.user.text.trim().isNotEmpty ||
+                example.assistant.text.trim().isNotEmpty)
+              PersonaExample(
+                user: example.user.text,
+                assistant: example.assistant.text,
+              ),
+        ],
+      ),
       aiModel: _aiModelController.text.trim(),
       aiApiUrl: _aiApiUrlController.text.trim(),
       aiApiKey: _aiApiKeyController.text.trim(),

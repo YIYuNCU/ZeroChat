@@ -53,17 +53,18 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
     def test_prompt_prioritizes_complete_chinese_reply_tags(self):
         prompt = _build_system_prompt({"id": "role-1", "persona": "测试人设"})
 
-        self.assertIn("消息格式协议 - 最高优先级", prompt)
+        self.assertIn("<output_protocol>", prompt)
         self.assertIn("完整、成对的中文标签", prompt)
-        self.assertIn("<对话>...</对话>、<动作>...</动作>、<声音>...</声音>、<心理>...</心理>", prompt)
+        self.assertIn("<对话>…</对话>、<动作>…</动作>、<声音>…</声音>、<心理>…</心理>", prompt)
         self.assertIn("非对白声音", prompt)
         self.assertIn("放屁声、排泄声等生理声响", prompt)
         self.assertIn("应输出一个简短的 <声音> 块", prompt)
         self.assertIn("没有合理声源时不要凭空添加", prompt)
-        self.assertIn("不得未闭合、错配、嵌套或将标签前后混用", prompt)
-        self.assertIn("严禁使用任何英文或其他别名标签", prompt)
-        self.assertIn("$ 是唯一允许的标签外分隔符", prompt)
-        self.assertLess(prompt.index("消息格式协议 - 最高优先级"), prompt.index("你的人设：测试人设"))
+        self.assertIn("不得未闭合、错配、嵌套或前后混用", prompt)
+        self.assertIn("严禁使用英文或其他别名标签", prompt)
+        self.assertIn("是标签外唯一允许的分隔符", prompt)
+        self.assertLess(prompt.index("\n<output_protocol>\n"), prompt.index("\n<persona>\n"))
+        self.assertIn("测试人设", prompt[prompt.index("\n<persona>\n"):])
 
     def test_non_deepseek_prompt_uses_conservative_tool_policy(self):
         grok_prompt = _build_system_prompt({"id": "role-1", "ai_model": "xAI-gRoK-4"})
@@ -89,8 +90,8 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        self.assertIn("数值块 - 最高优先级", prompt)
-        self.assertIn("每一次回复都必须且只能包含一个完整的 <数值>...</数值> 块", prompt)
+        self.assertIn("<stats_protocol>", prompt)
+        self.assertIn("每一次回复都必须且只能包含一个完整的 <数值>…</数值> 块", prompt)
         self.assertIn("stats_current 是独立字段（不在 message 文本内）", prompt)
         self.assertIn("必须承接 stats_current 与历史最近数值块中的状态", prompt)
         self.assertIn("即使数值未变化也要完整回写", prompt)
@@ -108,7 +109,7 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
         }
         prompt = _build_system_prompt(role)
 
-        self.assertIn("唯一 <数值> 块必须放在所有 <对话> 块之后", prompt)
+        self.assertIn("唯一的 <数值> 块必须放在所有 <对话> 块之后", prompt)
         self.assertIn("两者之间不得有 $ 或换行", prompt)
         self.assertIn(
             "<对话>第一句</对话>$<对话>第二句</对话><数值>好感:80</数值>",
@@ -118,15 +119,15 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
     def test_sound_prompt_deduplicates_semantically_identical_sounds(self):
         prompt = _build_system_prompt({"id": "role-1", "show_sound": True})
 
-        self.assertIn("声音系统 - 去重规则", prompt)
-        self.assertIn("必须检查当前上下文和历史消息中已经出现的所有 <声音> 内容", prompt)
+        self.assertIn("<sound_rules>", prompt)
+        self.assertIn("先检查当前上下文和历史消息里已经出现的所有 <声音> 内容", prompt)
         self.assertIn("轻哼一声”“轻轻哼了一声”“低低地哼了一声", prompt)
         self.assertIn("没有新声音就省略 <声音> 块", prompt)
 
     def test_sound_deduplication_rule_is_omitted_when_sound_is_hidden(self):
         prompt = _build_system_prompt({"id": "role-1", "show_sound": False})
 
-        self.assertNotIn("声音系统 - 去重规则", prompt)
+        self.assertNotIn("<sound_rules>", prompt)
 
     def test_stats_parser_rejects_multiple_stats_blocks(self):
         self.assertEqual(
@@ -141,7 +142,7 @@ class WriteMemoryToolTests(unittest.IsolatedAsyncioTestCase):
     def test_prompt_and_parser_require_a_standalone_no_reply_directive(self):
         prompt = _build_system_prompt({"id": "role-1"})
 
-        self.assertIn("无回复指令", prompt)
+        self.assertIn("<output_reminder>", prompt)
         self.assertIn(f"整条回复必须且只能是 {NO_REPLY_DIRECTIVE}", prompt)
         self.assertTrue(is_no_reply_directive(f"  {NO_REPLY_DIRECTIVE}  "))
         self.assertFalse(is_no_reply_directive(f"{NO_REPLY_DIRECTIVE}还有正文"))

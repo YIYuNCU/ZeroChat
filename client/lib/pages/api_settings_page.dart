@@ -1317,13 +1317,20 @@ class _PromptsPageState extends State<PromptsPage> {
     );
   }
 
-  bool _isOverridden(ConfigurablePrompt prompt) {
+  Map<String, String> _overrideOf(ConfigurablePrompt prompt) {
     final profile = _selectedProfile;
     final overrides = profile == null
         ? SettingsService.instance.promptOverrides
         : profile.promptOverrides;
-    return (overrides[prompt.id] ?? const {}).isNotEmpty;
+    return overrides[prompt.id] ?? const {};
   }
+
+  bool _isOverridden(ConfigurablePrompt prompt) =>
+      _overrideOf(prompt).isNotEmpty;
+
+  /// 覆盖基于的内置版本低于当前内置版本。
+  bool _isStale(ConfigurablePrompt prompt) =>
+      prompt.isOverrideStale(_overrideOf(prompt));
 
   Future<void> _editScoped(ConfigurablePrompt prompt) async {
     final profile = _selectedProfile;
@@ -1467,6 +1474,7 @@ class _PromptsPageState extends State<PromptsPage> {
                       _promptRow(
                         prompt: prompt,
                         overridden: _isOverridden(prompt),
+                        stale: _isStale(prompt),
                         onTap: () => _editScoped(prompt),
                       ),
                   ],
@@ -1480,6 +1488,7 @@ class _PromptsPageState extends State<PromptsPage> {
   Widget _promptRow({
     required ConfigurablePrompt prompt,
     required bool overridden,
+    bool stale = false,
     required VoidCallback onTap,
   }) => ListTile(
     title: Text(prompt.title),
@@ -1492,6 +1501,14 @@ class _PromptsPageState extends State<PromptsPage> {
     trailing: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (stale)
+          const Padding(
+            padding: EdgeInsets.only(right: 8),
+            child: Text(
+              '基于旧版',
+              style: TextStyle(fontSize: 12, color: Color(0xFFE6A23C)),
+            ),
+          ),
         if (overridden)
           const Padding(
             padding: EdgeInsets.only(right: 4),

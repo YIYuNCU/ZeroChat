@@ -273,7 +273,7 @@ void main() {
       expect(
         result,
         action == '保存'
-            ? {'__builtin__': 'edited'}
+            ? {'__builtin__': 'edited', '__base_version__': '1'}
             : action == '取消'
             ? null
             : {},

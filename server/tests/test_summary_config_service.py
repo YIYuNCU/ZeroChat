@@ -151,7 +151,10 @@ class SummaryConfigTests(unittest.TestCase):
             resolved = summaries.resolve_summary_config(summaries.CONTEXT_SUMMARY)
         self.assertTrue(resolved["system_prompt"].endswith("额外要求"))
         self.assertIn(
-            prompt_config_service.SUMMARY_CONTEXT_EVENTS[:12], resolved["system_prompt"],
+            prompt_config_service.PROMPT_REGISTRY[
+                prompt_config_service.SUMMARY_CONTEXT_EVENTS_ID
+            ].builtin[:12],
+            resolved["system_prompt"],
         )
 
     # ---- migration ------------------------------------------------------------

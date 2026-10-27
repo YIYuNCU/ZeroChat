@@ -244,13 +244,15 @@ async def update_settings(update: SettingsUpdate):
             summary_config_service.CORE_MEMORY_SUMMARY,
             update.core_memory_summary_config.model_dump(exclude_unset=True),
         ) and summary_config_saved
+    if update.prompt_overrides is not None or update.model_prompt_overrides is not None:
+        stored_settings = settings_service.load_settings()
     if update.prompt_overrides is not None:
         updates["prompt_overrides"] = prompt_config_service.sanitize_overrides(
-            update.prompt_overrides
+            update.prompt_overrides, stored_settings.get("prompt_overrides"),
         )
     if update.model_prompt_overrides is not None:
         updates["model_prompt_overrides"] = prompt_config_service.sanitize_model_overrides(
-            update.model_prompt_overrides
+            update.model_prompt_overrides, stored_settings.get("model_prompt_overrides"),
         )
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
@@ -320,11 +322,7 @@ async def get_prompt_registry(applies_to: Optional[str] = Query(None)):
         "prompts": prompt_config_service.registry_snapshot(applies_to),
         "overrides": settings.get("prompt_overrides") or {},
         "model_overrides": settings.get("model_prompt_overrides") or {},
-        "reserved_keys": {
-            "builtin": prompt_config_service.BUILTIN_OVERRIDE_KEY,
-            "phases": list(prompt_config_service.ORIGIN_PHASES),
-            "variants": list(prompt_config_service.VARIANT_KEYS),
-        },
+        "reserved_keys": prompt_config_service.reserved_keys_payload(),
     }
 
 

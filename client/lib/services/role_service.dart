@@ -35,6 +35,9 @@ class RoleService {
       final localPrints = _roleFingerprints(local);
       final localJson = local.toJson();
       for (final key in localPrints.keys) {
+        // 基线里从未记录过、而服务端本次返回了的字段（例如升级后新增的
+        // persona_card）以服务端为准，避免本地默认值反向覆盖服务端数据。
+        if (!baseline.containsKey(key) && fields.contains(key)) continue;
         if (baseline[key] != localPrints[key] && localJson.containsKey(key)) {
           merged[key] = localJson[key];
         }
@@ -472,6 +475,7 @@ class RoleService {
               name: json['name'] ?? '',
               description: json['description'] ?? '',
               systemPrompt: json['system_prompt'] ?? '',
+              personaCard: PersonaCard.fromJson(json['persona_card']),
               avatarUrl: _normalizeAvatarUrl(
                 json['avatar_url']?.toString() ?? '',
               ),
@@ -551,6 +555,9 @@ class RoleService {
                   systemPrompt: json.containsKey('system_prompt')
                       ? backendRole.systemPrompt
                       : existing.systemPrompt,
+                  personaCard: json.containsKey('persona_card')
+                      ? backendRole.personaCard
+                      : existing.personaCard,
                   avatarUrl: backendRole.avatarUrl,
                   avatarHash: backendRole.avatarHash,
                   chatBackgroundUrl: backendRole.chatBackgroundUrl.isNotEmpty
@@ -654,6 +661,7 @@ class RoleService {
     'name': role.name,
     'description': role.description,
     'system_prompt': role.systemPrompt,
+    'persona_card': role.personaCard.toJson(),
     'avatar_url': role.avatarUrl,
     'chat_background_url': role.chatBackgroundUrl,
     'persona': role.description,

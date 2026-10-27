@@ -174,6 +174,10 @@ def create_lifespan(data_dir: Path, config_dir: Path, runtime_dir: Path, logger)
 
         (data_dir / "roles").mkdir(parents=True, exist_ok=True)
 
+        from services import prompt_config_service
+        if prompt_config_service.migrate_stored_overrides():
+            logger.info("已将 settings.json 中的提示词覆盖迁移到 v2 结构（备份: settings.json.bak-prompts）")
+
         scheduler_service.set_event_callback(handle_ai_event)
         scheduler_service.start_scheduler()
         logger.info("调度器已启动")

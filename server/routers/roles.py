@@ -29,6 +29,7 @@ from core.utils import (
     is_tool_role_id,
 )
 from core.quiet_rules import QuietRule, validate_quiet_rules
+from services.persona_card import PersonaCard
 from services.chat_io_service import (
     canonical_chat_message, offload_role_io, role_lock, run_file_io, snapshot_cache,
 )
@@ -205,7 +206,8 @@ class RoleCreate(BaseModel):
     
     # 人设与提示词
     persona: Optional[str] = ""         # 角色人设描述
-    system_prompt: Optional[str] = ""   # 系统提示词
+    system_prompt: Optional[str] = ""   # 补充设定（自由文本，追加在人设卡之后）
+    persona_card: Optional[PersonaCard] = None  # 结构化人设卡（services/persona_card.py）
     greeting: Optional[str] = ""        # 首次对话问候语
     description: Optional[str] = ""     # 简短描述
     
@@ -272,6 +274,7 @@ class RoleUpdate(BaseModel):
     avatar_url: Optional[str] = None
     persona: Optional[str] = None
     system_prompt: Optional[str] = None
+    persona_card: Optional[PersonaCard] = None
     greeting: Optional[str] = None
     description: Optional[str] = None
     core_memory: Optional[List[str]] = None
@@ -678,6 +681,7 @@ async def create_role(role: RoleCreate, request: Request):
         "avatar_url": role.avatar_url or "",
         "persona": role.persona or "",
         "system_prompt": role.system_prompt or "",
+        "persona_card": (role.persona_card or PersonaCard()).model_dump(),
         "greeting": role.greeting or "",
         "description": role.description or "",
         "core_memory": role.core_memory or [],

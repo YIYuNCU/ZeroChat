@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'onebot_config.dart';
 import 'proactive_config.dart';
 import 'followup_config.dart';
@@ -15,13 +16,159 @@ String? _normalizeAiReasoningEffort(Object? value) {
   return text == null || text.isEmpty ? null : text;
 }
 
+/// 结构化人设里的一组示例对话。
+class PersonaExample {
+  final String user;
+  final String assistant;
+
+  const PersonaExample({this.user = '', this.assistant = ''});
+
+  factory PersonaExample.fromJson(Map<String, dynamic> json) => PersonaExample(
+    user: json['user'] is String ? json['user'] as String : '',
+    assistant: json['assistant'] is String ? json['assistant'] as String : '',
+  );
+
+  Map<String, dynamic> toJson() => {'user': user, 'assistant': assistant};
+
+  bool get isEmpty => user.trim().isEmpty && assistant.trim().isEmpty;
+
+  @override
+  bool operator ==(Object other) =>
+      other is PersonaExample &&
+      other.user == user &&
+      other.assistant == assistant;
+
+  @override
+  int get hashCode => Object.hash(user, assistant);
+}
+
+/// 结构化人设卡（服务端 `persona_card`，schema_version = 1）。
+///
+/// 限制：单字段 ≤ [maxFieldLength] 字，示例 ≤ [maxExamples] 组，每条 ≤
+/// [maxExampleLength] 字；客户端用输入框 maxLength 约束。
+class PersonaCard {
+  static const int schemaVersion = 1;
+  static const int maxFieldLength = 2000;
+  static const int maxExamples = 5;
+  static const int maxExampleLength = 500;
+
+  final String identity;
+  final String personality;
+  final String relationship;
+  final String scenario;
+  final String speakingStyle;
+  final String boundaries;
+  final List<PersonaExample> exampleDialogues;
+
+  const PersonaCard({
+    this.identity = '',
+    this.personality = '',
+    this.relationship = '',
+    this.scenario = '',
+    this.speakingStyle = '',
+    this.boundaries = '',
+    this.exampleDialogues = const [],
+  });
+
+  /// 宽松解析：缺字段、类型错误一律按空处理。
+  factory PersonaCard.fromJson(Object? raw) {
+    if (raw is! Map) return const PersonaCard();
+    String text(String key) {
+      final value = raw[key];
+      return value is String ? value : '';
+    }
+
+    final examples = <PersonaExample>[];
+    final rawExamples = raw['example_dialogues'];
+    if (rawExamples is List) {
+      for (final item in rawExamples) {
+        if (item is! Map) continue;
+        examples.add(PersonaExample.fromJson(Map<String, dynamic>.from(item)));
+      }
+    }
+    return PersonaCard(
+      identity: text('identity'),
+      personality: text('personality'),
+      relationship: text('relationship'),
+      scenario: text('scenario'),
+      speakingStyle: text('speaking_style'),
+      boundaries: text('boundaries'),
+      exampleDialogues: List.unmodifiable(examples),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'schema_version': schemaVersion,
+    'identity': identity,
+    'personality': personality,
+    'relationship': relationship,
+    'scenario': scenario,
+    'speaking_style': speakingStyle,
+    'boundaries': boundaries,
+    'example_dialogues': [for (final item in exampleDialogues) item.toJson()],
+  };
+
+  bool get isEmpty =>
+      identity.trim().isEmpty &&
+      personality.trim().isEmpty &&
+      relationship.trim().isEmpty &&
+      scenario.trim().isEmpty &&
+      speakingStyle.trim().isEmpty &&
+      boundaries.trim().isEmpty &&
+      exampleDialogues.every((item) => item.isEmpty);
+
+  PersonaCard copyWith({
+    String? identity,
+    String? personality,
+    String? relationship,
+    String? scenario,
+    String? speakingStyle,
+    String? boundaries,
+    List<PersonaExample>? exampleDialogues,
+  }) => PersonaCard(
+    identity: identity ?? this.identity,
+    personality: personality ?? this.personality,
+    relationship: relationship ?? this.relationship,
+    scenario: scenario ?? this.scenario,
+    speakingStyle: speakingStyle ?? this.speakingStyle,
+    boundaries: boundaries ?? this.boundaries,
+    exampleDialogues: exampleDialogues ?? this.exampleDialogues,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is PersonaCard &&
+      other.identity == identity &&
+      other.personality == personality &&
+      other.relationship == relationship &&
+      other.scenario == scenario &&
+      other.speakingStyle == speakingStyle &&
+      other.boundaries == boundaries &&
+      listEquals(other.exampleDialogues, exampleDialogues);
+
+  @override
+  int get hashCode => Object.hash(
+    identity,
+    personality,
+    relationship,
+    scenario,
+    speakingStyle,
+    boundaries,
+    Object.hashAll(exampleDialogues),
+  );
+}
+
 /// 角色模型
 /// 用于 AI 角色的人设配置和参数设置
 class Role {
   final String id;
   final String name;
   final String description;
+  /// 补充设定（自由文本），在结构化人设之外的补充内容。
   final String systemPrompt;
+
+  /// 结构化人设卡；缺失时为空卡。
+  final PersonaCard personaCard;
   final String? avatarUrl;
   final String? avatarHash;
   final String chatBackgroundUrl;
@@ -97,6 +244,7 @@ class Role {
     required this.name,
     this.description = '',
     required this.systemPrompt,
+    PersonaCard? personaCard,
     this.avatarUrl,
     this.avatarHash,
     this.chatBackgroundUrl = '',
@@ -138,7 +286,8 @@ class Role {
     this.archived = false,
     DateTime? createdAt,
     DateTime? updatedAt,
-  }) : coreMemory = coreMemory ?? [],
+  }) : personaCard = personaCard ?? const PersonaCard(),
+       coreMemory = coreMemory ?? [],
        menstruationCycle =
            menstruationCycle ??
            const {
@@ -171,6 +320,7 @@ class Role {
     String? name,
     String? description,
     String? systemPrompt,
+    PersonaCard? personaCard,
     String? avatarUrl,
     String? avatarHash,
     String? chatBackgroundUrl,
@@ -219,6 +369,7 @@ class Role {
       name: name ?? this.name,
       description: description ?? this.description,
       systemPrompt: systemPrompt ?? this.systemPrompt,
+      personaCard: personaCard ?? this.personaCard,
       avatarUrl: avatarUrl ?? this.avatarUrl,
       avatarHash: avatarHash ?? this.avatarHash,
       chatBackgroundUrl: chatBackgroundUrl ?? this.chatBackgroundUrl,
@@ -310,6 +461,7 @@ class Role {
       name: json['name'] as String,
       description: json['description'] as String? ?? '',
       systemPrompt: json['system_prompt'] as String,
+      personaCard: PersonaCard.fromJson(json['persona_card']),
       avatarUrl: json['avatar_url'] as String?,
       avatarHash: json['avatar_hash'] as String?,
       chatBackgroundUrl: json['chat_background_url'] as String? ?? '',
@@ -396,6 +548,7 @@ class Role {
       'name': name,
       'description': description,
       'system_prompt': systemPrompt,
+      'persona_card': personaCard.toJson(),
       'avatar_url': avatarUrl,
       'avatar_hash': avatarHash,
       'chat_background_url': chatBackgroundUrl,

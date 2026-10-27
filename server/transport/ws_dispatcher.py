@@ -457,11 +457,7 @@ async def _handle_settings_prompts_get(payload: dict) -> dict:
         "prompts": prompt_config_service.registry_snapshot(applies_to or None),
         "overrides": settings_data.get("prompt_overrides") or {},
         "model_overrides": settings_data.get("model_prompt_overrides") or {},
-        "reserved_keys": {
-            "builtin": prompt_config_service.BUILTIN_OVERRIDE_KEY,
-            "phases": list(prompt_config_service.ORIGIN_PHASES),
-            "variants": list(prompt_config_service.VARIANT_KEYS),
-        },
+        "reserved_keys": prompt_config_service.reserved_keys_payload(),
     }
 
 
@@ -522,13 +518,15 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
             summary_config_service.CORE_MEMORY_SUMMARY,
             update.core_memory_summary_config.model_dump(exclude_unset=True),
         ) and summary_config_saved
+    if update.prompt_overrides is not None or update.model_prompt_overrides is not None:
+        stored_settings = settings_service.load_settings()
     if update.prompt_overrides is not None:
         updates["prompt_overrides"] = prompt_config_service.sanitize_overrides(
-            update.prompt_overrides
+            update.prompt_overrides, stored_settings.get("prompt_overrides"),
         )
     if update.model_prompt_overrides is not None:
         updates["model_prompt_overrides"] = prompt_config_service.sanitize_model_overrides(
-            update.model_prompt_overrides
+            update.model_prompt_overrides, stored_settings.get("model_prompt_overrides"),
         )
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled
@@ -660,6 +658,7 @@ async def _handle_roles_upsert(payload: dict, backend_base_url: str) -> dict:
             "avatar_url": role_model.avatar_url or "",
             "persona": role_model.persona or "",
             "system_prompt": role_model.system_prompt or "",
+            "persona_card": (role_model.persona_card or roles.PersonaCard()).model_dump(),
             "greeting": role_model.greeting or "",
             "description": role_model.description or "",
             "core_memory": role_model.core_memory or [],

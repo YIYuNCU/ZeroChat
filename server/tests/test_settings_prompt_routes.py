@@ -164,8 +164,17 @@ class WsDispatcherWiringTests(unittest.TestCase):
         )
         # 提示词正文原样保存（首尾空白可能是有意的格式），仅在解析时判断是否为空。
         self.assertEqual(
-            captured["prompt_overrides"][prompt_config_service.CHAT_NO_REPLY_ID]["default"],
+            captured["prompt_overrides"][prompt_config_service.CHAT_NO_REPLY_ID][
+                prompt_config_service.BUILTIN_OVERRIDE_KEY
+            ],
             "  " + "y" * 30,
+        )
+        # 旧的 "default" 相位键被折叠成 __builtin__ 并标记为基于 v1。
+        self.assertEqual(
+            captured["prompt_overrides"][prompt_config_service.CHAT_NO_REPLY_ID][
+                prompt_config_service.BASE_VERSION_KEY
+            ],
+            "1",
         )
 
     def test_route_partial_summary_update_preserves_credentials(self):

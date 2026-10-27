@@ -117,6 +117,9 @@ class ConfigurablePrompt {
   final List<String> appliesTo;
   final String builtin;
 
+  /// 内置提示词版本号；覆盖的 `__base_version__` 小于它即“基于旧版”。
+  final int version;
+
   const ConfigurablePrompt({
     required this.id,
     required this.title,
@@ -124,6 +127,7 @@ class ConfigurablePrompt {
     required this.origin,
     required this.appliesTo,
     required this.builtin,
+    this.version = 1,
   });
 
   factory ConfigurablePrompt.fromJson(Map<String, dynamic> json) {
@@ -137,10 +141,33 @@ class ConfigurablePrompt {
           ? appliesTo.map((item) => '$item').toList()
           : const <String>[],
       builtin: '${json['builtin'] ?? ''}',
+      version: _normalizePromptVersion(json['version']),
     );
   }
 
   bool get isSummary => appliesTo.contains('summary');
+
+  /// 覆盖是否基于旧版内置提示词（缺失或无法解析 `__base_version__` 视为 1）。
+  bool isOverrideStale(Map<String, String> override) {
+    if (override.isEmpty) return false;
+    return promptOverrideBaseVersion(override) < version;
+  }
+}
+
+/// 覆盖层内层的三个保留键。
+const String promptOverrideBuiltinKey = '__builtin__';
+const String promptOverrideAppendKey = '__append__';
+const String promptOverrideBaseVersionKey = '__base_version__';
+
+/// 读取覆盖的 `__base_version__`，缺失或非法视为 1。
+int promptOverrideBaseVersion(Map<String, String> override) {
+  final parsed = int.tryParse((override[promptOverrideBaseVersionKey] ?? '').trim());
+  return parsed != null && parsed > 0 ? parsed : 1;
+}
+
+int _normalizePromptVersion(Object? value) {
+  final parsed = value is num ? value.toInt() : int.tryParse('${value ?? ''}'.trim());
+  return parsed != null && parsed > 0 ? parsed : 1;
 }
 
 /// 与服务端 `prompt_config_service.model_target_key` 保持一致的档案键。
