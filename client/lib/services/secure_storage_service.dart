@@ -9,8 +9,14 @@ import 'storage_service.dart';
 /// 传输加密 secret），替代明文 SharedPreferences。启动时对旧明文值做一次性
 /// 迁移：搬入 secure storage 后从 SharedPreferences 删除。
 class SecureStorageService {
+  // flutter_secure_storage v10：encryptedSharedPreferences 已弃用并被忽略，
+  // 首次访问时旧数据自动迁移到自定义 cipher。开启 migrateWithBackup 让迁移
+  // 中途崩溃时可恢复，避免丢失 API Key / 后端 token / 传输 secret。
   static const _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    aOptions: AndroidOptions(
+      migrateOnAlgorithmChange: true,
+      migrateWithBackup: true,
+    ),
   );
 
   /// 需要走安全存储的敏感键（与旧 SharedPreferences 键名保持一致，便于迁移）。

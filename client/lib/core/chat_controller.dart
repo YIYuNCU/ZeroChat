@@ -1062,6 +1062,9 @@ class ChatController extends ChangeNotifier {
     var currentRound = 0;
     String lastMessage = userMessage;
     String? lastSpeakerId;
+    // lastMessage 的真实发送人：null 表示用户本人，否则是上一位发言的 AI 角色。
+    // 服务端据此把 AI↔AI 轮次标记为 ai_role，而不是冒充用户（sender=user）。
+    Role? lastSpeakerRole;
 
     var anySpokeInRound = false;
 
@@ -1106,6 +1109,7 @@ class ChatController extends ChangeNotifier {
           role: role,
           userMessage: lastMessage,
           isGroup: true,
+          speaker: lastSpeakerRole,
           imagePaths: pendingImagePaths,
           // 只有用户本轮消息需要稳定 id，AI↔AI 续聊轮次始终是新的内容。
           stableRequestId: (i == 0 && currentRound == 1)
@@ -1133,6 +1137,7 @@ class ChatController extends ChangeNotifier {
           }
           context.incrementConsecutiveCount(role.id);
           lastSpeakerId = role.id;
+          lastSpeakerRole = role;
           lastMessage = rawReply.content;
         }
       }
@@ -1596,11 +1601,34 @@ class ChatController extends ChangeNotifier {
     return 'chat_$clientSubmissionId';
   }
 
+  /// App 群聊的来源 / 会话 / 发送人信息（服务端归一为对话信封）。
+  /// [speaker] 为空表示用户本人发言；否则是上一位发言的 AI 角色。
+  Map<String, dynamic> _groupEnvelopeContext(String chatId, Role? speaker) {
+    final group = GroupChatService.getGroup(chatId);
+    final members = <Map<String, String>>[];
+    for (final memberId in group?.memberIds ?? const <String>[]) {
+      final member = RoleService.getRoleById(memberId);
+      members.add({'id': memberId, 'name': member?.name ?? ''});
+    }
+    final groupName = (group?.name ?? '').trim();
+    final nickname = SettingsService.instance.userNickname.trim();
+    return {
+      'origin': 'zerochat_group',
+      if (groupName.isNotEmpty) 'chat_name': groupName,
+      if (members.isNotEmpty) 'group_members': members,
+      if (speaker != null)
+        'speaker': {'type': 'role', 'id': speaker.id, 'name': speaker.name}
+      else if (nickname.isNotEmpty)
+        'sender_name': nickname,
+    };
+  }
+
   Future<_AiReply?> _callAI({
     required String chatId,
     required Role role,
     required String userMessage,
     required bool isGroup,
+    Role? speaker,
     List<String> imagePaths = const [],
     String? stableRequestId,
   }) async {
@@ -1657,6 +1685,7 @@ class ChatController extends ChangeNotifier {
       'moments_context': momentsContext,
       'attached_json': attachedJson,
       if (visionUploadIds.isNotEmpty) 'vision_upload_ids': visionUploadIds,
+      if (isGroup) ..._groupEnvelopeContext(chatId, speaker),
     };
     // 重发同一条消息时复用稳定的 request_id：服务端据此去重用户短期记忆行，
     // 上下文窗口不再因重试而滑动，供应商前缀缓存得以命中。

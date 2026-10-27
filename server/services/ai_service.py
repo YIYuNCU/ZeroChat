@@ -13,6 +13,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 from services import prompt_config_service as prompt_config
 from services import settings_service
+from services.chat_envelope import ChatEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -1247,8 +1248,13 @@ def _format_user_message(
     vector_memories: Optional[List[Dict[str, Any]]] = None,
     core_memory_context: Optional[str] = None,
     stats_current: Optional[Dict[str, Any]] = None,
+    envelope: Optional[ChatEnvelope] = None,
 ) -> str:
-    """Format user message with standard JSON payload."""
+    """Format user message with standard JSON payload.
+
+    ``envelope`` 提供会话 / 发送人等可选字段（chat_type、chat_id、chat_name、
+    sender_id、sender_name、sender_kind）；普通 App 单聊不输出，请求字节与旧版一致。
+    """
     now = datetime.now()
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday = weekdays[now.weekday()]
@@ -1258,6 +1264,8 @@ def _format_user_message(
         "origin": str(origin or "zerochat"),
         "sender": str(sender or "user"),
     }
+    if envelope is not None:
+        payload.update(envelope.payload_fields())
     if core_memory_context:
         payload["core_memory"] = str(core_memory_context)
     if stats_current:
@@ -1354,11 +1362,13 @@ async def generate_with_role(
     sender: str = "user",
     stats_current: Optional[Dict[str, Any]] = None,
     vision_context: Optional[Dict[str, Any]] = None,
+    envelope: Optional[ChatEnvelope] = None,
 ) -> Dict[str, Any]:
     """
     以角色身份生成回复
 
     vision_context: 工具模式识图上下文，包含本次和同一会话上一批图片。
+    envelope: 对话信封，携带会话与发送人信息（见 services/chat_envelope.py）。
     """
     messages = []
     is_onebot = origin.startswith("onebot")
@@ -1393,6 +1403,7 @@ async def generate_with_role(
             vector_memories=vector_memories,
             core_memory_context=core_memory_context,
             stats_current=stats_current,
+            envelope=envelope,
         ),
     })
 

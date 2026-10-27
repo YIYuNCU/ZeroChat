@@ -26,6 +26,13 @@ from core.utils import (
     load_moments_posts,
 )
 from services.memory_service import trigger_memory_summary
+from services.chat_envelope import (
+    ChatEnvelope,
+    build_envelope,
+    conversation_key as build_conversation_key,
+    envelope_from_legacy,
+    group_context_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -494,6 +501,7 @@ async def _run_memory_ai_pipeline(
     include_assistant_memory: bool = True,
     trigger_summary_after_reply: bool = True,
     vision_context: Optional[Dict[str, Any]] = None,
+    envelope: Optional[ChatEnvelope] = None,
 ) -> Dict[str, Any]:
     from services.ai_service import generate_with_role, is_no_reply_directive
     from services.memory_service import (
@@ -506,28 +514,22 @@ async def _run_memory_ai_pipeline(
         _run_db,
     )
     local_context = event_context or {}
-    is_main_user = (user_sender == "user")
+    # 统一信封：旧调用方（proactive/task/followup 等）只传 origin/sender kwargs 时就地构造。
+    if envelope is None:
+        envelope = envelope_from_legacy(origin, user_sender, sender_id, group_id)
+    origin, user_sender = envelope.origin, envelope.sender
+    sender_id = envelope.sender_id or sender_id
+    group_id = envelope.group_id or group_id
+    is_main_user = envelope.is_owner
     role_max_context_rounds = role.get("max_context_rounds") if isinstance(role, dict) else None
     role_max_context_length = get_effective_context_length(role)
     role_allow_web_search = role.get("allow_web_search", True) if isinstance(role, dict) else True
 
-    # 记忆隔离策略：
+    # 记忆隔离策略（见 chat_envelope.conversation_key）：
     # - 主用户: 全渠道记忆通用，onebot_private = zerochat
-    # - 主用户在群聊: 10% 全渠道记忆 + 90% 群聊记忆（按时间排序）
-    # - 其他用户: 每个渠道独立记忆上下文
-    if is_main_user and origin.startswith("onebot"):
-        if origin == "onebot_group" and group_id:
-            conversation_key = f"group:{group_id}"
-        else:
-            conversation_key = "default_user"
-    elif origin == "onebot_group" and group_id:
-        conversation_key = f"group:{group_id}"
-    elif origin == "onebot_private" and sender_id:
-        conversation_key = f"private:{sender_id}"
-    elif origin == "zerochat":
-        conversation_key = "default_user"
-    else:
-        conversation_key = "all"
+    # - 主用户在群聊（QQ 群 / App 群）: 10% 全渠道记忆 + 90% 群聊记忆（按时间排序）
+    # - 其他用户 / AI 角色发言: 每个渠道独立记忆上下文
+    conversation_key = build_conversation_key(envelope, is_main_user)
 
     backend_history = await get_context_messages(
         role_id, limit=_get_memory_length(role_max_context_rounds), user_message=user_message,
@@ -606,6 +608,7 @@ async def _run_memory_ai_pipeline(
         sender=user_sender,
         stats_current=stats_current,
         vision_context=vision_context,
+        envelope=envelope,
     )
 
     vector_memories_count = len(vector_memories)
@@ -652,6 +655,7 @@ async def _run_memory_ai_pipeline(
                 sender=user_sender,
                 sender_id=sender_id,
                 group_id=group_id,
+                extra=envelope.payload_fields(),
             )
         )
     # 无回复指令是内部控制信号：保留用户输入，但不能污染助手短期记忆。
@@ -749,9 +753,12 @@ def _resolve_vision_uploads(upload_ids: List[str]) -> tuple[List[str], List[Path
     return data_urls, cleanup_dirs
 
 
-def _vision_history_scope(event_context: Dict[str, Any]) -> str:
-    """Build a stable scope so image history cannot cross chat boundaries."""
-    origin = str(event_context.get("origin") or "zerochat").strip() or "zerochat"
+def _vision_history_scope(event_context: Dict[str, Any], origin: Optional[str] = None) -> str:
+    """Build a stable scope so image history cannot cross chat boundaries.
+
+    ``origin`` 传入归一化后的信封来源，使新旧客户端（是否发送 origin）得到同一作用域。
+    """
+    origin = str(origin or event_context.get("origin") or "zerochat").strip() or "zerochat"
     chat_id = str(
         event_context.get("chat_id")
         or event_context.get("onebot_group_id")
@@ -853,15 +860,23 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             error="角色已归档，无法聊天",
         )
 
+    # 统一对话信封：来源 / 会话 / 发送人。旧客户端仅发 is_group + chat_id 时在此推断为 App 群聊。
+    envelope = build_envelope(event_context)
+
     # 用户回复即取消上一轮「无回复续写」计时器并归零链计数。
     # 放在生成之前，避免误取消本轮 AI 可能新排的续写。
-    if str(event_context.get("sender") or "user") == "user":
+    # AI 角色在群里的发言（sender_kind=ai_role）不算用户回复。
+    if envelope.is_owner:
         from services import scheduler_service
         scheduler_service.cancel_followup(role_id)
 
     # 合并额外上下文（朋友圈 + 生理期，与 proactive/followup 共用同一份构造逻辑，
     # 保证四类入口的 system 消息前缀一致，能互相复用 provider 的前缀缓存）
     extra_parts: List[str] = _build_shared_extra_parts(role_id)
+    # App 群聊：群名 / 成员 / 身份说明（每个群内容固定，利于前缀缓存）
+    group_text = group_context_text(envelope, role_id)
+    if group_text:
+        extra_parts.append(group_text)
     # 外挂 JSON 记录
     attached_json = role.get("attached_json_content", "")
     if not attached_json:
@@ -879,7 +894,7 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     vision_context: Optional[Dict[str, Any]] = None
     vision_cleanup_dirs: List[Path] = []
     from services import vision_service
-    vision_history_scope = _vision_history_scope(event_context)
+    vision_history_scope = _vision_history_scope(event_context, envelope.origin)
     previous_image_data_urls = vision_service.load_previous_images(
         role_id, vision_history_scope
     )
@@ -919,14 +934,15 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             extra_parts=extra_parts,
             request_id=request_id,
             attached_json=attached_json or None,
-            origin=str(event_context.get("origin") or "zerochat").strip() or "zerochat",
-            user_sender=str(event_context.get("sender") or "user").strip() or "user",
-            sender_id=str(event_context.get("sender_id") or "").strip(),
-            group_id=str(event_context.get("onebot_group_id") or event_context.get("group_id") or "").strip(),
+            origin=envelope.origin,
+            user_sender=envelope.sender,
+            sender_id=envelope.sender_id,
+            group_id=envelope.group_id,
             include_user_memory=True,
             include_assistant_memory=True,
             trigger_summary_after_reply=True,
             vision_context=vision_context,
+            envelope=envelope,
         )
     finally:
         # 识图工具在管道内执行，必须等管道返回后再清理图片目录
@@ -951,8 +967,8 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
         logger.info("记忆总结触发：角色 %s 没有生成新的核心记忆", role.get("name"))
     elif new_core == "noneed":
         pass
-    # 用户发消息后重置主动消息冷却计时
-    if str(event_context.get("sender") or "user") == "user":
+    # 用户发消息后重置主动消息冷却计时（AI 角色在群里的发言不算）
+    if envelope.is_owner:
         from services import scheduler_service
         scheduler_service.schedule_proactive_for_role(role_id, reset=True)
     no_reply = pipeline_result.get("no_reply") is True

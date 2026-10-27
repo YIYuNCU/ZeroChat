@@ -323,27 +323,29 @@ _STATS = {"enabled": True, "stats": [{"name": "好感", "min": 0, "max": 100, "i
 # captured by rendering both trees with an identical role matrix and diffing byte for
 # byte. These pin the whole assembled prompt: part order, blank lines, placeholder
 # substitution and both emoji branches. Regenerate only when the text is *meant* to change.
+# (Re-pinned once for the chat-envelope field docs added to chat.user_message_json_hint
+# and onebot.system_directive.)
 _GOLDEN = {
     ("chat_minimal", False): (
-        2877, "f1e5660b9fb437b86b68846c543626a05bfab6f34b3b35e88d05c2aa18511197"
+        3161, "cbf370aba7d48e4d9ffd0e425cd44956982358c4f908eeed11586fee844e30c9"
     ),
     ("chat_minimal", True): (
-        2773, "40892f96bf8e7417798b99b398664d773592684398a66610b8be1adaa3897e82"
+        3057, "0e5e1093ff2d15fd98bd29ce579bd4f17e3452d75fa017eda8696615172f4ec8"
     ),
     ("chat_full", False): (
-        2913, "b5439133c7aab0846b337d99679209cd8d6896c7ae4ae3e1cab5cca619964373"
+        3197, "624e71e6451c5d51c31ba0aea0affc69cf0c895141762f466bce0a4f49bd4c07"
     ),
     ("chat_stats", False): (
-        3505, "86ec5808ae7559f12a40e60c0ce96f61892a6b91a48aa5a13ff5edb7a1197b5f"
+        3789, "8a18f191cc8f1dfb109b566e053b09f2f9f3617adae62c21ede6c9c632096826"
     ),
     ("chat_stats_sound_off", True): (
-        3212, "f9de5c5aa11ce462e049ee7abb15ad97bc5e799edcfe9447068e4b9f2bad99aa"
+        3496, "86613cbe40652efce5226261a70343e4702939c2e21ebf78ec998b58315ef843"
     ),
     ("grok_stats", False): (
-        3983, "96c49214eda8fa0627e1f9963041dcf07ceb6d805925dfc79f2aa97f5c4d22cc"
+        4267, "f3e52a09a24913b3308e1094a6a0f231c892ce7113b9220c3bc6a66fd34a9c54"
     ),
     ("onebot_main_qq", False): (
-        4138, "7b7158884382dad3b058c86519f199e06eaa1a37b79d5a84c688fddc1d5d25ae"
+        4512, "a3a2164ed29d44feb83d68f9610b296ca79ecf255bdca3a1a788fdb9e56ac060"
     ),
 }
 

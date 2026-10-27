@@ -1831,7 +1831,9 @@ class _Section extends StatelessWidget {
   const _Section({required this.children});
 
   @override
-  Widget build(BuildContext context) => Container(
+  // 用 Material 而不是带 color 的 Container：ListTile 在最近的 Material 上绘制背景与水波纹，
+  // ColoredBox 会把它们遮住（调试模式下还会触发断言）。
+  Widget build(BuildContext context) => Material(
     color: Colors.white,
     child: Column(children: children),
   );

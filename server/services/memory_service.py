@@ -20,8 +20,11 @@ from services.vector_memory import VectorMemoryStore, _extract_semantic_text
 from services import summary_config_service
 from services.settings_service import get_thinking_config
 from services.chat_io_service import role_lock
+from services.chat_envelope import EXTRA_FIELDS as ENVELOPE_EXTRA_FIELDS, GROUP_ORIGINS
 
 logger = logging.getLogger(__name__)
+#: SQL 片段：群聊来源集合（常量拼接，非用户输入）。
+_GROUP_ORIGINS_SQL = "(" + ", ".join(f"'{item}'" for item in GROUP_ORIGINS) + ")"
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 DEFAULT_MEMORY_ORIGIN = "zerochat"
@@ -529,6 +532,7 @@ def format_memory_message(
     timestamp: Optional[str] = None,
     origin: Optional[str] = None,
     sender: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> str:
     payload = {
         "message": str(message or "").strip(),
@@ -536,7 +540,20 @@ def format_memory_message(
         "origin": str(origin or "").strip() or DEFAULT_MEMORY_ORIGIN,
         "sender": str(sender or "").strip() or "unknown",
     }
+    # 对话信封的可选字段（会话 / 发送人）；为空则不写入，旧行字节保持不变。
+    payload.update(_clean_envelope_extra(extra))
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _clean_envelope_extra(extra: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    if not isinstance(extra, dict):
+        return {}
+    cleaned: Dict[str, str] = {}
+    for key in ENVELOPE_EXTRA_FIELDS:
+        value = str(extra.get(key) or "").strip()
+        if value:
+            cleaned[key] = value
+    return cleaned
 
 
 def ensure_structured_memory_message(
@@ -545,17 +562,21 @@ def ensure_structured_memory_message(
     timestamp: Optional[str] = None,
     origin: Optional[str] = None,
     sender: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> str:
     text = str(content or "").strip()
     if _looks_like_standard_json_memory(text):
         try:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
+                # 已存储的信封字段优先；缺失时才用本次传入的 extra 补齐。
+                merged_extra = {**_clean_envelope_extra(extra), **_clean_envelope_extra(parsed)}
                 return format_memory_message(
                     message=str(parsed.get("message") or ""),
                     timestamp=str(parsed.get("time") or "").strip() or timestamp,
                     origin=str(parsed.get("origin") or "").strip() or origin,
                     sender=str(parsed.get("sender") or "").strip() or sender,
+                    extra=merged_extra,
                 )
         except Exception:
             pass
@@ -567,6 +588,7 @@ def ensure_structured_memory_message(
             timestamp=legacy.get("time") or timestamp,
             origin=legacy.get("origin") or origin,
             sender=legacy.get("sender") or sender,
+            extra=extra,
         )
 
     if _looks_like_structured_memory(text):
@@ -579,6 +601,7 @@ def ensure_structured_memory_message(
         timestamp=timestamp,
         origin=origin,
         sender=sender_text,
+        extra=extra,
     )
 
 def _normalize_gender(data: dict) -> str:
@@ -1458,6 +1481,7 @@ def append_short_term(
     sender: Optional[str] = None,
     sender_id: Optional[str] = None,
     group_id: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """
     追加短期记忆，使用滑动窗口机制
@@ -1467,6 +1491,8 @@ def append_short_term(
         role: 消息角色 (user/assistant)
         content: 消息内容
         window_size: 兼容旧参数，当前不再用于写入裁剪
+        extra: 对话信封可选字段（chat_type/chat_id/chat_name/sender_id/sender_name/
+            sender_kind），仅 user 行写入存储的 JSON 内容，供历史回放时识别来源与发送人
 
     Returns:
         新写入（或已存在的同 request_id 行）的 short_term.id；工具角色返回 None。
@@ -1497,6 +1523,7 @@ def append_short_term(
             timestamp=created_at,
             origin=normalized_origin,
             sender=normalized_sender,
+            extra=extra,
         )
 
     with _get_connection(role_id) as conn:
@@ -1719,7 +1746,7 @@ async def _store_summary_events(role_id: str, items: List[Dict[str, Any]]) -> No
 
 
 def _chat_summary_scope(origin: str, group_id: Optional[str], sender_id: Optional[str]) -> str:
-    if origin == "onebot_group" and group_id:
+    if origin in GROUP_ORIGINS and group_id:
         return f"group:{group_id}"
     if origin == "onebot_private" and sender_id:
         return f"private:{sender_id}"
@@ -1794,8 +1821,8 @@ async def _trigger_chat_summary(
         # 根据渠道过滤短期记忆，避免跨频道污染总结输入
         effective_limit = _get_memory_length(max_context_rounds)
         effective_context_length = _get_context_length(max_context_length)
-        if conv_origin == "onebot_group" and conv_group_id:
-            summary_where = "WHERE origin = 'onebot_group' AND group_id = ?"
+        if conv_origin in GROUP_ORIGINS and conv_group_id:
+            summary_where = f"WHERE origin IN {_GROUP_ORIGINS_SQL} AND group_id = ?"
             summary_params = [conv_group_id]
         elif conv_origin == "onebot_private" and conv_sender_id:
             summary_where = "WHERE origin = 'onebot_private' AND sender_id = ?"
@@ -1935,7 +1962,7 @@ async def get_context_messages(
     where_params: list = []
     if conversation_key and conversation_key.startswith("group:"):
         group_id_val = conversation_key[6:]
-        where_clause = "WHERE (origin = 'onebot_group' AND group_id = ?)"
+        where_clause = f"WHERE (origin IN {_GROUP_ORIGINS_SQL} AND group_id = ?)"
         where_params = [group_id_val]
     elif conversation_key and conversation_key.startswith("private:"):
         sender_id_val = conversation_key[8:]
@@ -2051,6 +2078,8 @@ async def get_context_messages(
         conv_group_id = None
         conv_sender_id = None
         if conversation_key and conversation_key.startswith("group:"):
+            # 摘要行统一用 onebot_group 作为“群聊”来源，读取时按 GROUP_ORIGINS 匹配，
+            # 因此同时覆盖 OneBot 群与 App 群（zerochat_group）。
             conv_origin = "onebot_group"
             conv_group_id = conversation_key[6:]
         elif conversation_key and conversation_key.startswith("private:"):

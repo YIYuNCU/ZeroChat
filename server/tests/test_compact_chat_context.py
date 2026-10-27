@@ -62,3 +62,9 @@ class CompactContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("history", requested["fields"])
         self.assertEqual(event.context["chat_id"], "group-1")
         self.assertEqual(event.context["client_submission_id"], "stable-submission")
+
+    async def test_app_group_checks_group_memory_not_private_memory(self):
+        self.context.update(is_group=True)
+        await self.dispatch()
+        self.mocks[2].assert_awaited_once_with("r", conversation_key="group:group-1", skip_summary=True,
+                                             latest=True, max_context_rounds=None)

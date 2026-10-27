@@ -1263,7 +1263,10 @@ async def _dispatch_ws_action(action: str, payload: dict, websocket: WebSocket, 
                 from services.memory_service import get_context_messages, load_memory_sections
                 from services.chat_io_service import run_file_io
                 role = roles.load_role(event.role_id) or {}
-                history = await get_context_messages(event.role_id, conversation_key="default_user",
+                from services.chat_envelope import build_envelope, conversation_key
+                # 与 handle_chat 使用同一会话键：App 群聊读取群记忆，其余仍为 default_user。
+                history = await get_context_messages(event.role_id,
+                    conversation_key=conversation_key(build_envelope(context)),
                     skip_summary=True, latest=True, max_context_rounds=role.get("max_context_rounds"))
                 memory = await run_file_io(load_memory_sections, event.role_id, ["core_memory"])
                 missing = []

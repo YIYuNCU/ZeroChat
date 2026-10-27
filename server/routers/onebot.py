@@ -21,6 +21,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, WebSocket, WebSoc
 from pydantic import BaseModel
 
 from transport.onebot_ws import manager as ws_manager
+from services.chat_envelope import clean_text
 from core.utils import (
     ensure_direct_child_path,
     ensure_path_within_root,
@@ -133,6 +134,7 @@ class OneBotEvent(BaseModel):
     message: Any = None
     raw_message: Optional[str] = None
     sender: Optional[Dict[str, Any]] = None
+    group_name: Optional[str] = None  # NapCat 等实现会在群消息事件里附带群名，缺省则不输出
     time: Optional[int] = None
     self_id: Optional[int] = None
     font: Optional[int] = None
@@ -235,16 +237,19 @@ def _transform_event(event: OneBotEvent, self_id: Optional[int] = None) -> Optio
     if not content.strip() and not image_urls:
         return None
 
-    sender_name = _extract_sender_name(event)
+    # 昵称 / 群名由对方控制：先净化（去换行与控制字符、限长），再拼进 sender 字符串。
+    sender_name = clean_text(_extract_sender_name(event))
     sender_id = event.user_id or 0
     sender = f"{sender_id}(QQ名:{sender_name})"
 
     if event.message_type == "group":
         origin = "onebot_group"
         group_id = event.group_id or 0
+        chat_name = clean_text(event.group_name)
     else:
         origin = "onebot_private"
         group_id = None
+        chat_name = ""
 
     return {
         "content": content,
@@ -253,6 +258,8 @@ def _transform_event(event: OneBotEvent, self_id: Optional[int] = None) -> Optio
         "image_urls": image_urls,
         "user_id": event.user_id,
         "group_id": group_id,
+        "sender_name": sender_name,
+        "chat_name": chat_name,
     }
 
 
@@ -332,6 +339,8 @@ async def _process_and_reply(
             "origin": transformed["origin"],
             "sender": transformed["sender"],
             "sender_id": str(transformed["user_id"] or ""),
+            "sender_name": transformed.get("sender_name") or "",
+            "chat_name": transformed.get("chat_name") or "",
             "request_id": f"onebot_{message_id or ''}_{transformed['user_id'] or ''}",
             "onebot_user_id": transformed["user_id"],
             "onebot_group_id": transformed["group_id"],

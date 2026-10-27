@@ -14,14 +14,16 @@ allprojects {
     }
 }
 
-rootProject.buildDir = file("../build")
+// Project.buildDir 在 Gradle 9 已弃用，改用 layout.buildDirectory；输出位置不变（client/build/<project>）。
+val sharedBuildDir: Directory = rootProject.layout.projectDirectory.dir("../build")
+rootProject.layout.buildDirectory.set(sharedBuildDir)
 subprojects {
-    project.buildDir = file("${rootProject.buildDir}/${project.name}")
+    project.layout.buildDirectory.set(sharedBuildDir.dir(project.name))
 }
 subprojects {
     project.evaluationDependsOn(":app")
 }
 
 tasks.register<Delete>("clean") {
-    delete(rootProject.buildDir)
+    delete(rootProject.layout.buildDirectory)
 }
