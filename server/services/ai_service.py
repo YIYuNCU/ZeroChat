@@ -1078,14 +1078,11 @@ def _build_stats_instruction(
     if not stats:
         return ""
     stats_current = stats_current or {}
-    resolved_model, resolved_url = _get_prompt_target(role_data)
-    is_grok = _is_grok_model(resolved_model)
+    is_grok = _is_grok_model(_get_prompt_model(role_data))
     layout_rule = prompt_config.resolve(
         prompt_config.CHAT_STATS_BULLET_GROK_ID if is_grok
         else prompt_config.CHAT_STATS_BULLET_DEFAULT_ID,
         settings=settings,
-        api_url=resolved_url,
-        model=resolved_model,
         role_data=role_data,
     )
     lines = [
@@ -1129,15 +1126,10 @@ def _build_stats_instruction(
 
 
 
-def _get_prompt_target(role_data: Dict) -> Tuple[str, str]:
-    """Use the configured URL, matching client profile keys, before HTTP expansion."""
+def _get_prompt_model(role_data: Dict) -> str:
+    """Model name used to pick model-dependent prompt branches (Grok layout, tool policy)."""
     model, _, _, _, _, _, _, _ = _get_role_ai_config(role_data)
-    metadata = role_data.get("metadata") or {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    api_url = (role_data.get("ai_api_url") or metadata.get("ai_api_url")
-               or settings_service.load_settings().get("ai_api_url") or "")
-    return str(model or ""), str(api_url)
+    return str(model or "")
 
 
 def _prompt_variant(model: Optional[str]) -> str:
@@ -1182,7 +1174,7 @@ def _build_system_prompt(
     stats_config = role_data.get("stats_config") or {}
     stats_enabled = bool(stats_config.get("enabled") and stats_config.get("stats"))
     sound_enabled = role_data.get("show_sound", True) is not False
-    resolved_model, resolved_url = _get_prompt_target(role_data)
+    resolved_model = _get_prompt_model(role_data)
     is_grok = _is_grok_model(resolved_model)
     use_conservative_tool_prompt_policy = _uses_conservative_tool_prompt_policy(
         resolved_model
@@ -1193,8 +1185,6 @@ def _build_system_prompt(
         return prompt_config.resolve(
             prompt_id,
             settings=settings,
-            api_url=resolved_url,
-            model=resolved_model,
             role_data=role_data,
             variant=variant,
             render=render,

@@ -107,26 +107,18 @@ void main() {
   });
 
   group('prompt overrides', () {
-    test('normalizePromptOverrides keeps reserved keys', () {
+    test('normalizePromptOverrides keeps string entries only', () {
       final result = normalizePromptOverrides({
-        'chat.main': {
-          '__builtin__': 'b',
-          '__append__': 'a',
-          '__base_version__': '2',
-        },
+        'chat.main': {'__builtin__': 'b', '__base_version__': '2'},
         'bad': 'x',
-        'nonString': {'__append__': 5},
+        'nonString': {'__builtin__': 5},
       });
       expect(result, {
-        'chat.main': {
-          '__builtin__': 'b',
-          '__append__': 'a',
-          '__base_version__': '2',
-        },
+        'chat.main': {'__builtin__': 'b', '__base_version__': '2'},
       });
     });
 
-    test('model profile round trip keeps reserved keys', () {
+    test('model profile ignores and no longer writes legacy prompt_overrides', () {
       final profile = ModelApiProfile.fromJson({
         'id': 'p',
         'name': 'P',
@@ -136,9 +128,9 @@ void main() {
           'chat.main': {'__append__': 'a', '__base_version__': '3'},
         },
       });
-      expect(profile.toJson()['prompt_overrides'], {
-        'chat.main': {'__append__': 'a', '__base_version__': '3'},
-      });
+      expect(profile.id, 'p');
+      expect(profile.model, 'm');
+      expect(profile.toJson().containsKey('prompt_overrides'), isFalse);
     });
 
     test('ConfigurablePrompt parses version tolerantly', () {
@@ -154,6 +146,23 @@ void main() {
       expect(parse(-2).version, 1);
     });
 
+    test('ConfigurablePrompt.isChat follows applies_to', () {
+      expect(
+        ConfigurablePrompt.fromJson({
+          'id': 'p',
+          'applies_to': ['chat', 'summary'],
+        }).isChat,
+        isTrue,
+      );
+      expect(
+        ConfigurablePrompt.fromJson({
+          'id': 'p',
+          'applies_to': ['summary'],
+        }).isChat,
+        isFalse,
+      );
+    });
+
     test('stale detection follows __base_version__', () {
       const prompt = ConfigurablePrompt(
         id: 'p',
@@ -165,20 +174,54 @@ void main() {
         version: 3,
       );
       expect(prompt.isOverrideStale(const {}), isFalse);
-      expect(prompt.isOverrideStale(const {'__append__': 'a'}), isTrue);
+      expect(prompt.isOverrideStale(const {'__builtin__': 'a'}), isTrue);
       expect(
         prompt.isOverrideStale(const {
-          '__append__': 'a',
+          '__builtin__': 'a',
           '__base_version__': '2',
         }),
         isTrue,
       );
       expect(
         prompt.isOverrideStale(const {
-          '__append__': 'a',
+          '__builtin__': 'a',
           '__base_version__': '3',
         }),
         isFalse,
+      );
+    });
+  });
+
+  group('Role.metadata', () {
+    test('defaults to empty and round trips through JSON', () {
+      expect(Role.fromJson(baseJson()).metadata, isEmpty);
+      final role = Role.fromJson({
+        ...baseJson(),
+        'metadata': {
+          'ai_model': 'legacy',
+          'prompt_overrides': {
+            'chat.main': {'__builtin__': 'x', '__base_version__': '1'},
+          },
+        },
+      });
+      expect(role.metadata['ai_model'], 'legacy');
+      final restored = Role.fromJsonString(role.toJsonString());
+      expect(restored.metadata, role.metadata);
+    });
+
+    test('copyWith keeps and replaces metadata', () {
+      final role = Role.fromJson({
+        ...baseJson(),
+        'metadata': {'k': 1},
+      });
+      expect(role.copyWith(name: 'B').metadata, {'k': 1});
+      expect(role.copyWith(metadata: const {}).metadata, isEmpty);
+    });
+
+    test('malformed metadata is ignored', () {
+      expect(
+        Role.fromJson({...baseJson(), 'metadata': 'oops'}).metadata,
+        isEmpty,
       );
     });
   });

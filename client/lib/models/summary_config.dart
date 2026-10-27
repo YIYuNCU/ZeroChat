@@ -1,8 +1,8 @@
 /// 记忆总结（事件总结 / 核心记忆总结）的独立配置与可配置系统提示词模型。
 ///
 /// 这两个功能不再挂靠在任何角色上，服务端以 `context_summary_config` /
-/// `core_memory_summary_config` 单独存储；提示词来自服务端提示词注册表，可全局覆盖或按
-/// 模型档案（provider + model）覆盖。
+/// `core_memory_summary_config` 单独存储；提示词来自服务端提示词注册表，可全局覆盖，
+/// 聊天类提示词还可按角色覆盖；覆盖直接编辑 md 全文。
 library;
 
 /// 目的一致的两个总结功能标识，与服务端 `summary_config_service` 保持一致。
@@ -147,6 +147,9 @@ class ConfigurablePrompt {
 
   bool get isSummary => appliesTo.contains('summary');
 
+  /// 角色级覆盖只对聊天类提示词生效。
+  bool get isChat => appliesTo.contains('chat');
+
   /// 覆盖是否基于旧版内置提示词（缺失或无法解析 `__base_version__` 视为 1）。
   bool isOverrideStale(Map<String, String> override) {
     if (override.isEmpty) return false;
@@ -154,10 +157,24 @@ class ConfigurablePrompt {
   }
 }
 
-/// 覆盖层内层的三个保留键。
+/// 覆盖层内层的两个保留键：`__builtin__` 为 md 全文，`__base_version__` 为基于的内置版本。
+///
+/// 旧数据里可能残留 `__append__`，客户端不再识别它（视为没有 `__builtin__` 覆盖），
+/// 服务端会把旧数据自动折叠为 `__builtin__`。
 const String promptOverrideBuiltinKey = '__builtin__';
-const String promptOverrideAppendKey = '__append__';
 const String promptOverrideBaseVersionKey = '__base_version__';
+
+/// 把编辑后的全文转换为覆盖；空文本或与内置相同（trim 后）返回空映射，表示无覆盖。
+Map<String, String> buildPromptOverride(ConfigurablePrompt prompt, String text) {
+  final trimmed = text.trim();
+  if (trimmed.isEmpty || trimmed == prompt.builtin.trim()) {
+    return <String, String>{};
+  }
+  return <String, String>{
+    promptOverrideBuiltinKey: text,
+    promptOverrideBaseVersionKey: prompt.version.toString(),
+  };
+}
 
 /// 读取覆盖的 `__base_version__`，缺失或非法视为 1。
 int promptOverrideBaseVersion(Map<String, String> override) {
@@ -168,14 +185,6 @@ int promptOverrideBaseVersion(Map<String, String> override) {
 int _normalizePromptVersion(Object? value) {
   final parsed = value is num ? value.toInt() : int.tryParse('${value ?? ''}'.trim());
   return parsed != null && parsed > 0 ? parsed : 1;
-}
-
-/// 与服务端 `prompt_config_service.model_target_key` 保持一致的档案键。
-String modelPromptTargetKey(String apiUrl, String model) {
-  final url = apiUrl.trim().toLowerCase();
-  final name = model.trim().toLowerCase();
-  if (url.isEmpty || name.isEmpty) return '';
-  return '$url|$name';
 }
 
 String normalizeSummaryApiFormat(Object? value) {

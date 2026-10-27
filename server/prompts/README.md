@@ -25,6 +25,16 @@ placeholders: ["NO_REPLY_DIRECTIVE"]   # 正文用到的 {NAME} 占位符，必�
 - 正文首尾的空行会被去掉。
 - `{NAME}`（全大写）为占位符，由代码在渲染时替换；JSON 示例里的 `{"a": 1}` 不受影响。
 
+## 用户覆盖
+
+设置页直接编辑对应 md 的全文，保存即整篇替换，没有追加或局部修改。覆盖只有两层（后者覆盖前者）：
+
+1. 全局：`settings.json` 的 `prompt_overrides`；
+2. 角色：`role.metadata.prompt_overrides`（仅 `applies_to` 含 `chat` 的提示词）。
+
+形态为 `{id: {"__builtin__": 全文, "__base_version__": "N"}}`。旧的 `__append__`、相位键会在保存或启动迁移时折叠为 `__builtin__`；
+按模型的 `model_prompt_overrides` 已停用，数据保留但不再生效。
+
 ## 升级内置文案
 
 修改正文后必须把 `version` 加 1。已有的用户覆盖会因 `__base_version__` 落后而在设置页提示“基于旧版”。

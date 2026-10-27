@@ -32,9 +32,6 @@ void main() {
         thinkingEnabled: true,
         thinkingBudget: 4096,
         reasoningEffort: 'low',
-        promptOverrides: {
-          'chat.format_protocol': {'zerochat': 'Keep my prompt'},
-        },
       ),
     );
     await tester.pumpWidget(const MaterialApp(home: ModelProfilesPage()));
@@ -68,9 +65,6 @@ void main() {
     expect(saved.thinkingEnabled, isFalse);
     expect(saved.reasoningEffort, 'high');
     expect(saved.thinkingBudget, 8192);
-    expect(saved.promptOverrides, {
-      'chat.format_protocol': {'zerochat': 'Keep my prompt'},
-    });
     expect(tester.takeException(), isNull);
   });
 

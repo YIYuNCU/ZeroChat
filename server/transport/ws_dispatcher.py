@@ -456,7 +456,7 @@ async def _handle_settings_prompts_get(payload: dict) -> dict:
     return {
         "prompts": prompt_config_service.registry_snapshot(applies_to or None),
         "overrides": settings_data.get("prompt_overrides") or {},
-        "model_overrides": settings_data.get("model_prompt_overrides") or {},
+        "model_overrides": {},
         "reserved_keys": prompt_config_service.reserved_keys_payload(),
     }
 
@@ -518,15 +518,11 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
             summary_config_service.CORE_MEMORY_SUMMARY,
             update.core_memory_summary_config.model_dump(exclude_unset=True),
         ) and summary_config_saved
-    if update.prompt_overrides is not None or update.model_prompt_overrides is not None:
-        stored_settings = settings_service.load_settings()
+    # `model_prompt_overrides` is still accepted from older clients but is no longer applied.
     if update.prompt_overrides is not None:
+        stored_settings = settings_service.load_settings()
         updates["prompt_overrides"] = prompt_config_service.sanitize_overrides(
             update.prompt_overrides, stored_settings.get("prompt_overrides"),
-        )
-    if update.model_prompt_overrides is not None:
-        updates["model_prompt_overrides"] = prompt_config_service.sanitize_model_overrides(
-            update.model_prompt_overrides, stored_settings.get("model_prompt_overrides"),
         )
     if update.intent_enabled is not None:
         updates["intent_enabled"] = update.intent_enabled

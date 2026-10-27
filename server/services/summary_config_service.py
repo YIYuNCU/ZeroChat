@@ -243,10 +243,7 @@ def resolve_summary_config(kind: str) -> Dict[str, Any]:
         ),
     }
     resolved["system_prompt"] = summary_system_prompt(
-        kind,
-        model=resolved["model"],
-        api_url=resolved["api_url"],
-        stored_prompt=stored.get("system_prompt"),
+        kind, stored_prompt=stored.get("system_prompt"),
     )
     resolved["configured"] = bool(resolved["api_url"] and resolved["api_key"] and resolved["model"])
     return resolved
@@ -255,21 +252,15 @@ def resolve_summary_config(kind: str) -> Dict[str, Any]:
 def summary_system_prompt(
     kind: str,
     *,
-    model: Optional[str] = None,
-    api_url: Optional[str] = None,
     stored_prompt: Optional[str] = None,
 ) -> str:
     """Resolve the system prompt for one summary kind.
 
-    A non-empty ``system_prompt`` in the summary config wins; otherwise the model-profile
-    prompt override for that summary applies, and finally the built-in registry default.
+    The base text is the global prompt override for that summary, or the built-in
+    registry default; a non-empty ``system_prompt`` in the summary config is appended.
     """
     text = str(stored_prompt or "").strip()
-    base = prompt_config_service.resolve(
-        PROMPT_IDS[kind],
-        api_url=api_url,
-        model=model,
-    )
+    base = prompt_config_service.resolve(PROMPT_IDS[kind])
     if not text:
         return base
     return f"{base}\n\n{text}" if base else text

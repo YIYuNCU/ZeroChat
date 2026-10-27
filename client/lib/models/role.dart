@@ -236,6 +236,9 @@ class Role {
   // 是否已归档：归档后不能对话、不发朋友圈、不发主动消息
   final bool archived;
 
+  /// 服务端 `metadata`（整体替换语义）：保留未知 key，`prompt_overrides` 存放按角色的提示词覆盖。
+  final Map<String, dynamic> metadata;
+
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -284,9 +287,11 @@ class Role {
     this.showToolCalls = false,
     this.showReasoning = false,
     this.archived = false,
+    Map<String, dynamic>? metadata,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) : personaCard = personaCard ?? const PersonaCard(),
+       metadata = metadata ?? const <String, dynamic>{},
        coreMemory = coreMemory ?? [],
        menstruationCycle =
            menstruationCycle ??
@@ -362,6 +367,7 @@ class Role {
     bool? showToolCalls,
     bool? showReasoning,
     bool? archived,
+    Map<String, dynamic>? metadata,
     DateTime? updatedAt,
   }) {
     return Role(
@@ -417,6 +423,7 @@ class Role {
       showToolCalls: showToolCalls ?? this.showToolCalls,
       showReasoning: showReasoning ?? this.showReasoning,
       archived: archived ?? this.archived,
+      metadata: metadata ?? this.metadata,
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now(),
     );
@@ -533,6 +540,9 @@ class Role {
       showToolCalls: json['show_tool_calls'] as bool? ?? false,
       showReasoning: json['show_reasoning'] as bool? ?? false,
       archived: json['archived'] as bool? ?? false,
+      metadata: json['metadata'] is Map
+          ? Map<String, dynamic>.from(json['metadata'] as Map)
+          : null,
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'] as String)
           : DateTime.now(),
@@ -588,6 +598,7 @@ class Role {
       'show_tool_calls': showToolCalls,
       'show_reasoning': showReasoning,
       'archived': archived,
+      'metadata': metadata,
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
     };

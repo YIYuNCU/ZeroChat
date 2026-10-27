@@ -135,6 +135,27 @@ class RoleModelIntegrationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             roles.RoleUpdate(persona_card={"identity": "x" * 2001})
 
+    def test_role_metadata_prompt_overrides_are_sanitized_on_write(self):
+        from routers import roles
+        from services import prompt_config_service as prompts
+
+        raw = {
+            "theme": "dark",
+            "prompt_overrides": {
+                prompts.CHAT_NO_REPLY_ID: {"__builtin__": "角色版", "junk": "x"},
+                prompts.SUMMARY_CORE_MEMORY_ID: {"__builtin__": "角色级不支持总结提示词"},
+            },
+        }
+        for model in (roles.RoleCreate(id="r1", name="R", metadata=raw), roles.RoleUpdate(metadata=raw)):
+            with self.subTest(model=type(model).__name__):
+                self.assertEqual(model.metadata["theme"], "dark")
+                self.assertEqual(list(model.metadata["prompt_overrides"]), [prompts.CHAT_NO_REPLY_ID])
+                self.assertEqual(
+                    set(model.metadata["prompt_overrides"][prompts.CHAT_NO_REPLY_ID]),
+                    {prompts.BUILTIN_OVERRIDE_KEY, prompts.BASE_VERSION_KEY},
+                )
+        self.assertIsNone(roles.RoleUpdate().metadata)
+
 
 if __name__ == "__main__":
     unittest.main()

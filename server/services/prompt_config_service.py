@@ -13,22 +13,21 @@ Each registry entry carries:
 * ``version``  – bumped whenever the shipped text changes, so stored overrides can be
                  flagged as "based on an older builtin".
 
-Resolution order per prompt id: **builtin → global override → model-profile override →
-role metadata override**. Overrides live in ``config/settings.json``::
+Resolution order per prompt id: **builtin → global override → role metadata override**.
+An override always replaces the whole md text; there are no partial edits. The global
+layer lives in ``config/settings.json``, the role layer in ``role.metadata.prompt_overrides``::
 
-    "prompt_overrides": {"chat.no_reply": {"__builtin__": "…", "__base_version__": "2"}},
-    "model_prompt_overrides": {"https://host/v1|model": {"chat.no_reply": {"__append__": "…"}}}
+    "prompt_overrides": {"chat.no_reply": {"__builtin__": "…", "__base_version__": "2"}}
 
 The inner map only uses reserved keys:
 
-* ``__builtin__``     – replace the whole template;
-* ``__append__``      – append text after the effective template (keeps receiving builtin
-                        updates, unlike a forked copy);
+* ``__builtin__``     – the full replacement template (the edited md body);
 * ``__base_version__`` – builtin version a replacement was written against.
 
-Legacy phase keys (``zerochat`` / ``onebot`` / ``default`` / ``cloud_emoji``) are still
-read for robustness and are folded into ``__builtin__`` by :func:`sanitize_overrides` /
-:func:`migrate_stored_overrides`.
+Legacy shapes are still read and folded into ``__builtin__`` by :func:`sanitize_overrides`
+/ :func:`migrate_stored_overrides`: the phase keys (``zerochat`` / ``onebot`` / ``default``
+/ ``cloud_emoji``) and ``__append__`` (appended to the builtin text). The former
+``model_prompt_overrides`` layer is no longer applied; stored data is left untouched.
 
 Templates may reference ``{NO_REPLY_DIRECTIVE}``, ``{STATS_LAYOUT_RULE}`` and the other
 placeholders in :data:`services.prompt_store.KNOWN_PLACEHOLDERS`; :func:`resolve`
@@ -53,11 +52,11 @@ VARIANT_KEYS = ("default", "cloud_emoji")
 
 #: Reserved key inside an override map that replaces a prompt's whole template.
 BUILTIN_OVERRIDE_KEY = "__builtin__"
-#: Reserved key whose text is appended after the effective template.
+#: Legacy key (v2 drafts): text appended after the template; folded into ``__builtin__``.
 APPEND_OVERRIDE_KEY = "__append__"
 #: Reserved key recording the builtin ``version`` a replacement was written against.
 BASE_VERSION_KEY = "__base_version__"
-RESERVED_OVERRIDE_KEYS = (BUILTIN_OVERRIDE_KEY, APPEND_OVERRIDE_KEY, BASE_VERSION_KEY)
+RESERVED_OVERRIDE_KEYS = (BUILTIN_OVERRIDE_KEY, BASE_VERSION_KEY)
 #: Pre-v2 override keys, still understood on read and folded away on save/migration.
 LEGACY_PHASE_KEYS = ("zerochat", "onebot", "default", "cloud_emoji")
 #: Version assigned to overrides that predate versioning.
@@ -133,7 +132,6 @@ def reserved_keys_payload() -> Dict[str, Any]:
     """Reserved override keys advertised to the prompt editor UI."""
     return {
         "builtin": BUILTIN_OVERRIDE_KEY,
-        "append": APPEND_OVERRIDE_KEY,
         "base_version": BASE_VERSION_KEY,
         "phases": list(ORIGIN_PHASES),
         "variants": list(VARIANT_KEYS),
@@ -184,14 +182,22 @@ def _parse_base_version(value: Any) -> Optional[int]:
 def _normalize_block(
     definition: PromptDefinition, raw: Any, previous: Any = None,
 ) -> Dict[str, str]:
-    """Fold a raw override block into ``{__builtin__, __append__, __base_version__}``."""
+    """Fold a raw override block into the full-replacement ``{__builtin__, __base_version__}``.
+
+    A legacy ``__append__`` is merged into the text (onto the replacement, or onto today's
+    builtin when the block had no replacement), so no stored customisation is lost.
+    """
     if not isinstance(raw, dict):
         return {}
-    cleaned: Dict[str, str] = {}
     replacement, from_legacy = _replacement_text(definition, raw)
+    appended = _append_text(raw)
+    if replacement is None and appended is None:
+        return {}
     has_legacy = any(_text_or_none(raw.get(key)) is not None for key in LEGACY_PHASE_KEYS)
-    if replacement is not None:
-        cleaned[BUILTIN_OVERRIDE_KEY] = replacement[:MAX_PROMPT_OVERRIDE_CHARS]
+    if replacement is None:
+        # Append-only block: it was written against whatever builtin is current now.
+        base = definition.version
+    else:
         base = _parse_base_version(raw.get(BASE_VERSION_KEY))
         if base is None:
             if from_legacy or has_legacy:
@@ -208,11 +214,13 @@ def _normalize_block(
                     base = prev_base
                 else:
                     base = definition.version
-        cleaned[BASE_VERSION_KEY] = str(base)
-    appended = _append_text(raw)
+    text = replacement if replacement is not None else definition.builtin
     if appended is not None:
-        cleaned[APPEND_OVERRIDE_KEY] = appended[:MAX_PROMPT_OVERRIDE_CHARS]
-    return cleaned
+        text = text.rstrip("\n") + "\n\n" + appended
+    return {
+        BUILTIN_OVERRIDE_KEY: text[:MAX_PROMPT_OVERRIDE_CHARS],
+        BASE_VERSION_KEY: str(base),
+    }
 
 
 def sanitize_overrides(raw: Any, previous: Any = None) -> Dict[str, Dict[str, str]]:
@@ -240,47 +248,46 @@ def sanitize_overrides(raw: Any, previous: Any = None) -> Dict[str, Dict[str, st
     return cleaned
 
 
-def sanitize_model_overrides(
-    raw: Any, previous: Any = None,
-) -> Dict[str, Dict[str, Dict[str, str]]]:
-    """Whitelist model-profile prompt overrides keyed by ``api_url|model``."""
-    if not isinstance(raw, dict):
-        return {}
-    previous_map = previous if isinstance(previous, dict) else {}
-    cleaned: Dict[str, Dict[str, Dict[str, str]]] = {}
-    for target, value in raw.items():
-        target_key = str(target or "").strip().lower()
-        if not target_key or "|" not in target_key:
-            continue
-        block = sanitize_overrides(value, previous_map.get(target_key))
-        if block:
-            cleaned[target_key] = block
+def sanitize_role_overrides(raw: Any, previous: Any = None) -> Dict[str, Dict[str, str]]:
+    """Sanitize ``role.metadata.prompt_overrides``: same shape as the global layer, but
+    only prompts that a chat request can resolve (``applies_to`` contains ``chat``)."""
+    cleaned = sanitize_overrides(raw, previous)
+    return {
+        prompt_id: block for prompt_id, block in cleaned.items()
+        if "chat" in PROMPT_REGISTRY[prompt_id].applies_to
+    }
+
+
+def sanitize_role_metadata(metadata: Any) -> Any:
+    """Return role metadata with a clean ``prompt_overrides`` entry (other keys untouched)."""
+    if not isinstance(metadata, dict) or "prompt_overrides" not in metadata:
+        return metadata
+    cleaned = dict(metadata)
+    overrides = sanitize_role_overrides(cleaned.pop("prompt_overrides"))
+    if overrides:
+        cleaned["prompt_overrides"] = overrides
     return cleaned
 
 
 def migrate_stored_overrides() -> bool:
-    """Fold legacy override shapes in ``settings.json`` into the v2 reserved-key shape.
+    """Fold legacy override shapes in ``settings.json`` into the full-replacement shape.
 
     Idempotent. The first time anything changes, the original file is copied to
     ``settings.json.bak-prompts`` (never overwritten). Returns ``True`` when settings
-    were rewritten.
+    were rewritten. The retired ``model_prompt_overrides`` layer is left as stored.
     """
     try:
         settings = settings_service.load_settings()
         stored_global = settings.get("prompt_overrides") or {}
-        stored_models = settings.get("model_prompt_overrides") or {}
         cleaned_global = sanitize_overrides(stored_global)
-        cleaned_models = sanitize_model_overrides(stored_models)
-        if cleaned_global == stored_global and cleaned_models == stored_models:
+        if cleaned_global == stored_global:
             return False
         backup = settings_service.get_settings_file().with_name("settings.json.bak-prompts")
         if not backup.exists():
             shutil.copyfile(settings_service.get_settings_file(), backup)
-        saved = settings_service.save_settings(
-            {"prompt_overrides": cleaned_global, "model_prompt_overrides": cleaned_models}
-        )
+        saved = settings_service.save_settings({"prompt_overrides": cleaned_global})
         if saved:
-            logger.info("提示词覆盖已迁移到 v2 结构")
+            logger.info("提示词覆盖已迁移为整篇替换结构")
         return bool(saved)
     except Exception:  # noqa: BLE001 - never block startup on a settings problem
         logger.exception("提示词覆盖迁移失败，保留原设置")
@@ -290,31 +297,6 @@ def migrate_stored_overrides() -> bool:
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
-
-def _profile_block_for(
-    definitions: Dict[str, Any],
-    api_url: Any,
-    model: Any,
-) -> Dict[str, Any]:
-    if not isinstance(definitions, dict):
-        return {}
-    api_url_text = str(api_url or "").strip().lower()
-    model_text = str(model or "").strip().lower()
-    if not api_url_text or not model_text:
-        return {}
-    block = definitions.get(f"{api_url_text}|{model_text}")
-    if isinstance(block, dict):
-        return block
-    return {}
-
-
-def model_target_key(api_url: Any, model: Any) -> str:
-    api_url_text = str(api_url or "").strip().lower()
-    model_text = str(model or "").strip().lower()
-    if not api_url_text or not model_text:
-        return ""
-    return f"{api_url_text}|{model_text}"
-
 
 def _render(text: str, render: Dict[str, str]) -> str:
     if not text or "{" not in text:
@@ -339,17 +321,14 @@ def resolve(
     *,
     settings: Optional[Dict[str, Any]] = None,
     overrides: Optional[Dict[str, Any]] = None,
-    model_overrides: Optional[Dict[str, Any]] = None,
-    api_url: Optional[str] = None,
-    model: Optional[str] = None,
     role_data: Optional[Dict[str, Any]] = None,
     variant: str = "default",
     render: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Resolve one prompt id following builtin → global → profile → role precedence.
+    """Resolve one prompt id following builtin → global → role precedence.
 
-    Each override layer may replace the template (``__builtin__``) and/or append text
-    (``__append__``); layers are applied in order. ``variant`` selects the code-owned
+    Each override layer replaces the whole template (``__builtin__``); a later layer
+    wins. A not-yet-migrated legacy ``__append__`` is still honoured on read. ``variant`` selects the code-owned
     replacement for placeholders that depend on the model/plugin (today only
     ``EMOJI_TOOL_RULE``). ``render`` carries runtime protocol tokens such as
     ``NO_REPLY_DIRECTIVE``. Prompts flagged ``editable=False`` always return their
@@ -369,16 +348,9 @@ def resolve(
         global_overrides = (
             overrides if overrides is not None else (data.get("prompt_overrides") or {})
         )
-        profile_overrides = (
-            model_overrides if model_overrides is not None
-            else (data.get("model_prompt_overrides") or {})
-        )
         blocks: List[Any] = []
         if isinstance(global_overrides, dict):
             blocks.append(global_overrides.get(prompt_id))
-        profile_block = _profile_block_for(profile_overrides, api_url, model)
-        if isinstance(profile_block, dict):
-            blocks.append(profile_block.get(prompt_id))
         if role_data:
             metadata = role_data.get("metadata") or {}
             role_block = metadata.get("prompt_overrides") if isinstance(metadata, dict) else None
@@ -387,7 +359,7 @@ def resolve(
         for block in blocks:
             replacement, _ = _replacement_text(definition, block, variant)
             if replacement is not None:
-                text = replacement
+                text = replacement[:MAX_PROMPT_OVERRIDE_CHARS]
             appended = _append_text(block)
             if appended is not None:
                 text = text.rstrip("\n") + "\n\n" + appended

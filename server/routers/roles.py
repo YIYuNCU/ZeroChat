@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -29,6 +29,7 @@ from core.utils import (
     is_tool_role_id,
 )
 from core.quiet_rules import QuietRule, validate_quiet_rules
+from services import prompt_config_service
 from services.persona_card import PersonaCard
 from services.chat_io_service import (
     canonical_chat_message, offload_role_io, role_lock, run_file_io, snapshot_cache,
@@ -266,6 +267,12 @@ class RoleCreate(BaseModel):
     tags: Optional[List[str]] = []
     metadata: Optional[Dict[str, Any]] = {}
 
+    @field_validator("metadata")
+    @classmethod
+    def _clean_prompt_overrides(cls, value):
+        return prompt_config_service.sanitize_role_metadata(value)
+
+
 class RoleUpdate(BaseModel):
     """更新角色"""
     model_config = _PROTECTED_NAMESPACE_CONFIG
@@ -293,6 +300,12 @@ class RoleUpdate(BaseModel):
     archived: Optional[bool] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
+
+    @field_validator("metadata")
+    @classmethod
+    def _clean_prompt_overrides(cls, value):
+        return prompt_config_service.sanitize_role_metadata(value)
+
     ai_model: Optional[str] = None
     ai_api_url: Optional[str] = None
     ai_api_key: Optional[str] = None

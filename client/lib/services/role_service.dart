@@ -526,6 +526,9 @@ class RoleService {
               showToolCalls: json['show_tool_calls'] as bool? ?? false,
               showReasoning: json['show_reasoning'] as bool? ?? false,
               archived: json['archived'] as bool? ?? false,
+              metadata: json['metadata'] is Map
+                  ? Map<String, dynamic>.from(json['metadata'] as Map)
+                  : null,
               proactiveConfig: json['proactive_config'] is Map
                   ? ProactiveConfig.fromJson(
                       Map<String, dynamic>.from(
@@ -591,6 +594,10 @@ class RoleService {
                   showToolCalls: backendRole.showToolCalls,
                   showReasoning: backendRole.showReasoning,
                   archived: backendRole.archived,
+                  // 服务端未返回 metadata 时保留本地值，避免把未知内容当成空覆盖。
+                  metadata: json.containsKey('metadata')
+                      ? backendRole.metadata
+                      : existing.metadata,
                   proactiveConfig: backendRole.proactiveConfig,
                   followupConfig: backendRole.followupConfig,
                 ),
@@ -689,6 +696,8 @@ class RoleService {
     'show_tool_calls': role.showToolCalls,
     'show_reasoning': role.showReasoning,
     'archived': role.archived,
+    // 服务端 RoleUpdate.metadata 是整体替换，这里始终携带完整 metadata（含按角色提示词覆盖）。
+    'metadata': role.metadata,
     'max_context_rounds': role.maxContextRounds,
     'max_context_length': role.maxContextLength,
     'model_max_context_length': role.modelMaxContextLength,
@@ -707,6 +716,11 @@ class RoleService {
           if (baseline[entry.key] != _fingerprint(entry.value))
             entry.key: entry.value,
       };
+      // 从未见过服务端 metadata（基线无该 key）且本地为空时不要发送：
+      // metadata 是整体替换，发送空 map 会抹掉服务端上本客户端尚未拉取的内容。
+      if (!baseline.containsKey('metadata') && role.metadata.isEmpty) {
+        changes.remove('metadata');
+      }
       if (changes.isEmpty) return true;
       if (changes['onebot_config'] is Map &&
           baseline['onebot_config.secret'] ==

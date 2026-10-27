@@ -21,6 +21,7 @@ class PromptRegistryRouteTests(unittest.TestCase):
 
         self.assertIn(prompt_config_service.CHAT_NO_REPLY_ID, payload["prompts"])
         self.assertEqual(payload["overrides"], settings["prompt_overrides"])
+        self.assertEqual(payload["model_overrides"], {})
         self.assertEqual(
             payload["reserved_keys"]["builtin"], prompt_config_service.BUILTIN_OVERRIDE_KEY,
         )
@@ -140,6 +141,42 @@ class WsDispatcherWiringTests(unittest.TestCase):
             update.prompt_overrides[prompt_config_service.CHAT_NO_REPLY_ID]["default"],
             "自定义",
         )
+
+    def test_settings_update_ignores_the_retired_model_prompt_overrides(self):
+        for transport in ("rest", "ws"):
+            with self.subTest(transport=transport):
+                captured: dict = {}
+
+                def _save(updates, _captured=captured):
+                    _captured.update(updates)
+                    return True
+
+                updates = {
+                    "prompt_overrides": {
+                        prompt_config_service.CHAT_NO_REPLY_ID: {"__append__": "追加"},
+                    },
+                    "model_prompt_overrides": {
+                        "https://a|m": {
+                            prompt_config_service.CHAT_NO_REPLY_ID: {"__builtin__": "档案"},
+                        },
+                    },
+                }
+                with patch.object(settings_service, "load_settings", return_value={}), patch.object(
+                    settings_service, "save_settings", side_effect=_save,
+                ):
+                    if transport == "rest":
+                        asyncio.run(settings_routes.update_settings(
+                            settings_routes.SettingsUpdate(**updates)))
+                    else:
+                        asyncio.run(ws_dispatcher._handle_settings_update(
+                            {"updates": updates}, "http://localhost"))
+
+                self.assertNotIn("model_prompt_overrides", captured)
+                block = captured["prompt_overrides"][prompt_config_service.CHAT_NO_REPLY_ID]
+                self.assertEqual(
+                    set(block),
+                    {prompt_config_service.BUILTIN_OVERRIDE_KEY, prompt_config_service.BASE_VERSION_KEY},
+                )
 
     def test_settings_update_normalizes_through_the_services(self):
         captured: dict = {}

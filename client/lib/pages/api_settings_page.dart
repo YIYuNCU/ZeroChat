@@ -881,72 +881,28 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
 
   String get _builtinPrompt => _promptDefinition?.builtin ?? '';
 
-  /// 完整覆盖内置提示词：可选全局默认，或只针对当前绑定的模型档案微调
-  /// （与服务端 `model_prompt_overrides["<url>|<model>"]` 对应）。
+  /// 直接编辑内置提示词全文，保存为全局覆盖（空映射表示恢复默认）。
   Future<void> _editPrompt() async {
     final prompt = _promptDefinition;
     if (prompt == null) {
       _showMessage(context, '提示词尚未加载，请稍后重试');
       return;
     }
-    final profile = _profileById(_effectiveProfileId);
-    final scope = await _askPromptScope(context, profile: profile);
+    final overrides = _copyOverrides(SettingsService.instance.promptOverrides);
+    final edited = await showPromptEditor(
+      context,
+      prompt: prompt,
+      current: overrides[prompt.id] ?? const {},
+      scopeLabel: '全局默认',
+    );
     if (!mounted) return;
-    if (scope == null) return;
-
-    if (scope == _PromptScope.profile && profile != null) {
-      final overrides = _copyOverrides(profile.promptOverrides);
-      final edited = await showPromptEditor(
-        context,
-        prompt: prompt,
-        current: overrides[prompt.id] ?? const {},
-        scopeLabel: profile.name,
-      );
-      if (!mounted) return;
-      if (edited == null) return;
-      if (edited.isEmpty) {
-        overrides.remove(prompt.id);
-      } else {
-        overrides[prompt.id] = edited;
-      }
-      await SettingsService.instance.saveApiProfile(
-        ModelApiProfile(
-          id: profile.id,
-          name: profile.name,
-          apiUrl: profile.apiUrl,
-          model: profile.model,
-          apiKey: profile.apiKey,
-          apiFormat: profile.apiFormat,
-          capabilities: profile.capabilities,
-          visionMode: profile.visionMode,
-          timeoutSeconds: profile.timeoutSeconds,
-          reasoningEffort: profile.reasoningEffort,
-          thinkingEnabled: profile.thinkingEnabled,
-          thinkingBudget: profile.thinkingBudget,
-          stream: profile.stream,
-          maxContextLength: profile.maxContextLength,
-          promptOverrides: overrides,
-        ),
-      );
+    if (edited == null) return;
+    if (edited.isEmpty) {
+      overrides.remove(prompt.id);
     } else {
-      final overrides = _copyOverrides(
-        SettingsService.instance.promptOverrides,
-      );
-      final edited = await showPromptEditor(
-        context,
-        prompt: prompt,
-        current: overrides[prompt.id] ?? const {},
-        scopeLabel: '全局默认',
-      );
-      if (!mounted) return;
-      if (edited == null) return;
-      if (edited.isEmpty) {
-        overrides.remove(prompt.id);
-      } else {
-        overrides[prompt.id] = edited;
-      }
-      await SettingsService.instance.updatePromptOverrides(overrides);
+      overrides[prompt.id] = edited;
     }
+    await SettingsService.instance.updatePromptOverrides(overrides);
 
     final synced = await SettingsService.instance.syncApiSettingsToBackend();
     if (mounted) {
@@ -1125,100 +1081,11 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
   }
 }
 
-/// 提示词覆盖的作用域：全局默认，或单个模型档案。
-enum _PromptScope { global, profile }
-
-Future<_PromptScope?> _askPromptScope(
-  BuildContext context, {
-  ModelApiProfile? profile,
-}) async {
-  if (profile == null) return _PromptScope.global;
-  return showDialog<_PromptScope>(
-    context: context,
-    builder: (context) => SimpleDialog(
-      title: const Text('编辑哪一级提示词'),
-      children: [
-        SimpleDialogOption(
-          onPressed: () => Navigator.pop(context, _PromptScope.global),
-          child: const ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text('全局默认'),
-            subtitle: Text('对所有模型生效'),
-          ),
-        ),
-        SimpleDialogOption(
-          onPressed: () => Navigator.pop(context, _PromptScope.profile),
-          child: ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: Text('档案：${profile.name}'),
-            subtitle: Text(
-              '只对 ${profile.model} 生效',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-/// 系统提示词入口的摘要：同时反映全局覆盖与按档案微调。
+/// 系统提示词入口的摘要：只统计全局覆盖。
 String _promptsSubtitle() {
-  final settings = SettingsService.instance;
-  final global = settings.promptOverrides.length;
-  final profiles = settings.modelPromptOverridesForSync().length;
-  if (global == 0 && profiles == 0) return '使用内置提示词';
-  return [
-    if (global > 0) '全局 $global 项',
-    if (profiles > 0) '$profiles 个档案微调',
-  ].join('，');
-}
-
-/// 系统提示词的作用域选择器：默认（全局）或某一个模型档案，一次只显示一个。
-class _PromptScopeSelector extends StatelessWidget {
-  final String? value;
-  final List<ModelApiProfile> profiles;
-  final ValueChanged<String?> onChanged;
-
-  const _PromptScopeSelector({
-    required this.value,
-    required this.profiles,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-    child: Row(
-      children: [
-        const SizedBox(width: 82, child: Text('作用范围')),
-        Expanded(
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<String?>(
-              value: profiles.any((item) => item.id == value) ? value : null,
-              isExpanded: true,
-              items: [
-                const DropdownMenuItem<String?>(
-                  value: null,
-                  child: Text('默认（全局）'),
-                ),
-                for (final profile in profiles)
-                  DropdownMenuItem<String?>(
-                    value: profile.id,
-                    child: Text(
-                      '档案：${profile.name}',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-              ],
-              onChanged: onChanged,
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
+  final global = SettingsService.instance.promptOverrides.length;
+  if (global == 0) return '使用内置提示词';
+  return '全局已自定义 $global 项';
 }
 
 void _showBuiltinPrompt(BuildContext context, String text) {
@@ -1237,7 +1104,7 @@ void _showBuiltinPrompt(BuildContext context, String text) {
   );
 }
 
-/// 提示词编辑页：全局默认覆盖 + 按模型档案微调。
+/// 提示词编辑页：直接编辑 md 全文的全局覆盖（按角色覆盖在角色设置页）。
 class PromptsPage extends StatefulWidget {
   const PromptsPage({super.key});
 
@@ -1248,10 +1115,6 @@ class PromptsPage extends StatefulWidget {
 class _PromptsPageState extends State<PromptsPage> {
   bool _loading = true;
   String? _error;
-
-  /// 当前显示的作用域：`null` 表示全局默认，否则是模型档案 id。
-  /// 一次只显示一个作用域，避免全局与其下所有档案的提示词同时铺满页面。
-  String? _scopeProfileId;
 
   @override
   void initState() {
@@ -1277,53 +1140,8 @@ class _PromptsPageState extends State<PromptsPage> {
     }
   }
 
-  List<ModelApiProfile> get _profiles => ModelProfileCapability.values
-      .expand(SettingsService.instance.modelProfilesFor)
-      .toSet()
-      .toList();
-
-  /// 当前选中的档案；未选（全局默认）或档案已被删除时返回 null。
-  ModelApiProfile? get _selectedProfile {
-    final id = _scopeProfileId;
-    if (id == null) return null;
-    for (final profile in _profiles) {
-      if (profile.id == id) return profile;
-    }
-    return null;
-  }
-
-  Widget _scopeSubtitle() {
-    final profile = _selectedProfile;
-    final overrides = profile == null
-        ? SettingsService.instance.promptOverrides
-        : profile.promptOverrides;
-    final count = overrides.length;
-    return ListTile(
-      dense: true,
-      title: Text(
-        profile == null
-            ? '全局默认：未单独配置档案时使用'
-            : '${profile.model} | ${profile.apiUrl}',
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
-      ),
-      trailing: count == 0
-          ? null
-          : Text(
-              '已自定义 $count 项',
-              style: const TextStyle(fontSize: 12, color: Color(0xFF07C160)),
-            ),
-    );
-  }
-
-  Map<String, String> _overrideOf(ConfigurablePrompt prompt) {
-    final profile = _selectedProfile;
-    final overrides = profile == null
-        ? SettingsService.instance.promptOverrides
-        : profile.promptOverrides;
-    return overrides[prompt.id] ?? const {};
-  }
+  Map<String, String> _overrideOf(ConfigurablePrompt prompt) =>
+      SettingsService.instance.promptOverrides[prompt.id] ?? const {};
 
   bool _isOverridden(ConfigurablePrompt prompt) =>
       _overrideOf(prompt).isNotEmpty;
@@ -1331,15 +1149,6 @@ class _PromptsPageState extends State<PromptsPage> {
   /// 覆盖基于的内置版本低于当前内置版本。
   bool _isStale(ConfigurablePrompt prompt) =>
       prompt.isOverrideStale(_overrideOf(prompt));
-
-  Future<void> _editScoped(ConfigurablePrompt prompt) async {
-    final profile = _selectedProfile;
-    if (profile == null) {
-      await _editGlobal(prompt);
-    } else {
-      await _editProfile(profile, prompt);
-    }
-  }
 
   Future<void> _editGlobal(ConfigurablePrompt prompt) async {
     final overrides = _copyOverrides(SettingsService.instance.promptOverrides);
@@ -1356,49 +1165,6 @@ class _PromptsPageState extends State<PromptsPage> {
       overrides[prompt.id] = edited;
     }
     await SettingsService.instance.updatePromptOverrides(overrides);
-    final synced = await SettingsService.instance.syncApiSettingsToBackend();
-    if (mounted) {
-      setState(() {});
-      _showMessage(context, synced ? '提示词已保存' : '已本地保存，后端同步失败');
-    }
-  }
-
-  Future<void> _editProfile(
-    ModelApiProfile profile,
-    ConfigurablePrompt prompt,
-  ) async {
-    final overrides = _copyOverrides(profile.promptOverrides);
-    final edited = await showPromptEditor(
-      context,
-      prompt: prompt,
-      current: overrides[prompt.id] ?? const {},
-      scopeLabel: profile.name,
-    );
-    if (edited == null) return;
-    if (edited.isEmpty) {
-      overrides.remove(prompt.id);
-    } else {
-      overrides[prompt.id] = edited;
-    }
-    await SettingsService.instance.saveApiProfile(
-      ModelApiProfile(
-        id: profile.id,
-        name: profile.name,
-        apiUrl: profile.apiUrl,
-        model: profile.model,
-        apiKey: profile.apiKey,
-        apiFormat: profile.apiFormat,
-        capabilities: profile.capabilities,
-        visionMode: profile.visionMode,
-        timeoutSeconds: profile.timeoutSeconds,
-        reasoningEffort: profile.reasoningEffort,
-        thinkingEnabled: profile.thinkingEnabled,
-        thinkingBudget: profile.thinkingBudget,
-        stream: profile.stream,
-        maxContextLength: profile.maxContextLength,
-        promptOverrides: overrides,
-      ),
-    );
     final synced = await SettingsService.instance.syncApiSettingsToBackend();
     if (mounted) {
       setState(() {});
@@ -1448,26 +1214,12 @@ class _PromptsPageState extends State<PromptsPage> {
           : ListView(
               children: [
                 const _PageHint(
-                  '提示词按「内置默认 → 全局覆盖 → 模型档案微调」的顺序生效；'
-                  '留空表示沿用上一级内容。修改会同步到服务端并在下一次请求生效。\n'
-                  '用上方「作用范围」切换默认与单个档案，一次只显示一个作用域。\n'
+                  '这里直接编辑提示词（md）全文，作用于全部角色；修改会同步到服务端并在下一次请求生效。'
+                  '某个角色需要不同的提示词时，到该角色的设置页「提示词（仅此角色）」里单独编辑。\n'
                   '此处只列聊天所用系统提示词；工具调用规则由程序内置（与实际可用工具'
                   '和表情插件强绑定，不可修改），事件总结与核心记忆总结的提示词在'
                   '各自的功能页配置。',
                 ),
-                _Section(
-                  children: [
-                    _PromptScopeSelector(
-                      value: _selectedProfile?.id,
-                      profiles: _profiles,
-                      onChanged: (value) =>
-                          setState(() => _scopeProfileId = value),
-                    ),
-                    const Divider(height: 1),
-                    _scopeSubtitle(),
-                  ],
-                ),
-                const _SectionGap(),
                 _Section(
                   children: [
                     for (final prompt in prompts)
@@ -1475,7 +1227,7 @@ class _PromptsPageState extends State<PromptsPage> {
                         prompt: prompt,
                         overridden: _isOverridden(prompt),
                         stale: _isStale(prompt),
-                        onTap: () => _editScoped(prompt),
+                        onTap: () => _editGlobal(prompt),
                       ),
                   ],
                 ),
@@ -1746,7 +1498,6 @@ Future<ModelApiProfile?> _showProfileEditor(
                       : null,
                   stream: stream,
                   maxContextLength: int.tryParse(maxContextLength.text.trim()),
-                  promptOverrides: existing?.promptOverrides ?? const {},
                 ),
               );
             },

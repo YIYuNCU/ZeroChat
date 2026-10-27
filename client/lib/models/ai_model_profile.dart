@@ -38,7 +38,6 @@ class ModelApiProfile {
   final int? thinkingBudget;
   final bool? stream;
   final int? maxContextLength;
-  final Map<String, Map<String, String>> promptOverrides;
 
   const ModelApiProfile({
     required this.id,
@@ -55,7 +54,6 @@ class ModelApiProfile {
     this.thinkingBudget,
     this.stream,
     this.maxContextLength,
-    this.promptOverrides = const {},
   });
 
   bool supports(ModelProfileCapability capability) =>
@@ -88,8 +86,8 @@ class ModelApiProfile {
           normalizeThinkingBudget(json['thinking_budget']) ??
           normalizeThinkingBudget(json['reasoning_effort']),
       stream: json['stream'] is bool ? json['stream'] as bool : null,
+      // 旧版本档案里的 `prompt_overrides` 已废弃（提示词只保留全局与按角色两层），直接忽略。
       maxContextLength: _normalizeContextLength(json['max_context_length']),
-      promptOverrides: normalizePromptOverrides(json['prompt_overrides']),
     );
   }
 
@@ -108,7 +106,6 @@ class ModelApiProfile {
     if (thinkingBudget != null) 'thinking_budget': thinkingBudget,
     if (stream != null) 'stream': stream,
     if (maxContextLength != null) 'max_context_length': maxContextLength,
-    if (promptOverrides.isNotEmpty) 'prompt_overrides': promptOverrides,
   };
 }
 

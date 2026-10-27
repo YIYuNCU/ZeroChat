@@ -7,6 +7,7 @@ import '../models/role.dart';
 import '../models/stats_config.dart';
 import '../services/secure_backend_client.dart';
 import '../services/settings_service.dart';
+import '../widgets/role_prompt_overrides_section.dart';
 
 /// 角色参数设置页面
 /// 调整 AI 角色的参数配置
@@ -85,6 +86,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late bool _showToolCalls;
   late bool _showReasoning;
   late bool _archived;
+
+  /// 角色 metadata 的本地副本（含按角色提示词覆盖），随「保存」一并提交。
+  late Map<String, dynamic> _metadata;
 
   @override
   void initState() {
@@ -174,6 +178,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _showToolCalls = widget.role.showToolCalls;
     _showReasoning = widget.role.showReasoning;
     _archived = widget.role.archived;
+    _metadata = Map<String, dynamic>.of(widget.role.metadata);
   }
 
   @override
@@ -314,6 +319,15 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                 ),
               ),
             ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 按角色的提示词覆盖（直接编辑 md 全文）
+          RolePromptOverridesSection(
+            roleName: widget.role.name,
+            metadata: _metadata,
+            onChanged: (metadata) => setState(() => _metadata = metadata),
           ),
 
           const SizedBox(height: 10),
@@ -1647,6 +1661,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       showToolCalls: _showToolCalls,
       showReasoning: _showReasoning,
       archived: _archived,
+      metadata: _metadata,
     );
     await SettingsService.instance.setSelectedModelProfileForRole(
       updatedRole.id,

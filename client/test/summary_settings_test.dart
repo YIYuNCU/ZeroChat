@@ -211,23 +211,14 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('multi-capability profile has a single selectable prompt scope', (
-    tester,
-  ) async {
+  testWidgets('prompts page only edits the global scope', (tester) async {
     await settings.saveApiProfile(profile);
     await tester.pumpWidget(const MaterialApp(home: PromptsPage()));
     await tester.pumpAndSettle();
-    final dropdown = find.byType(DropdownButton<String?>);
-    expect(
-      tester.widget<DropdownButton<String?>>(dropdown).items,
-      hasLength(2),
-    );
-    await tester.tap(dropdown);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('档案：${profile.name}').last);
-    await tester.pumpAndSettle();
+    expect(find.byType(DropdownButton<String?>), findsNothing);
+    expect(find.text('作用范围'), findsNothing);
+    expect(find.textContaining(profile.name), findsNothing);
     expect(tester.takeException(), isNull);
-    expect(find.text('${profile.model} | ${profile.apiUrl}'), findsOneWidget);
   });
 
   for (final action in ['保存', '取消', '恢复默认']) {

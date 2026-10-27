@@ -53,33 +53,20 @@ class PromptRegistryTests(unittest.TestCase):
         self.assertIn("send_emoji", cloud_text)
         self.assertNotIn("send_emotion_emoji", cloud_text)
 
-    def test_model_profile_override_beats_global_override(self):
+    def test_model_prompt_overrides_layer_is_retired(self):
         settings = {
             "prompt_overrides": {prompts.CHAT_NO_REPLY_ID: {"zerochat": "全局"}},
             "model_prompt_overrides": {
-                prompts.model_target_key("https://api.example.com", "GPT-4O"): {
-                    prompts.CHAT_NO_REPLY_ID: {"zerochat": "档案"},
+                "https://api.example.com|gpt-4o": {
+                    prompts.CHAT_NO_REPLY_ID: {"__builtin__": "档案"},
                 },
             },
         }
         self.assertEqual(
-            prompts.resolve(
-                prompts.CHAT_NO_REPLY_ID,
-                settings=settings,
-                api_url="https://api.example.com",
-                model="gpt-4o",
-            ),
-            "档案",
+            prompts.resolve(prompts.CHAT_NO_REPLY_ID, settings=settings), "全局",
         )
-        self.assertEqual(
-            prompts.resolve(
-                prompts.CHAT_NO_REPLY_ID,
-                settings=settings,
-                api_url="https://other.example.com",
-                model="gpt-4o",
-            ),
-            "全局",
-        )
+        self.assertFalse(hasattr(prompts, "sanitize_model_overrides"))
+        self.assertFalse(hasattr(prompts, "model_target_key"))
 
     def test_role_metadata_override_wins_over_everything(self):
         settings = {
@@ -108,26 +95,6 @@ class PromptRegistryTests(unittest.TestCase):
             "自定义用户消息说明",
         )
 
-    def test_model_profile_override_replaces_the_template_too(self):
-        with patch.object(
-            prompts.settings_service, "load_settings",
-            return_value={
-                "model_prompt_overrides": {
-                    "https://api.example.com|m": {
-                        prompts.CHAT_NO_REPLY_ID: {"__builtin__": "档案级"},
-                    },
-                },
-            },
-        ):
-            self.assertEqual(
-                prompts.resolve(
-                    prompts.CHAT_NO_REPLY_ID,
-                    api_url="https://api.example.com",
-                    model="m",
-                ),
-                "档案级",
-            )
-
     def test_tool_prompts_are_not_editable(self):
         """工具调用提示词完全由代码维护：不进列表、不受覆盖影响、写不进设置。"""
         for prompt_id in (
@@ -142,15 +109,10 @@ class PromptRegistryTests(unittest.TestCase):
                 builtin = prompts.PROMPT_REGISTRY[prompt_id].builtin
                 settings = {
                     "prompt_overrides": {prompt_id: {"__builtin__": "被篡改"}},
-                    "model_prompt_overrides": {
-                        "https://api.example.com|m": {prompt_id: {"__builtin__": "被篡改"}},
-                    },
                 }
                 text = prompts.resolve(
                     prompt_id,
                     settings=settings,
-                    api_url="https://api.example.com",
-                    model="m",
                     role_data={"metadata": {"prompt_overrides": {prompt_id: {"__builtin__": "被篡改"}}}},
                 )
                 self.assertNotIn("被篡改", text)
@@ -192,7 +154,6 @@ class PromptRegistryTests(unittest.TestCase):
         cleaned = prompts.sanitize_overrides({
             prompts.CHAT_NO_REPLY_ID: {
                 prompts.BUILTIN_OVERRIDE_KEY: "x" * (prompts.MAX_PROMPT_OVERRIDE_CHARS + 5),
-                prompts.APPEND_OVERRIDE_KEY: "y" * (prompts.MAX_PROMPT_OVERRIDE_CHARS + 5),
             },
             "": {"zerochat": "no id"},
             "chat.unknown_prompt": "not a map",
@@ -200,7 +161,7 @@ class PromptRegistryTests(unittest.TestCase):
         self.assertEqual(list(cleaned), [prompts.CHAT_NO_REPLY_ID])
         block = cleaned[prompts.CHAT_NO_REPLY_ID]
         self.assertEqual(len(block[prompts.BUILTIN_OVERRIDE_KEY]), prompts.MAX_PROMPT_OVERRIDE_CHARS)
-        self.assertEqual(len(block[prompts.APPEND_OVERRIDE_KEY]), prompts.MAX_PROMPT_OVERRIDE_CHARS)
+        self.assertEqual(set(block), {prompts.BUILTIN_OVERRIDE_KEY, prompts.BASE_VERSION_KEY})
         # 没有带版本戳的新写入，按当前内置版本记录。
         self.assertEqual(
             block[prompts.BASE_VERSION_KEY],
@@ -242,21 +203,53 @@ class PromptRegistryTests(unittest.TestCase):
             str(prompts.PROMPT_REGISTRY[prompts.CHAT_NO_REPLY_ID].version),
         )
 
-    def test_append_override_extends_the_builtin_and_stacks_across_layers(self):
-        builtin = prompts.resolve(prompts.CHAT_NO_REPLY_ID, settings={})
-        settings = {
-            "prompt_overrides": {prompts.CHAT_NO_REPLY_ID: {"__append__": "全局追加"}},
-            "model_prompt_overrides": {
-                "https://api.example.com|m": {
-                    prompts.CHAT_NO_REPLY_ID: {"__append__": "档案追加"},
-                },
-            },
-        }
-        text = prompts.resolve(
-            prompts.CHAT_NO_REPLY_ID, settings=settings,
-            api_url="https://api.example.com", model="m",
+    def test_legacy_append_is_folded_into_a_full_replacement(self):
+        builtin_definition = prompts.PROMPT_REGISTRY[prompts.CHAT_NO_REPLY_ID]
+        cleaned = prompts.sanitize_overrides({
+            prompts.CHAT_NO_REPLY_ID: {"__append__": "全局追加"},
+            prompts.CHAT_FORMAT_PROTOCOL_ID: {"__builtin__": "整体替换", "__append__": "再追加"},
+        })
+        self.assertEqual(cleaned[prompts.CHAT_NO_REPLY_ID], {
+            prompts.BUILTIN_OVERRIDE_KEY: builtin_definition.builtin.rstrip("\n") + "\n\n全局追加",
+            prompts.BASE_VERSION_KEY: str(builtin_definition.version),
+        })
+        self.assertEqual(
+            cleaned[prompts.CHAT_FORMAT_PROTOCOL_ID][prompts.BUILTIN_OVERRIDE_KEY],
+            "整体替换\n\n再追加",
         )
-        self.assertEqual(text, builtin + "\n\n全局追加\n\n档案追加")
+        for block in cleaned.values():
+            self.assertNotIn(prompts.APPEND_OVERRIDE_KEY, block)
+
+    def test_legacy_append_is_still_honoured_when_resolving_unmigrated_data(self):
+        builtin = prompts.resolve(prompts.CHAT_NO_REPLY_ID, settings={})
+        settings = {"prompt_overrides": {prompts.CHAT_NO_REPLY_ID: {"__append__": "全局追加"}}}
+        self.assertEqual(
+            prompts.resolve(prompts.CHAT_NO_REPLY_ID, settings=settings),
+            builtin + "\n\n全局追加",
+        )
+
+    def test_role_overrides_only_accept_chat_prompts_and_clean_metadata(self):
+        role_cleaned = prompts.sanitize_role_overrides({
+            prompts.CHAT_NO_REPLY_ID: {"__builtin__": "角色版"},
+            prompts.SUMMARY_CORE_MEMORY_ID: {"__builtin__": "不该出现在角色级"},
+            prompts.CHAT_TOOL_RULES_ID: {"__builtin__": "不可编辑"},
+        })
+        self.assertEqual(list(role_cleaned), [prompts.CHAT_NO_REPLY_ID])
+        metadata = prompts.sanitize_role_metadata({
+            "keep": 1,
+            "prompt_overrides": {prompts.CHAT_NO_REPLY_ID: {"zerochat": "旧相位"}},
+        })
+        self.assertEqual(metadata["keep"], 1)
+        self.assertEqual(
+            metadata["prompt_overrides"][prompts.CHAT_NO_REPLY_ID][prompts.BUILTIN_OVERRIDE_KEY],
+            "旧相位",
+        )
+        emptied = prompts.sanitize_role_metadata(
+            {"keep": 1, "prompt_overrides": {"chat.unknown": {"__builtin__": "x"}}},
+        )
+        self.assertEqual(emptied, {"keep": 1})
+        self.assertEqual(prompts.sanitize_role_metadata({"a": 1}), {"a": 1})
+        self.assertIsNone(prompts.sanitize_role_metadata(None))
 
     def test_replace_then_append_in_one_block(self):
         settings = {"prompt_overrides": {prompts.CHAT_NO_REPLY_ID: {
@@ -271,8 +264,9 @@ class PromptRegistryTests(unittest.TestCase):
         entry = prompts.registry_snapshot()[prompts.CHAT_NO_REPLY_ID]
         self.assertEqual(entry["version"], prompts.PROMPT_REGISTRY[prompts.CHAT_NO_REPLY_ID].version)
         keys = prompts.reserved_keys_payload()
-        self.assertEqual(keys["append"], "__append__")
+        self.assertEqual(keys["builtin"], "__builtin__")
         self.assertEqual(keys["base_version"], "__base_version__")
+        self.assertNotIn("append", keys)
 
     def test_migrate_stored_overrides_backs_up_and_is_idempotent(self):
         import tempfile
@@ -306,12 +300,8 @@ class PromptRegistryTests(unittest.TestCase):
                 self.assertEqual(
                     saved["prompt_overrides"][prompts.CHAT_NO_REPLY_ID]["__builtin__"], "旧",
                 )
-                self.assertEqual(
-                    saved["model_prompt_overrides"]["https://a|m"][prompts.CHAT_SOUND_DEDUP_ID][
-                        "__base_version__"
-                    ],
-                    "1",
-                )
+                # 已停用的按模型覆盖层不会被改写。
+                self.assertNotIn("model_prompt_overrides", saved)
                 # 第二次运行没有变化，不再写入。
                 self.assertFalse(prompts.migrate_stored_overrides())
 
@@ -324,13 +314,6 @@ class PromptRegistryTests(unittest.TestCase):
                 self.assertTrue(prompt_id.isascii())
                 # 标题可以改，id 不受影响。
                 self.assertNotIn(definition.title, prompt_id)
-
-    def test_sanitize_model_overrides_requires_a_profile_key(self):
-        cleaned = prompts.sanitize_model_overrides({
-            "https://API.example.com|gpt-4o": {prompts.CHAT_NO_REPLY_ID: {"default": "值"}},
-            "no-separator": {prompts.CHAT_NO_REPLY_ID: {"default": "值"}},
-        })
-        self.assertEqual(list(cleaned), ["https://api.example.com|gpt-4o"])
 
     def test_unknown_prompt_id_logs_and_returns_empty(self):
         with self.assertLogs("services.prompt_config_service", level="WARNING"):
@@ -390,29 +373,32 @@ class PromptRegistryTests(unittest.TestCase):
 
 
 class AiServicePromptIntegrationTests(unittest.TestCase):
-    def test_model_overrides_use_configured_url_before_http_normalization(self):
+    def test_role_overrides_replace_the_whole_text_in_the_chat_system_prompt(self):
         from services import ai_service
 
-        for url in ('https://api.example.com', 'https://api.example.com/v1',
-                    'https://generativelanguage.googleapis.com/v1beta'):
-            for source in ('role', 'metadata', 'global'):
-                with self.subTest(url=url, source=source):
-                    role = {'id': 'role-1', 'ai_model': 'test-model', 'stats_config': _STATS}
-                    config = {'model_prompt_overrides': {
-                        prompts.model_target_key(url, 'test-model'): {
-                            prompts.CHAT_FORMAT_PROTOCOL_ID: {'zerochat': 'CUSTOM-PROTOCOL'},
-                            prompts.CHAT_STATS_BLOCK_ID: {'__builtin__': 'CUSTOM-STATS'},
-                        }}}
-                    if source == 'role':
-                        role['ai_api_url'] = url
-                    elif source == 'metadata':
-                        role['metadata'] = {'ai_api_url': url}
-                    else:
-                        config['ai_api_url'] = url
-                    with patch.object(ai_service.settings_service, 'load_settings', return_value=config):
-                        rendered = ai_service._build_system_prompt(role)
-                    self.assertIn('CUSTOM-PROTOCOL', rendered)
-                    self.assertIn('CUSTOM-STATS', rendered)
+        role = {
+            'id': 'role-1', 'ai_model': 'test-model', 'stats_config': _STATS,
+            'metadata': {'prompt_overrides': {
+                prompts.CHAT_FORMAT_PROTOCOL_ID: {'__builtin__': 'ROLE-PROTOCOL'},
+                prompts.CHAT_STATS_BLOCK_ID: {'__builtin__': 'ROLE-STATS'},
+            }},
+        }
+        config = {
+            'prompt_overrides': {prompts.CHAT_FORMAT_PROTOCOL_ID: {'__builtin__': 'GLOBAL-PROTOCOL'}},
+            # 已停用的按模型覆盖层：即使数据还在也不再生效。
+            'model_prompt_overrides': {
+                'https://api.example.com|test-model': {
+                    prompts.CHAT_FORMAT_PROTOCOL_ID: {'__builtin__': 'MODEL-PROTOCOL'},
+                },
+            },
+            'ai_api_url': 'https://api.example.com',
+        }
+        with patch.object(ai_service.settings_service, 'load_settings', return_value=config):
+            rendered = ai_service._build_system_prompt(role)
+        self.assertIn('ROLE-PROTOCOL', rendered)
+        self.assertIn('ROLE-STATS', rendered)
+        self.assertNotIn('GLOBAL-PROTOCOL', rendered)
+        self.assertNotIn('MODEL-PROTOCOL', rendered)
 
     def test_settings_overrides_reach_the_chat_system_prompt(self):
         from services import ai_service

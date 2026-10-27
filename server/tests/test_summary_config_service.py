@@ -321,33 +321,28 @@ class SummaryPromptScopingTests(unittest.TestCase):
                 self.assertTrue(probe)
                 self.assertNotIn(probe, built)
 
-    def test_summary_prompt_accepts_global_and_model_profile_overrides(self):
+    def test_summary_prompt_uses_only_the_global_full_replacement(self):
         prompt_id = summaries.PROMPT_IDS[summaries.CONTEXT_SUMMARY]
-        url, model = "https://api.example.com/v1", "summary-model"
         glob = {"prompt_overrides": {prompt_id: {"__builtin__": "全局总结提示词"}}}
-        prof = {
+        retired_model_layer = {
             "model_prompt_overrides": {
-                prompt_config_service.model_target_key(url, model): {
+                "https://api.example.com/v1|summary-model": {
                     prompt_id: {"__builtin__": "档案总结提示词"},
                 },
             },
         }
         with patch.object(settings_service, "load_settings", return_value={}):
-            builtin = summaries.summary_system_prompt(
-                summaries.CONTEXT_SUMMARY, model=model, api_url=url,
-            )
+            builtin = summaries.summary_system_prompt(summaries.CONTEXT_SUMMARY)
         with patch.object(settings_service, "load_settings", return_value=glob):
-            global_text = summaries.summary_system_prompt(
-                summaries.CONTEXT_SUMMARY, model=model, api_url=url,
-            )
-        with patch.object(settings_service, "load_settings", return_value=prof):
-            profile_text = summaries.summary_system_prompt(
-                summaries.CONTEXT_SUMMARY, model=model, api_url=url,
-            )
+            global_text = summaries.summary_system_prompt(summaries.CONTEXT_SUMMARY)
+        with patch.object(
+            settings_service, "load_settings", return_value=retired_model_layer,
+        ):
+            ignored_text = summaries.summary_system_prompt(summaries.CONTEXT_SUMMARY)
 
         self.assertNotIn("全局总结提示词", builtin)
         self.assertEqual(global_text, "全局总结提示词")
-        self.assertEqual(profile_text, "档案总结提示词")
+        self.assertEqual(ignored_text, builtin)
 
     def test_stored_prompt_is_appended_after_the_resolved_base(self):
         with patch.object(settings_service, "load_settings", return_value={

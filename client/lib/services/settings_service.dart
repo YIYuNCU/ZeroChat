@@ -257,10 +257,8 @@ class SettingsService extends ChangeNotifier {
   SummaryApiConfig _contextSummaryConfig = SummaryApiConfig();
   SummaryApiConfig _coreMemorySummaryConfig = SummaryApiConfig();
 
-  // 可配置系统提示词：全局默认覆盖，按档案微调由 model profile 携带
+  // 可配置系统提示词：全局覆盖（按角色覆盖存放在角色 metadata 中）
   Map<String, Map<String, String>> _promptOverrides = {};
-  Map<String, Map<String, Map<String, String>>> _remoteModelPromptOverrides =
-      {};
   Map<String, ConfigurablePrompt> _promptRegistry = {};
 
   // 意图识别 API
@@ -369,16 +367,6 @@ class SettingsService extends ChangeNotifier {
     if (rawOverrides is Map) {
       await updatePromptOverrides(normalizePromptOverrides(rawOverrides));
     }
-    final rawModelOverrides = server['model_prompt_overrides'];
-    if (rawModelOverrides is Map) {
-      _remoteModelPromptOverrides = _normalizeModelPromptOverrides(
-        rawModelOverrides,
-      );
-      await StorageService.setJson(
-        'remote_model_prompt_overrides',
-        _remoteModelPromptOverrides,
-      );
-    }
   }
 
   Future<void> _restoreSummaryConfig(
@@ -434,22 +422,6 @@ class SettingsService extends ChangeNotifier {
 
   Map<String, ConfigurablePrompt> get promptRegistry =>
       Map.unmodifiable(_promptRegistry);
-
-  /// 按服务端 key（`api_url|model`，均为小写）汇总各模型档案的提示词微调。
-  Map<String, Map<String, Map<String, String>>> modelPromptOverridesForSync() {
-    final result = _copyModelPromptOverrides(_remoteModelPromptOverrides);
-    for (final profile in _modelProfiles) {
-      final key = modelPromptTargetKey(profile.apiUrl, profile.model);
-      if (key.isEmpty) continue;
-      // A local profile is authoritative for its own provider/model target,
-      // including an empty override map used to clear an old customization.
-      result.remove(key);
-      if (profile.promptOverrides.isNotEmpty) {
-        result[key] = _copyPromptOverrides(profile.promptOverrides);
-      }
-    }
-    return result;
-  }
 
   Future<void> updateContextSummaryConfig(SummaryApiConfig config) =>
       updateSummaryConfig(SummaryFeature.context, config);
@@ -539,16 +511,6 @@ class SettingsService extends ChangeNotifier {
         'settings_prompts_get',
         const <String, dynamic>{},
       );
-      final rawModelOverrides = payload['model_overrides'];
-      if (rawModelOverrides is Map) {
-        _remoteModelPromptOverrides = _normalizeModelPromptOverrides(
-          rawModelOverrides,
-        );
-        await StorageService.setJson(
-          'remote_model_prompt_overrides',
-          _remoteModelPromptOverrides,
-        );
-      }
       final raw = payload['prompts'];
       if (raw is! Map) return _promptRegistry;
       _promptRegistry = {
@@ -661,9 +623,6 @@ class SettingsService extends ChangeNotifier {
     await _loadSummaryConfigs();
     _promptOverrides = normalizePromptOverrides(
       StorageService.getJson('prompt_overrides'),
-    );
-    _remoteModelPromptOverrides = _normalizeModelPromptOverrides(
-      StorageService.getJson('remote_model_prompt_overrides'),
     );
 
     // 意图识别 API
@@ -1334,7 +1293,6 @@ class SettingsService extends ChangeNotifier {
       _coreMemorySummaryConfig,
     ),
     'prompt_overrides': _promptOverrides,
-    'model_prompt_overrides': modelPromptOverridesForSync(),
     'intent_enabled': _intentEnabled,
     'intent_api_url': _intentApiUrl,
     'intent_api_key': _intentApiKey,
@@ -1703,32 +1661,4 @@ class SettingsService extends ChangeNotifier {
       return false;
     }
   }
-}
-
-Map<String, Map<String, String>> _copyPromptOverrides(
-  Map<String, Map<String, String>> source,
-) => {
-  for (final entry in source.entries)
-    entry.key: Map<String, String>.of(entry.value),
-};
-
-Map<String, Map<String, Map<String, String>>> _copyModelPromptOverrides(
-  Map<String, Map<String, Map<String, String>>> source,
-) => {
-  for (final entry in source.entries)
-    entry.key: _copyPromptOverrides(entry.value),
-};
-
-Map<String, Map<String, Map<String, String>>> _normalizeModelPromptOverrides(
-  Object? raw,
-) {
-  if (raw is! Map) return {};
-  final result = <String, Map<String, Map<String, String>>>{};
-  for (final entry in raw.entries) {
-    final target = entry.key.toString().trim().toLowerCase();
-    if (target.isEmpty || entry.value is! Map) continue;
-    final overrides = normalizePromptOverrides(entry.value);
-    if (overrides.isNotEmpty) result[target] = overrides;
-  }
-  return result;
 }
