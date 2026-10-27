@@ -664,15 +664,12 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   }
 
   Future<void> _pickRoleBackgroundImage() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      allowMultiple: false,
-    );
-    if (result == null || result.files.single.path == null) {
+    final picked = await FilePicker.pickFile(type: FileType.image);
+    if (picked == null || picked.path == null) {
       return;
     }
 
-    final path = result.files.single.path!;
+    final path = picked.path!;
     _currentRole = _currentRole.copyWith(chatBackgroundUrl: path);
     await RoleService.updateRole(_currentRole);
     if (!mounted) {
@@ -2245,13 +2242,13 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
   /// 导入外挂 JSON 文件
   void _importJsonFile() async {
     try {
-      final result = await FilePicker.platform.pickFiles(
+      final picked = await FilePicker.pickFile(
         type: FileType.custom,
         allowedExtensions: ['json', 'txt'],
       );
-      if (result == null || result.files.single.path == null) return;
+      if (picked == null || picked.path == null) return;
 
-      final file = File(result.files.single.path!);
+      final file = File(picked.path!);
       final content = await file.readAsString();
 
       if (content.isEmpty) {

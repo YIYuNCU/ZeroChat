@@ -16,6 +16,11 @@ public final class GeneratedPluginRegistrant {
   private static final String TAG = "GeneratedPluginRegistrant";
   public static void registerWith(@NonNull FlutterEngine flutterEngine) {
     try {
+      flutterEngine.getPlugins().add(new com.mr.flutter.plugin.filepicker.FilePickerPlugin());
+    } catch (Exception e) {
+      Log.e(TAG, "Error registering plugin android_file_picker, com.mr.flutter.plugin.filepicker.FilePickerPlugin", e);
+    }
+    try {
       flutterEngine.getPlugins().add(new dev.fluttercommunity.plus.androidintent.AndroidIntentPlugin());
     } catch (Exception e) {
       Log.e(TAG, "Error registering plugin android_intent_plus, dev.fluttercommunity.plus.androidintent.AndroidIntentPlugin", e);
@@ -29,11 +34,6 @@ public final class GeneratedPluginRegistrant {
       flutterEngine.getPlugins().add(new dev.fluttercommunity.plus.connectivity.ConnectivityPlugin());
     } catch (Exception e) {
       Log.e(TAG, "Error registering plugin connectivity_plus, dev.fluttercommunity.plus.connectivity.ConnectivityPlugin", e);
-    }
-    try {
-      flutterEngine.getPlugins().add(new com.mr.flutter.plugin.filepicker.FilePickerPlugin());
-    } catch (Exception e) {
-      Log.e(TAG, "Error registering plugin file_picker, com.mr.flutter.plugin.filepicker.FilePickerPlugin", e);
     }
     try {
       flutterEngine.getPlugins().add(new id.flutter.flutter_background_service.FlutterBackgroundServicePlugin());
@@ -61,9 +61,9 @@ public final class GeneratedPluginRegistrant {
       Log.e(TAG, "Error registering plugin image_picker_android, io.flutter.plugins.imagepicker.ImagePickerPlugin", e);
     }
     try {
-      flutterEngine.getPlugins().add(new dev.flutter.plugins.integration_test.IntegrationTestPlugin());
+      flutterEngine.getPlugins().add(new com.github.dart_lang.jni.JniPlugin());
     } catch (Exception e) {
-      Log.e(TAG, "Error registering plugin integration_test, dev.flutter.plugins.integration_test.IntegrationTestPlugin", e);
+      Log.e(TAG, "Error registering plugin jni, com.github.dart_lang.jni.JniPlugin", e);
     }
     try {
       flutterEngine.getPlugins().add(new dev.fluttercommunity.plus.packageinfo.PackageInfoPlugin());

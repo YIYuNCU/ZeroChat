@@ -84,9 +84,8 @@ class _ShareScreenshotPageState extends State<ShareScreenshotPage> {
         '${dir.path}/zerochat_${DateTime.now().millisecondsSinceEpoch}.png',
       );
       await file.writeAsBytes(bytes);
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        subject: widget.chatName,
+      await SharePlus.instance.share(
+        ShareParams(files: [XFile(file.path)], subject: widget.chatName),
       );
     } catch (e) {
       debugPrint('ShareScreenshotPage: share failed: $e');

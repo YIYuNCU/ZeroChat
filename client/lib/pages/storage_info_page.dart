@@ -199,9 +199,12 @@ class _StorageCategoryPageState extends State<_StorageCategoryPage> {
       final archive = await widget.storageService.exportCategory(
         widget.category,
       );
-      await Share.shareXFiles([
-        XFile(archive.path),
-      ], subject: 'ZeroChat ${widget.category.label}');
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(archive.path)],
+          subject: 'ZeroChat ${widget.category.label}',
+        ),
+      );
     } catch (_) {
       _showMessage('导出失败，请稍后重试');
     } finally {
