@@ -10,13 +10,14 @@ import 'storage_service.dart';
 /// 迁移：搬入 secure storage 后从 SharedPreferences 删除。
 class SecureStorageService {
   // flutter_secure_storage v10：encryptedSharedPreferences 已弃用并被忽略，
-  // 首次访问时旧数据自动迁移到自定义 cipher。开启 migrateWithBackup 让迁移
-  // 中途崩溃时可恢复，避免丢失 API Key / 后端 token / 传输 secret。
+  // 首次访问时旧 EncryptedSharedPreferences 数据自动迁移到自定义 cipher
+  // （migrateOnAlgorithmChange 默认 true，迁移失败会回退读取旧存储）。
+  //
+  // 不要开启 migrateWithBackup：插件在该模式下会跳过 ESP 迁移主路径，只在
+  // "加密算法发生变化"时才迁移 ESP；从 v9 升级时没有算法标记，旧数据不会被继承，
+  // 表现为 API Key / 后端 token / 传输 secret 全部丢失。
   static const _storage = FlutterSecureStorage(
-    aOptions: AndroidOptions(
-      migrateOnAlgorithmChange: true,
-      migrateWithBackup: true,
-    ),
+    aOptions: AndroidOptions(migrateOnAlgorithmChange: true),
   );
 
   /// 需要走安全存储的敏感键（与旧 SharedPreferences 键名保持一致，便于迁移）。
