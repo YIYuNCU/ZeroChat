@@ -22,6 +22,8 @@ from services.ai_tools import (
     _SCHEDULE_TASK_TOOL,
     _SEARCH_MEMORY_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
+    _VIEW_MOMENT_COMMENTS_TOOL,
+    _VIEW_MOMENTS_TOOL,
     _WEB_SEARCH_TOOL,
     _WRITE_MEMORY_TOOL,
 )
@@ -1168,6 +1170,8 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
             _RECOGNIZE_IMAGE_TOOL,
             _REVIEW_PREVIOUS_IMAGES_TOOL,
             _SEND_EMOTION_EMOJI_TOOL,
+            _VIEW_MOMENTS_TOOL,
+            _VIEW_MOMENT_COMMENTS_TOOL,
         )
         for group in tool_groups:
             function = group[0]["function"]

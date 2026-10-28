@@ -1359,6 +1359,8 @@ from services.ai_tools import (
     _CONTINUE_IF_NO_REPLY_TOOL,
     _BLOCK_USER_TOOL,
     _SEARCH_MEMORY_TOOL,
+    _VIEW_MOMENTS_TOOL,
+    _VIEW_MOMENT_COMMENTS_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
     _SEND_VOICE_MESSAGE_TOOL,
     _WEB_SEARCH_TOOL,
@@ -1370,6 +1372,8 @@ from services.ai_tools import (
     execute_continue_if_no_reply,
     execute_block_user,
     execute_search_memory,
+    execute_view_moments,
+    execute_view_moment_comments,
     execute_send_emotion_emoji,
     execute_send_voice_message,
     execute_web_search,
@@ -1464,6 +1468,9 @@ async def generate_with_role(
         active_tools.extend(_SET_ALARM_TOOL)
     if owner_dm:
         active_tools.extend(_CONTINUE_IF_NO_REPLY_TOOL)
+        # 朋友圈是主用户的私人数据：仅 App 与主用户 QQ 私聊可查看，第三方/群聊不开放
+        active_tools.extend(_VIEW_MOMENTS_TOOL)
+        active_tools.extend(_VIEW_MOMENT_COMMENTS_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
     if enable_voice:
@@ -1676,6 +1683,30 @@ async def _handle_tool_calls(
                         err = "参数不完整：query 为必填"
                         messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
                         logger.warning(f"Tool error: search_memory -> {err}")
+
+                elif func_name == "view_moments":
+                    logger.info(
+                        "Tool call: view_moments [date=%s, author=%s, limit=%s]",
+                        args.get("date"), args.get("author"), args.get("limit"),
+                    )
+                    tool_result = await execute_view_moments(
+                        role_data,
+                        str(args.get("date") or ""),
+                        str(args.get("author") or ""),
+                        args.get("limit", 10),
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: view_moments -> {tool_result[:100]}")
+
+                elif func_name == "view_moment_comments":
+                    post_id = str(args.get("post_id") or "").strip()
+                    logger.info(f"Tool call: view_moment_comments [post_id={post_id}]")
+                    if post_id:
+                        tool_result = await execute_view_moment_comments(role_data, post_id)
+                    else:
+                        tool_result = "参数不完整：post_id 为必填"
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: view_moment_comments -> {tool_result[:100]}")
 
                 elif func_name == "send_voice_message":
                     voice_text = str(args.get("text", "")).strip()
