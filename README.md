@@ -206,24 +206,36 @@ python main.py
 
 启动后访问 `http://服务器IP:8000` 确认服务正常。
 
-**2. 安装 APK**
+**2. 配置安全密钥**
+
+编辑解压后的 `config/settings.json`，修改以下两个默认值（否则客户端无法通过鉴权/加密校验）：
+
+```json
+{
+  "auth_token": "你的随机Token",
+  "encryption_secret": "你的随机加密密钥"
+}
+```
+
+> 可用 `python -c "import secrets; print(secrets.token_hex(32))"` 生成随机值。修改后重启服务生效。
+
+**3. 安装 APK**
 
 将 `ZeroChat.apk` 传到手机直接安装。
 
-**3. 在应用内配置连接**
+**4. 在应用内配置连接**
 
-进入 **我 → AI 接口设置**，配置 API URL、API Key、模型和后端地址。
+进入 **我 → AI 接口设置**，配置 API URL、API Key、模型和后端地址；后端鉴权 Token 需与上一步的 `auth_token` 一致。
 
-**4. （可选）配置语音合成**
+**5. （可选）配置语音合成**
 
 如需 AI 语音消息功能，进入 **我 → 语音合成（TTS）**，选择供应商（MiMo-TTS / Qwen-TTS / GPT-SoVITS）并填写对应参数。GPT-SoVITS 需额外部署 TTS 推理服务并保证服务器可访问参考音频路径。
 
 #### 🔐 传输安全
 
 - 后端 `/api/*` 默认开启 Token 鉴权（请求头 `X-Auth-Token`）
-- JSON 请求/响应体使用 AES 加密传输
-- WebSocket 帧级加密
-- 默认值可在 `server/config/settings.json` 中修改
+- JSON 请求/响应体使用 AES 加密传输，WebSocket 帧级加密
+- 密钥在 `server/config/settings.json` 中配置：`auth_token`（鉴权 Token）与 `encryption_secret`（AES 密钥），**部署前必须修改默认值**
 
 ### 方式二：开发者部署（从源码构建）
 
@@ -252,7 +264,14 @@ flutter pub get
 flutter run
 ```
 
-> 后端配置：首次启动会将 `server/config/settings.example.json` 复制为 `settings.json`，也可在应用内通过 WebSocket 同步配置，无需手动编辑。
+> 后端配置：首次启动会将 `server/config/settings.example.json` 复制为 `settings.json`。生产部署前务必修改其中的两个密钥（不修改会使用不安全的默认值，客户端将无法连接）：
+>
+> | 配置项 | 说明 |
+> |--------|------|
+> | `auth_token` | API 鉴权 Token，客户端「后端地址」配置中需填写相同值 |
+> | `encryption_secret` | AES 加密密钥，用于请求/响应体及 WebSocket 帧加密 |
+>
+> 其他配置（AI API Key、模型、TTS 等）可在应用内通过「AI 接口设置」和「语音合成（TTS）」界面填写，经加密 WebSocket 同步到服务端，无需手动编辑 JSON。
 
 ### 🌐 没有云服务器？
 
