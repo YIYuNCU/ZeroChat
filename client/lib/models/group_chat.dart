@@ -2,6 +2,8 @@
 class GroupChat {
   final String id;
   final String name;
+
+  /// 自定义群头像的本地文件路径；为空时使用成员头像拼成的宫格。
   final String? avatarUrl;
   final List<String> memberIds;
   final String ownerId;
@@ -43,6 +45,7 @@ class GroupChat {
     String? id,
     String? name,
     String? avatarUrl,
+    bool clearAvatar = false,
     List<String>? memberIds,
     String? ownerId,
     int? cooldownSeconds,
@@ -56,7 +59,7 @@ class GroupChat {
     return GroupChat(
       id: id ?? this.id,
       name: name ?? this.name,
-      avatarUrl: avatarUrl ?? this.avatarUrl,
+      avatarUrl: clearAvatar ? null : (avatarUrl ?? this.avatarUrl),
       memberIds: memberIds ?? this.memberIds,
       ownerId: ownerId ?? this.ownerId,
       createdAt: createdAt,

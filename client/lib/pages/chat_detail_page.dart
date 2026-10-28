@@ -5,6 +5,7 @@ import '../models/message.dart';
 import '../models/emoji_item.dart';
 import '../models/role.dart';
 import '../models/voice_message.dart';
+import '../core/group_mentions.dart';
 import '../core/message_parts.dart';
 import '../widgets/chat_bubble.dart';
 import '../widgets/remote_media_image.dart';
@@ -13,6 +14,7 @@ import '../core/chat_controller.dart';
 import '../core/message_store.dart';
 import '../services/role_service.dart';
 import '../services/favorite_service.dart';
+import '../services/group_chat_service.dart';
 import '../services/notification_service.dart';
 import '../services/settings_service.dart';
 import '../services/voice_playback_service.dart';
@@ -656,14 +658,22 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     }
   }
 
-  void _openSettings() {
+  Future<void> _openSettings() async {
     if (widget.isGroup) {
-      Navigator.push(
+      final dissolved = await Navigator.push<bool>(
         context,
         MaterialPageRoute(
           builder: (context) => GroupSettingsPage(groupId: widget.chatId),
         ),
       );
+      if (!mounted) return;
+      if (dissolved == true) {
+        // 群已解散，聊天页没有继续存在的意义。
+        Navigator.pop(context);
+        return;
+      }
+      // 群名、成员数可能已在设置页修改，刷新标题。
+      setState(() {});
     } else {
       Navigator.push(
         context,
@@ -902,6 +912,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                     roleId: widget.isGroup
                         ? RoleService.getCurrentRole().id
                         : widget.chatId,
+                    mentionRoles: widget.isGroup ? _groupMemberRoles() : null,
                   ),
                 ),
               ),
@@ -939,10 +950,13 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       title: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            widget.chatName,
-            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w500),
-          ),
+          if (widget.isGroup)
+            _buildGroupTitle()
+          else
+            Text(
+              widget.chatName,
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w500),
+            ),
           if (_showTyping && !widget.isGroup)
             const Text(
               '对方正在输入...',
@@ -959,6 +973,38 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
           onPressed: _openSettings,
           icon: const Icon(Icons.more_horiz, size: 24),
         ),
+      ],
+    );
+  }
+
+  /// 当前群的成员角色（私聊为空）。已被删除的角色会被忽略。
+  List<Role> _groupMemberRoles() {
+    if (!widget.isGroup) return const [];
+    final ids =
+        GroupChatService.getGroup(widget.chatId)?.memberIds ??
+        widget.memberIds ??
+        const <String>[];
+    return ids.map(RoleService.getRoleById).whereType<Role>().toList();
+  }
+
+  /// 群聊标题：群名（实时读取，改名后即时生效）+ 成员数。
+  Widget _buildGroupTitle() {
+    final group = GroupChatService.getGroup(widget.chatId);
+    final name = group?.name ?? widget.chatName;
+    final count = group?.memberIds.length ?? widget.memberIds?.length;
+    const style = TextStyle(fontSize: 17, fontWeight: FontWeight.w500);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text(
+            name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          ),
+        ),
+        if (count != null) Text(' ($count)', style: style),
       ],
     );
   }
@@ -1241,7 +1287,14 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     // 普通消息
     final isMe = message.senderId == 'me';
     final role = isMe ? null : RoleService.getRoleById(message.senderId);
-    final senderName = isMe ? '我' : (role?.name ?? widget.chatName);
+    // 群聊里找不到角色（已被移出或删除）时不能回落到群名，否则会误显示成群名发言。
+    final senderName = isMe
+        ? '我'
+        : (role?.name ?? (widget.isGroup ? '未知成员' : widget.chatName));
+    final showSenderName = widget.isGroup && !isMe;
+    final mentionNames = widget.isGroup
+        ? [GroupMentions.allName, ..._groupMemberRoles().map((r) => r.name)]
+        : const <String>[];
     final isSelected = _selectedMessageIds.contains(message.id);
 
     // 多选模式
@@ -1273,6 +1326,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   avatarUrl: isMe ? null : role?.avatarUrl,
                   avatarHash: isMe ? null : role?.avatarHash,
                   senderName: senderName,
+                  showSenderName: showSenderName,
+                  mentionNames: mentionNames,
                 ),
               ),
             ],
@@ -1288,6 +1343,8 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
       avatarUrl: isMe ? null : role?.avatarUrl,
       avatarHash: isMe ? null : role?.avatarHash,
       senderName: senderName,
+      showSenderName: showSenderName,
+      mentionNames: mentionNames,
       onLongPress: () => _enterMultiSelectMode(message),
       onCopy: () => _copyMessage(message),
       onQuote: () => _setQuote(message),

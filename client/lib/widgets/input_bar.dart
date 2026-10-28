@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../core/group_mentions.dart';
 import '../models/emoji_item.dart';
+import '../models/role.dart';
 import '../services/emoji_service.dart';
 import '../services/secure_backend_client.dart';
 import '../services/settings_service.dart';
 import 'emoji_image.dart';
+import 'member_avatars.dart';
 
 class InputBarController extends ChangeNotifier {
   void closeControls() {
@@ -28,6 +31,9 @@ class InputBar extends StatefulWidget {
   final String? roleId;
   final String? hintText;
 
+  /// 非空时启用群聊 @：输入「@」弹出这些成员（含「所有人」）供选择。
+  final List<Role>? mentionRoles;
+
   const InputBar({
     super.key,
     this.onSend,
@@ -41,6 +47,7 @@ class InputBar extends StatefulWidget {
     this.controller,
     this.roleId,
     this.hintText,
+    this.mentionRoles,
   });
 
   @override
@@ -54,6 +61,12 @@ class _InputBarState extends State<InputBar> {
   bool _showSendButton = false;
   bool _showEmojiPicker = false;
   double _emojiPanelHeight = 300;
+
+  /// 光标前正在输入的 @ 提及：'@' 的下标与其后的筛选词；null 表示未处于提及输入中。
+  int? _mentionAt;
+  String _mentionQuery = '';
+
+  bool get _mentionEnabled => widget.mentionRoles != null;
 
   void _setEmojiPanelVisible(bool visible) {
     if (_showEmojiPicker == visible) {
@@ -111,7 +124,151 @@ class _InputBarState extends State<InputBar> {
         _showSendButton = hasText;
       });
     }
+    _updateMention();
     widget.onTextChanged?.call(_controller.text);
+  }
+
+  static final RegExp _wordChar = RegExp(r'[A-Za-z0-9_]');
+
+  /// 根据光标位置判断是否正在输入 @ 提及，并同步面板状态。
+  void _updateMention() {
+    int? at;
+    var query = '';
+    if (_mentionEnabled) {
+      final selection = _controller.selection;
+      final text = _controller.text;
+      if (selection.isValid &&
+          selection.isCollapsed &&
+          selection.baseOffset <= text.length) {
+        final prefix = text.substring(0, selection.baseOffset);
+        final index = prefix.lastIndexOf('@');
+        if (index >= 0 &&
+            (index == 0 || !_wordChar.hasMatch(prefix[index - 1]))) {
+          final candidate = prefix.substring(index + 1);
+          if (!RegExp(r'\s').hasMatch(candidate)) {
+            at = index;
+            query = candidate;
+          }
+        }
+      }
+    }
+    if (at != _mentionAt || query != _mentionQuery) {
+      if (!mounted) return;
+      setState(() {
+        _mentionAt = at;
+        _mentionQuery = query;
+      });
+    }
+  }
+
+  /// 当前筛选词下可选的提及项；null 表示「所有人」。
+  List<Role?> get _mentionOptions {
+    final query = _mentionQuery.toLowerCase();
+    final options = <Role?>[];
+    if (query.isEmpty || GroupMentions.allName.contains(query)) {
+      options.add(null);
+    }
+    for (final role in widget.mentionRoles ?? const <Role>[]) {
+      if (query.isEmpty || role.name.toLowerCase().contains(query)) {
+        options.add(role);
+      }
+    }
+    return options;
+  }
+
+  void _applyMention(Role? role) {
+    final at = _mentionAt;
+    if (at == null) return;
+    final text = _controller.text;
+    final cursor = _controller.selection.baseOffset.clamp(at, text.length);
+    final insert = '@${role?.name ?? GroupMentions.allName} ';
+    _controller.value = TextEditingValue(
+      text: text.replaceRange(at, cursor, insert),
+      selection: TextSelection.collapsed(offset: at + insert.length),
+    );
+    _focusNode.requestFocus();
+  }
+
+  /// 工具栏「@」按钮：在光标处插入 '@' 并唤起成员列表。
+  void _insertMentionTrigger() {
+    final value = _controller.value;
+    final text = value.text;
+    final selection = value.selection;
+    final start = selection.isValid ? selection.start : text.length;
+    final end = selection.isValid ? selection.end : text.length;
+    final needSpace = start > 0 && _wordChar.hasMatch(text[start - 1])
+        ? ' '
+        : '';
+    final insert = '$needSpace@';
+    _controller.value = TextEditingValue(
+      text: text.replaceRange(start, end, insert),
+      selection: TextSelection.collapsed(offset: start + insert.length),
+    );
+    _focusNode.requestFocus();
+  }
+
+  Widget _buildMentionPanel() {
+    final options = _mentionOptions;
+    if (options.isEmpty) return const SizedBox.shrink();
+    return Container(
+      key: const ValueKey('mention_panel'),
+      constraints: const BoxConstraints(maxHeight: 200),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          bottom: BorderSide(color: Color(0xFFE5E5E5), width: 0.5),
+        ),
+      ),
+      child: ListView.builder(
+        padding: EdgeInsets.zero,
+        shrinkWrap: true,
+        itemCount: options.length,
+        itemBuilder: (context, index) {
+          final role = options[index];
+          return InkWell(
+            key: ValueKey('mention_${role?.id ?? 'all'}'),
+            onTap: () => _applyMention(role),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              child: Row(
+                children: [
+                  if (role == null)
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF07C160),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Icon(
+                        Icons.groups,
+                        size: 20,
+                        color: Colors.white,
+                      ),
+                    )
+                  else
+                    RoleAvatar(role: role, size: 32),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      role?.name ?? GroupMentions.allName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                  ),
+                  if (role == null)
+                    const Text(
+                      '全员回复',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF999999)),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   void _handleSend() {
@@ -298,6 +455,7 @@ class _InputBarState extends State<InputBar> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (_mentionAt != null) _buildMentionPanel(),
             if (_focusNode.hasFocus) _buildFormatToolbar(),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
@@ -388,10 +546,26 @@ class _InputBarState extends State<InputBar> {
       child: ListView.separated(
         padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
         scrollDirection: Axis.horizontal,
-        itemCount: formats.length,
+        itemCount: formats.length + (_mentionEnabled ? 1 : 0),
         separatorBuilder: (_, _) => const SizedBox(width: 6),
         itemBuilder: (context, index) {
-          final (label, tag) = formats[index];
+          if (_mentionEnabled && index == 0) {
+            return ActionChip(
+              key: const ValueKey('format_mention'),
+              label: const Text('@成员'),
+              avatar: const Icon(Icons.alternate_email, size: 15),
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              labelStyle: const TextStyle(
+                fontSize: 12,
+                color: Color(0xFF1F6FB5),
+              ),
+              backgroundColor: const Color(0xFFE3F0FB),
+              side: BorderSide.none,
+              onPressed: _insertMentionTrigger,
+            );
+          }
+          final (label, tag) = formats[index - (_mentionEnabled ? 1 : 0)];
           final isFact = tag == '事实';
           return ActionChip(
             key: ValueKey('format_$tag'),

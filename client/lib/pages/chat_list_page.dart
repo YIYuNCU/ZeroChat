@@ -8,6 +8,7 @@ import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
 import '../core/message_store.dart';
 import '../core/chat_controller.dart';
+import '../widgets/member_avatars.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'chat_detail_page.dart';
 
@@ -188,7 +189,9 @@ class _ChatListPageState extends State<ChatListPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      chat.name,
+                      _displayName(chat),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w500,
@@ -220,7 +223,19 @@ class _ChatListPageState extends State<ChatListPage> {
     );
   }
 
+  /// 群聊名称以群聊服务中的最新值为准（改名后聊天列表里的快照会过期）。
+  String _displayName(ChatInfo chat) {
+    if (!chat.isGroup) return chat.name;
+    return GroupChatService.getGroup(chat.id)?.name ?? chat.name;
+  }
+
   Widget _buildAvatar(ChatInfo chat) {
+    if (chat.isGroup) {
+      final group = GroupChatService.getGroup(chat.id);
+      if (group != null) return GroupAvatar.forGroup(group, size: 48);
+      return GroupAvatar(memberIds: chat.memberIds ?? const [], size: 48);
+    }
+
     final colors = [
       const Color(0xFF7EB7E7),
       const Color(0xFF95EC69),
@@ -334,10 +349,12 @@ class _ChatListPageState extends State<ChatListPage> {
       MaterialPageRoute(
         builder: (context) => ChatDetailPage(
           chatId: chat.id,
-          chatName: chat.name,
+          chatName: _displayName(chat),
           isAI: !chat.isGroup,
           isGroup: chat.isGroup,
-          memberIds: chat.memberIds,
+          memberIds: chat.isGroup
+              ? (GroupChatService.getGroup(chat.id)?.memberIds ?? chat.memberIds)
+              : chat.memberIds,
         ),
       ),
     );

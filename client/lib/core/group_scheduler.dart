@@ -27,6 +27,9 @@ class GroupScheduler {
   /// 选择参与回复的角色
   /// [replyProbability] 可配置的回复概率
   /// [maxConsecutiveSpeaks] 可配置的最大连续发言次数
+  /// [mentionedRoleIds] / [mentionAll] 来自消息里的 @：被 @ 的角色必定应答，
+  /// 其他成员本轮不再抢答；[mentionOverridesLimit] 为 true（用户 @）时无视连续发言上限。
+  /// [excludeRoleId] 是消息发送者自己，不会被自己的 @ 触发。
   static ScheduleResult selectRespondingRoles({
     required List<String> memberIds,
     required String userMessage,
@@ -34,9 +37,38 @@ class GroupScheduler {
     Map<String, int>? consecutiveCounts,
     double replyProbability = 0.6,
     int maxConsecutiveSpeaks = 2,
+    List<String> mentionedRoleIds = const [],
+    bool mentionAll = false,
+    bool mentionOverridesLimit = false,
+    String? excludeRoleId,
   }) {
     final counts = consecutiveCounts ?? {};
     final candidates = <Role>[];
+
+    if (mentionedRoleIds.isNotEmpty || mentionAll) {
+      final ids = mentionAll
+          ? memberIds.toList()
+          : mentionedRoleIds.where(memberIds.contains).toList();
+      final mentioned = <Role>[];
+      for (final roleId in ids) {
+        if (roleId == excludeRoleId) continue;
+        final role = RoleService.getRoleById(roleId);
+        if (role == null) continue;
+        if (!mentionOverridesLimit &&
+            lastSpeakerRoleId == roleId &&
+            (counts[roleId] ?? 0) >= maxConsecutiveSpeaks) {
+          continue;
+        }
+        mentioned.add(role);
+      }
+      if (mentioned.isNotEmpty) {
+        if (mentionAll) mentioned.shuffle(_random);
+        return ScheduleResult(
+          selectedRoles: mentioned,
+          speakOrder: mentioned.map((r) => r.id).toList(),
+        );
+      }
+    }
 
     for (final roleId in memberIds) {
       final role = RoleService.getRoleById(roleId);

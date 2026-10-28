@@ -2,9 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:lpinyin/lpinyin.dart';
 import '../models/role.dart';
 import '../services/role_service.dart';
+import '../models/group_chat.dart';
+import '../services/chat_list_service.dart';
 import '../services/group_chat_service.dart';
+import '../widgets/member_avatars.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'role_detail_page.dart';
+import 'chat_detail_page.dart';
 import 'group_settings_page.dart';
 
 /// 通讯录页面
@@ -152,71 +156,139 @@ class ContactsPageState extends State<ContactsPage>
     );
   }
 
-  void _showGroupChats() {
+  Future<void> _showGroupChats() async {
     final groups = GroupChatService.getAllGroups();
+    final maxHeight = MediaQuery.of(context).size.height * 0.6;
 
-    showModalBottomSheet(
+    await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.white,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
       ),
-      builder: (context) {
+      builder: (sheetContext) {
         return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Padding(
-                padding: EdgeInsets.all(16),
-                child: Text(
-                  '群聊列表',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ),
-              if (groups.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(32),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxHeight),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
                   child: Text(
-                    '暂无群聊',
-                    style: TextStyle(color: Color(0xFF888888)),
-                  ),
-                )
-              else
-                ...groups.map(
-                  (group) => ListTile(
-                    leading: Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFB347),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Icon(
-                        Icons.group,
-                        color: Colors.white,
-                        size: 20,
-                      ),
+                    '群聊列表 (${groups.length})',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
                     ),
-                    title: Text(group.name),
-                    subtitle: Text('${group.memberIds.length} 人'),
-                    trailing: const Icon(Icons.arrow_forward_ios, size: 14),
-                    onTap: () {
-                      Navigator.pop(context);
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => GroupSettingsPage(groupId: group.id),
-                        ),
-                      );
-                    },
                   ),
                 ),
-              const SizedBox(height: 16),
-            ],
+                const Divider(height: 1),
+                if (groups.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.group_outlined,
+                          size: 48,
+                          color: Color(0xFFCCCCCC),
+                        ),
+                        SizedBox(height: 12),
+                        Text(
+                          '暂无群聊',
+                          style: TextStyle(color: Color(0xFF888888)),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          '点击右上角 + 发起群聊',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFFBBBBBB),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: groups.length,
+                      itemBuilder: (context, index) {
+                        final group = groups[index];
+                        return ListTile(
+                          leading: GroupAvatar.forGroup(group, size: 44),
+                          title: Text(
+                            group.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text('${group.memberIds.length} 人'),
+                          trailing: IconButton(
+                            tooltip: '群聊设置',
+                            icon: const Icon(
+                              Icons.settings_outlined,
+                              size: 20,
+                              color: Color(0xFF888888),
+                            ),
+                            onPressed: () {
+                              Navigator.pop(sheetContext);
+                              _openGroupSettings(group);
+                            },
+                          ),
+                          // 点击群聊直接进入会话，设置入口放在右侧按钮。
+                          onTap: () {
+                            Navigator.pop(sheetContext);
+                            _openGroupChat(group);
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                const SizedBox(height: 8),
+              ],
+            ),
           ),
         );
       },
     );
+  }
+
+  void _openGroupChat(GroupChat group) {
+    // 聊天列表里可能已被移除，从通讯录进入时补回，保证返回后能在列表看到。
+    ChatListService.instance.getOrCreateChat(
+      id: group.id,
+      name: group.name,
+      isGroup: true,
+      memberIds: group.memberIds,
+    );
+    ChatListService.instance.clearUnread(group.id);
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChatDetailPage(
+          chatId: group.id,
+          chatName: group.name,
+          isAI: false,
+          isGroup: true,
+          memberIds: group.memberIds,
+        ),
+      ),
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _openGroupSettings(GroupChat group) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => GroupSettingsPage(groupId: group.id)),
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   Widget _buildEmptyState() {

@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
-import '../widgets/remote_media_image.dart';
 import '../models/role.dart';
 import '../services/role_service.dart';
 import '../services/group_chat_service.dart';
 import '../services/chat_list_service.dart';
-import '../services/secure_backend_client.dart';
+import '../widgets/member_avatars.dart';
 
 /// 创建群聊页面
 /// 选择多个角色创建群聊
@@ -16,20 +15,60 @@ class CreateGroupPage extends StatefulWidget {
 }
 
 class _CreateGroupPageState extends State<CreateGroupPage> {
-  final Set<String> _selectedIds = {};
+  static const int _minMembers = 2;
+  static const Color _green = Color(0xFF07C160);
+
+  /// 保持选择顺序，已选条按点选先后排列。
+  final List<String> _selectedIds = [];
   final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _searchController = TextEditingController();
   List<Role> _roles = [];
+  String _keyword = '';
+  bool _creating = false;
+
+  bool get _canCreate => _selectedIds.length >= _minMembers && !_creating;
 
   @override
   void initState() {
     super.initState();
-    _roles = RoleService.getAllRoles();
+    // 工具角色是内部角色、归档角色不再参与聊天，都不应出现在可选成员里。
+    _roles = RoleService.getAllRoles()
+        .where((r) => !RoleService.isToolRoleId(r.id) && !r.archived)
+        .toList();
   }
 
   @override
   void dispose() {
     _nameController.dispose();
+    _searchController.dispose();
     super.dispose();
+  }
+
+  List<Role> get _filteredRoles {
+    final keyword = _keyword.trim().toLowerCase();
+    if (keyword.isEmpty) return _roles;
+    return _roles
+        .where(
+          (r) =>
+              r.name.toLowerCase().contains(keyword) ||
+              r.description.toLowerCase().contains(keyword),
+        )
+        .toList();
+  }
+
+  Role? _roleById(String id) {
+    for (final role in _roles) {
+      if (role.id == id) return role;
+    }
+    return null;
+  }
+
+  void _toggle(Role role) {
+    setState(() {
+      if (!_selectedIds.remove(role.id)) {
+        _selectedIds.add(role.id);
+      }
+    });
   }
 
   @override
@@ -39,169 +78,289 @@ class _CreateGroupPageState extends State<CreateGroupPage> {
       appBar: AppBar(
         backgroundColor: const Color(0xFFEDEDED),
         elevation: 0,
+        scrolledUnderElevation: 0,
         title: const Text('发起群聊'),
         leading: IconButton(
           onPressed: () => Navigator.pop(context),
           icon: const Icon(Icons.arrow_back_ios, size: 20),
         ),
         actions: [
-          TextButton(
-            onPressed: _selectedIds.length >= 2 ? _createGroup : null,
-            child: Text(
-              '完成(${_selectedIds.length})',
-              style: TextStyle(
-                color: _selectedIds.length >= 2
-                    ? const Color(0xFF07C160)
-                    : const Color(0xFFCCCCCC),
-              ),
-            ),
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Center(child: _buildConfirmButton()),
           ),
         ],
       ),
       body: Column(
         children: [
-          // 群名称输入
-          Container(
-            color: Colors.white,
-            padding: const EdgeInsets.all(16),
-            child: TextField(
-              controller: _nameController,
-              decoration: const InputDecoration(
-                labelText: '群聊名称',
-                hintText: '选填，默认为成员名称组合',
-                border: OutlineInputBorder(),
+          _buildNameField(),
+          _buildSelectedStrip(),
+          _buildSearchField(),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _selectedIds.length < _minMembers
+                    ? '至少选择 $_minMembers 个角色（已选 ${_selectedIds.length}）'
+                    : '已选择 ${_selectedIds.length} 个角色',
+                style: const TextStyle(fontSize: 13, color: Color(0xFF888888)),
               ),
             ),
           ),
-
-          const SizedBox(height: 10),
-
-          // 提示
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Text(
-              '选择至少 2 个角色创建群聊',
-              style: TextStyle(fontSize: 13, color: Color(0xFF888888)),
-            ),
-          ),
-
-          // 角色列表
-          Expanded(
-            child: ListView.builder(
-              itemCount: _roles.length,
-              itemBuilder: (context, index) {
-                final role = _roles[index];
-                final isSelected = _selectedIds.contains(role.id);
-
-                return Material(
-                  color: Colors.white,
-                  child: CheckboxListTile(
-                    value: isSelected,
-                    onChanged: (v) {
-                      setState(() {
-                        if (v == true) {
-                          _selectedIds.add(role.id);
-                        } else {
-                          _selectedIds.remove(role.id);
-                        }
-                      });
-                    },
-                    activeColor: const Color(0xFF07C160),
-                    secondary: _buildAvatar(role),
-                    title: Text(role.name),
-                    subtitle: role.description.isNotEmpty
-                        ? Text(
-                            role.description,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          )
-                        : null,
-                  ),
-                );
-              },
-            ),
-          ),
+          Expanded(child: _buildRoleList()),
         ],
       ),
     );
   }
 
-  Widget _buildAvatar(Role role) {
-    final colors = [
-      const Color(0xFF7EB7E7),
-      const Color(0xFF95EC69),
-      const Color(0xFFFFB347),
-      const Color(0xFFFF7B7B),
-      const Color(0xFFB19CD9),
-    ];
-    final colorIndex = role.name.hashCode.abs() % colors.length;
-
-    if (role.avatarUrl != null && role.avatarUrl!.isNotEmpty) {
-      return ClipRRect(
+  Widget _buildConfirmButton() {
+    final enabled = _canCreate;
+    return Material(
+      color: enabled ? _green : const Color(0xFFD8D8D8),
+      borderRadius: BorderRadius.circular(4),
+      child: InkWell(
         borderRadius: BorderRadius.circular(4),
-        child: RemoteMediaImage(
-          role.avatarUrl!,
-          headers: SecureBackendClient.authHeaders,
-          width: 40,
-          height: 40,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) =>
-              _buildDefaultAvatar(role, colors[colorIndex]),
+        onTap: enabled ? _createGroup : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: _creating
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : Text(
+                  '完成(${_selectedIds.length})',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: enabled ? Colors.white : const Color(0xFF999999),
+                  ),
+                ),
         ),
-      );
-    }
-    return _buildDefaultAvatar(role, colors[colorIndex]);
+      ),
+    );
   }
 
-  Widget _buildDefaultAvatar(Role role, Color color) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(4),
-      child: Container(
-        width: 40,
-        height: 40,
-        color: color,
-        child: Center(
-          child: Text(
-            role.name.isNotEmpty ? role.name[0].toUpperCase() : '?',
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
+  Widget _buildNameField() {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: TextField(
+        controller: _nameController,
+        maxLength: 20,
+        textInputAction: TextInputAction.done,
+        decoration: const InputDecoration(
+          labelText: '群聊名称',
+          hintText: '选填，默认为成员名称组合',
+          counterText: '',
+          prefixIcon: Icon(Icons.edit_outlined, size: 20),
+          border: UnderlineInputBorder(),
+          focusedBorder: UnderlineInputBorder(
+            borderSide: BorderSide(color: _green, width: 1.5),
+          ),
+          floatingLabelStyle: TextStyle(color: _green),
+        ),
+      ),
+    );
+  }
+
+  /// 已选成员横条：点击头像即可取消，避免在长列表里来回找。
+  Widget _buildSelectedStrip() {
+    if (_selectedIds.isEmpty) return const SizedBox.shrink();
+    return Container(
+      color: Colors.white,
+      margin: const EdgeInsets.only(top: 8),
+      height: 72,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        itemCount: _selectedIds.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 10),
+        itemBuilder: (context, index) {
+          final role = _roleById(_selectedIds[index]);
+          if (role == null) return const SizedBox.shrink();
+          return Tooltip(
+            message: '移除 ${role.name}',
+            child: GestureDetector(
+              onTap: () => _toggle(role),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  RoleAvatar(role: role, size: 52),
+                  Positioned(
+                    right: -4,
+                    top: -4,
+                    child: Container(
+                      width: 16,
+                      height: 16,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFB0B0B0),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.close,
+                        size: 11,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildSearchField() {
+    return Container(
+      color: Colors.white,
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: TextField(
+        controller: _searchController,
+        onChanged: (v) => setState(() => _keyword = v),
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          hintText: '搜索角色',
+          isDense: true,
+          filled: true,
+          fillColor: const Color(0xFFF2F2F2),
+          prefixIcon: const Icon(Icons.search, size: 20),
+          suffixIcon: _keyword.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: '清除',
+                  icon: const Icon(Icons.close, size: 18),
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() => _keyword = '');
+                  },
+                ),
+          contentPadding: const EdgeInsets.symmetric(vertical: 10),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: BorderSide.none,
           ),
         ),
       ),
     );
   }
 
-  void _createGroup() async {
-    if (_selectedIds.length < 2) return;
-
-    // 生成群名
-    final selectedRoles = _roles
-        .where((r) => _selectedIds.contains(r.id))
-        .toList();
-    final groupName = _nameController.text.trim().isNotEmpty
-        ? _nameController.text.trim()
-        : selectedRoles.map((r) => r.name).take(3).join('、') +
-              (_selectedIds.length > 3 ? '...' : '');
-
-    // 创建群聊
-    final group = await GroupChatService.createGroup(
-      name: groupName,
-      memberIds: _selectedIds.toList(),
+  Widget _buildRoleList() {
+    final roles = _filteredRoles;
+    if (roles.isEmpty) {
+      return Center(
+        child: Text(
+          _roles.isEmpty ? '暂无可选角色' : '没有匹配的角色',
+          style: const TextStyle(fontSize: 14, color: Color(0xFF999999)),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom),
+      itemCount: roles.length,
+      itemBuilder: (context, index) => _buildRoleRow(roles[index]),
     );
+  }
 
-    // 添加到聊天列表
-    ChatListService.instance.getOrCreateChat(
-      id: group.id,
-      name: group.name,
-      isGroup: true,
-      memberIds: group.memberIds,
+  Widget _buildRoleRow(Role role) {
+    final isSelected = _selectedIds.contains(role.id);
+    return Material(
+      color: Colors.white,
+      child: InkWell(
+        onTap: () => _toggle(role),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: const BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: Color(0xFFEEEEEE), width: 0.5),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+                color: isSelected ? _green : const Color(0xFFCCCCCC),
+                size: 22,
+              ),
+              const SizedBox(width: 12),
+              RoleAvatar(role: role, size: 40),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      role.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                    if (role.description.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          role.description,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFF888888),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
+  }
 
-    if (mounted) {
-      Navigator.pop(context, true);
+  Future<void> _createGroup() async {
+    if (!_canCreate) return;
+    setState(() => _creating = true);
+
+    try {
+      final selectedRoles = _selectedIds
+          .map(_roleById)
+          .whereType<Role>()
+          .toList();
+      final customName = _nameController.text.trim();
+      final groupName = customName.isNotEmpty
+          ? customName
+          : selectedRoles.map((r) => r.name).take(3).join('、') +
+                (selectedRoles.length > 3 ? '...' : '');
+
+      final group = await GroupChatService.createGroup(
+        name: groupName,
+        memberIds: List<String>.of(_selectedIds),
+      );
+
+      ChatListService.instance.getOrCreateChat(
+        id: group.id,
+        name: group.name,
+        isGroup: true,
+        memberIds: group.memberIds,
+      );
+
+      if (mounted) {
+        Navigator.pop(context, true);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _creating = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('创建群聊失败，请重试')));
     }
   }
 }

@@ -1,4 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../models/group_chat.dart';
 import 'storage_service.dart';
 
@@ -79,8 +83,67 @@ class GroupChatService {
 
   /// 删除群聊
   static Future<void> deleteGroup(String groupId) async {
+    final avatar = getGroup(groupId)?.avatarUrl;
     _groups.removeWhere((g) => g.id == groupId);
     await _saveGroups();
+    await _deleteAvatarFile(avatar);
+  }
+
+  /// 设置自定义群头像：把选中的图片复制到应用目录再记录路径，
+  /// 这样即使相册里的原图被删除，群头像也不会丢失。
+  /// [targetDir] 仅用于测试，默认放在应用文档目录的 group_avatars 下。
+  static Future<GroupChat?> setCustomAvatar(
+    String groupId,
+    String sourcePath, {
+    Directory? targetDir,
+  }) async {
+    final group = getGroup(groupId);
+    if (group == null) return null;
+
+    final dir =
+        targetDir ??
+        Directory(
+          p.join(
+            (await getApplicationDocumentsDirectory()).path,
+            'group_avatars',
+          ),
+        );
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    var ext = p.extension(sourcePath).toLowerCase();
+    if (ext.isEmpty) ext = '.jpg';
+    // 文件名带时间戳：同一路径不变会让图片缓存继续显示旧头像。
+    final dest = p.join(
+      dir.path,
+      '${groupId}_${DateTime.now().millisecondsSinceEpoch}$ext',
+    );
+    await File(sourcePath).copy(dest);
+
+    final old = group.avatarUrl;
+    final updated = group.copyWith(avatarUrl: dest);
+    await updateGroup(updated);
+    if (old != dest) await _deleteAvatarFile(old);
+    return updated;
+  }
+
+  /// 恢复默认群头像（成员头像宫格）。
+  static Future<void> clearCustomAvatar(String groupId) async {
+    final group = getGroup(groupId);
+    if (group == null || group.avatarUrl == null) return;
+    final old = group.avatarUrl;
+    await updateGroup(group.copyWith(clearAvatar: true));
+    await _deleteAvatarFile(old);
+  }
+
+  static Future<void> _deleteAvatarFile(String? path) async {
+    if (path == null || path.isEmpty) return;
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (e) {
+      debugPrint('GroupChatService: delete avatar failed: $e');
+    }
   }
 
   /// 添加成员

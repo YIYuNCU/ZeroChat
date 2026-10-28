@@ -16,6 +16,7 @@ import '../services/background_runtime_service.dart';
 import 'message_store.dart';
 import 'message_parts.dart';
 import 'segment_sender.dart';
+import 'group_mentions.dart';
 import 'group_scheduler.dart';
 import 'memory_manager.dart';
 import 'moments_scheduler.dart';
@@ -1095,6 +1096,20 @@ class ChatController extends ChangeNotifier {
       currentRound++;
       anySpokeInRound = false;
 
+      // 消息里的 @：用户 @ 必定点名应答并无视连续发言上限；
+      // AI 在回复里 @ 到其他成员时同样会触发被点名者接话（不含自己）。
+      // 第 2 轮起若还没有 AI 真正发言，lastMessage 仍是用户原文，不能再次触发其 @。
+      final mentions = (currentRound == 1 || lastSpeakerRole != null)
+          ? GroupMentions.resolve(
+              lastMessage,
+              context.memberIds
+                  .map(RoleService.getRoleById)
+                  .whereType<Role>()
+                  .toList(),
+              excludeRoleId: lastSpeakerRole?.id,
+            )
+          : const MentionResult();
+
       final schedule = GroupScheduler.selectRespondingRoles(
         memberIds: context.memberIds,
         userMessage: lastMessage,
@@ -1102,6 +1117,10 @@ class ChatController extends ChangeNotifier {
         consecutiveCounts: context.consecutiveSpeakCount,
         replyProbability: aiProbability,
         maxConsecutiveSpeaks: maxConsecutive,
+        mentionedRoleIds: mentions.roleIds,
+        mentionAll: mentions.mentionAll,
+        mentionOverridesLimit: lastSpeakerRole == null,
+        excludeRoleId: lastSpeakerRole?.id,
       );
 
       if (schedule.selectedRoles.isEmpty) break;
@@ -1172,8 +1191,21 @@ class ChatController extends ChangeNotifier {
 
       // 决定是否继续 AI↔AI 互动
       if (!allowAiToAi) break;
-      final continueProbability = 0.3 / currentRound;
-      if (_random.nextDouble() > continueProbability) break;
+      // 刚发言的 AI 点名了其他成员时，被点名者一定接话（仍受最大轮数限制）。
+      final nextMentions = lastSpeakerRole == null
+          ? const MentionResult()
+          : GroupMentions.resolve(
+              lastMessage,
+              context.memberIds
+                  .map(RoleService.getRoleById)
+                  .whereType<Role>()
+                  .toList(),
+              excludeRoleId: lastSpeakerRole.id,
+            );
+      if (nextMentions.isEmpty) {
+        final continueProbability = 0.3 / currentRound;
+        if (_random.nextDouble() > continueProbability) break;
+      }
     }
   }
 

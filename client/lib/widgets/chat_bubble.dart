@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/stats_config.dart';
 import '../models/voice_message.dart';
+import '../core/group_mentions.dart';
 import '../core/message_parts.dart';
 import '../services/sticker_service.dart';
 import '../services/voice_playback_service.dart';
@@ -25,6 +26,12 @@ class ChatBubble extends StatelessWidget {
   final String? avatarUrl;
   final String? avatarHash;
   final String senderName;
+
+  /// 是否在对方气泡上方显示发送者名称（群聊中用于区分发言者）。
+  final bool showSenderName;
+
+  /// 群成员名称：非空时，正文中的「@成员名」「@所有人」会高亮显示。
+  final List<String> mentionNames;
 
   /// 长按回调：非空时长按弹出上下文菜单（复制/引用/提醒/收藏/多选/删除）。
   /// 为 null 时（如收藏详情页只读展示）长按无操作。
@@ -58,6 +65,8 @@ class ChatBubble extends StatelessWidget {
     this.avatarUrl,
     this.avatarHash,
     this.senderName = '',
+    this.showSenderName = false,
+    this.mentionNames = const [],
     this.onLongPress,
     this.onCopy,
     this.onQuote,
@@ -87,51 +96,57 @@ class ChatBubble extends StatelessWidget {
 
           // 气泡内容
           Flexible(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 接收方气泡尖角（左侧）
-                if (!isSender && !_isSticker) _buildBubbleArrow(isLeft: true),
+            child: _withSenderName(
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 接收方气泡尖角（左侧）
+                  if (!isSender && !_isSticker) _buildBubbleArrow(isLeft: true),
 
-                if (isSender && message.sendStatus == MessageSendStatus.failed)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8, top: 8),
+                  if (isSender &&
+                      message.sendStatus == MessageSendStatus.failed)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8, top: 8),
+                      child: GestureDetector(
+                        onTap: onRetry,
+                        behavior: HitTestBehavior.opaque,
+                        child: const Icon(
+                          Icons.error,
+                          color: Colors.red,
+                          size: 18,
+                        ),
+                      ),
+                    ),
+
+                  if (isSender &&
+                      message.sendStatus == MessageSendStatus.sending)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 8, top: 10),
+                      child: SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            Colors.grey,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                  // 气泡主体（长按菜单）
+                  Flexible(
                     child: GestureDetector(
-                      onTap: onRetry,
-                      behavior: HitTestBehavior.opaque,
-                      child: const Icon(
-                        Icons.error,
-                        color: Colors.red,
-                        size: 18,
-                      ),
+                      onLongPress: () => _showContextMenu(context),
+                      child: _buildBubbleContent(context),
                     ),
                   ),
 
-                if (isSender && message.sendStatus == MessageSendStatus.sending)
-                  const Padding(
-                    padding: EdgeInsets.only(right: 8, top: 10),
-                    child: SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(Colors.grey),
-                      ),
-                    ),
-                  ),
-
-                // 气泡主体（长按菜单）
-                Flexible(
-                  child: GestureDetector(
-                    onLongPress: () => _showContextMenu(context),
-                    child: _buildBubbleContent(context),
-                  ),
-                ),
-
-                // 发送方气泡尖角（右侧）
-                if (isSender && !_isSticker) _buildBubbleArrow(isLeft: false),
-              ],
+                  // 发送方气泡尖角（右侧）
+                  if (isSender && !_isSticker) _buildBubbleArrow(isLeft: false),
+                ],
+              ),
             ),
           ),
 
@@ -140,6 +155,31 @@ class ChatBubble extends StatelessWidget {
           if (isSender) _buildAvatar(),
         ],
       ),
+    );
+  }
+
+  /// 群聊中在对方气泡上方叠加发送者名称；其余情况原样返回气泡行。
+  Widget _withSenderName(Widget bubbleRow) {
+    final name = senderName.trim();
+    if (isSender || !showSenderName || name.isEmpty) {
+      return bubbleRow;
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          // 与气泡主体左缘对齐（表情包没有 6px 尖角）。
+          padding: EdgeInsets.only(left: _isSticker ? 0 : 6, bottom: 3),
+          child: Text(
+            name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF7A7A7A)),
+          ),
+        ),
+        bubbleRow,
+      ],
     );
   }
 
@@ -390,14 +430,38 @@ class ChatBubble extends StatelessWidget {
   }
 
   Widget _buildDialogue(String text) {
-    return Text(
-      text,
-      style: const TextStyle(
-        fontSize: 17,
-        color: Color(0xFF000000),
-        height: 1.4,
-      ),
+    const style = TextStyle(
+      fontSize: 17,
+      color: Color(0xFF000000),
+      height: 1.4,
     );
+    if (mentionNames.isEmpty || !text.contains('@')) {
+      return Text(text, style: style);
+    }
+    final spans = GroupMentions.findSpans(text, {
+      for (final name in mentionNames) name: [name],
+    });
+    if (spans.isEmpty) {
+      return Text(text, style: style);
+    }
+    final children = <InlineSpan>[];
+    var cursor = 0;
+    for (final span in spans) {
+      if (span.start > cursor) {
+        children.add(TextSpan(text: text.substring(cursor, span.start)));
+      }
+      children.add(
+        TextSpan(
+          text: text.substring(span.start, span.end),
+          style: const TextStyle(color: Color(0xFF576B95)),
+        ),
+      );
+      cursor = span.end;
+    }
+    if (cursor < text.length) {
+      children.add(TextSpan(text: text.substring(cursor)));
+    }
+    return Text.rich(TextSpan(style: style, children: children));
   }
 
   Widget _buildPsychology(String text) {
@@ -1390,9 +1454,9 @@ class _VoiceBubbleState extends State<_VoiceBubble> {
       reference: widget.voice.ref,
     );
     if (!ok && mounted) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(content: Text('语音加载失败，请稍后重试')),
-      );
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(const SnackBar(content: Text('语音加载失败，请稍后重试')));
     }
   }
 
@@ -1405,11 +1469,7 @@ class _VoiceBubbleState extends State<_VoiceBubble> {
           child: CircularProgressIndicator(strokeWidth: 2),
         );
       case VoicePlaybackStatus.playing:
-        return const Icon(
-          Icons.graphic_eq,
-          size: 22,
-          color: Color(0xFF07C160),
-        );
+        return const Icon(Icons.graphic_eq, size: 22, color: Color(0xFF07C160));
       case VoicePlaybackStatus.idle:
         return const Icon(Icons.volume_up_rounded, size: 22);
     }
@@ -1430,9 +1490,7 @@ class _VoiceBubbleState extends State<_VoiceBubble> {
     return ListenableBuilder(
       listenable: VoicePlaybackService.instance,
       builder: (context, _) {
-        final status = VoicePlaybackService.instance.statusOf(
-          widget.messageId,
-        );
+        final status = VoicePlaybackService.instance.statusOf(widget.messageId);
         final label = voice.durationLabel;
         final children = <Widget>[
           _buildIcon(status),
