@@ -176,6 +176,10 @@ class OneBotConfig(BaseModel):
     allowed_groups: List[int] = []
     disabled_conversations: List[str] = []
     blocked_users: Dict[str, List[str]] = {}
+    # 同一发送者连续消息的聚合等待秒数（0 = 立即回复，上限 30）
+    wait_seconds: int = Field(default=15, ge=0, le=30)
+    # 允许主动消息 / 续写 / 提醒投递到主用户的 QQ 私聊（默认关闭，仍发 App）
+    deliver_proactive: bool = False
 
 class StatItem(BaseModel):
     """单个数值定义"""
@@ -764,8 +768,16 @@ async def update_role(role_id: str, update: RoleUpdate, request: Request):
     if not role:
         raise HTTPException(status_code=404, detail="角色不存在")
     
+    previous_onebot = role.get("onebot_config") if isinstance(role.get("onebot_config"), dict) else {}
     for key, value in update.model_dump(exclude_none=True).items():
         role[key] = value
+    if update.onebot_config is not None:
+        # 运行态字段（server_url / proactive_config 等不在模型内）与未提交的字段保持原值，
+        # 避免每次保存设置都把它们清空。
+        role["onebot_config"] = {
+            **previous_onebot,
+            **update.onebot_config.model_dump(exclude_unset=True),
+        }
     if (
         "model_max_context_length" in update.model_fields_set
         and update.model_max_context_length is None

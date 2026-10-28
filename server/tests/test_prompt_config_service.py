@@ -546,13 +546,45 @@ class DefaultPromptSnapshotTests(unittest.TestCase):
         self.assertLess(text.index("\n</system_rules>\n"), text.index("\n<persona>\n"))
         self.assertIn("人设文本", text[text.index("\n<persona>\n"):text.index("\n</persona>\n")])
 
-    def test_onebot_prompt_uses_directive_and_has_no_chat_output_protocol(self):
+    def test_onebot_prompt_shares_the_app_protocol_and_adds_the_qq_directive(self):
         text = self._render("onebot_main_qq", False)
         self.assertIn("<onebot_directive>", text)
         self.assertIn("123456", text)
-        self.assertNotIn("<output_protocol>", text)
-        self.assertNotIn("<output_reminder>", text)
+        # QQ 与 App 同一套输出协议；指令里不再有旧式 <> // [] ** 标记体系
+        self.assertIn("<output_protocol>", text)
+        self.assertIn("<output_reminder>", text)
+        self.assertNotIn("<format_markers>", text)
+        self.assertIn("<delivery_rules>", text)
+        self.assertLess(text.index("\n<output_protocol>\n"), text.index("\n<onebot_directive>\n"))
         self.assertLess(text.index("\n<instruction_priority>\n"), text.index("\n<onebot_directive>\n"))
+
+    def test_onebot_stats_only_for_owner_private(self):
+        from services import ai_service
+
+        role = {"id": "1", "name": "R", "ai_model": "deepseek-chat", "stats_config": _STATS}
+        with patch.object(ai_service.settings_service, "load_settings", return_value={}):
+            owner = ai_service._build_system_prompt(role, is_onebot=True, settings={}, allow_stats=True)
+            other = ai_service._build_system_prompt(role, is_onebot=True, settings={}, allow_stats=False)
+        self.assertIn("<stats_protocol>", owner)
+        self.assertIn("<stats_spec>", owner)
+        self.assertNotIn("<stats_protocol>", other)
+        self.assertNotIn("<stats_spec>", other)
+        self.assertTrue(ai_service.stats_allowed("onebot_private", "user"))
+        self.assertFalse(ai_service.stats_allowed("onebot_private", "123(QQ名:x)"))
+        self.assertFalse(ai_service.stats_allowed("onebot_group", "user"))
+        self.assertTrue(ai_service.stats_allowed("zerochat", "user"))
+
+    def test_stale_onebot_directive_override_is_ignored(self):
+        from services import prompt_config_service as pcs
+
+        pid = pcs.ONEBOT_SYSTEM_DIRECTIVE_ID
+        stale = {pid: {pcs.BUILTIN_OVERRIDE_KEY: "旧版指令 {MAIN_QQ_HINT}", pcs.BASE_VERSION_KEY: "2"}}
+        legacy = {pid: {pcs.BUILTIN_OVERRIDE_KEY: "无版本指令"}}
+        fresh = {pid: {pcs.BUILTIN_OVERRIDE_KEY: "新版指令", pcs.BASE_VERSION_KEY: "3"}}
+        builtin = pcs.resolve(pid, settings={}, role_data={})
+        self.assertEqual(pcs.resolve(pid, settings={"prompt_overrides": stale}, role_data={}), builtin)
+        self.assertEqual(pcs.resolve(pid, settings={"prompt_overrides": legacy}, role_data={}), builtin)
+        self.assertEqual(pcs.resolve(pid, settings={"prompt_overrides": fresh}, role_data={}), "新版指令")
 
     def test_runtime_context_cannot_close_prompt_sections(self):
         from services import ai_service

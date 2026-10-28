@@ -62,6 +62,11 @@ LEGACY_PHASE_KEYS = ("zerochat", "onebot", "default", "cloud_emoji")
 #: Version assigned to overrides that predate versioning.
 LEGACY_BASE_VERSION = 1
 
+#: Prompts whose builtin changed incompatibly: a stored full replacement written against
+#: an older builtin version is ignored (and logged) instead of silently conflicting with
+#: the new protocol. ``onebot.system_directive`` v3 dropped the legacy QQ marker scheme.
+MIN_COMPATIBLE_BASE_VERSION: Dict[str, int] = {"onebot.system_directive": 3}
+
 #: Placeholder key inside ``chat.tool_rules`` that carries the emoji-tool branch.
 EMOJI_TOOL_RULE_PLACEHOLDER = "EMOJI_TOOL_RULE"
 
@@ -360,6 +365,18 @@ def resolve(
                 blocks.append(role_block.get(prompt_id))
         for block in blocks:
             replacement, _ = _replacement_text(definition, block, variant)
+            minimum = MIN_COMPATIBLE_BASE_VERSION.get(prompt_id)
+            if replacement is not None and minimum is not None:
+                base = (
+                    _parse_base_version(block.get(BASE_VERSION_KEY))
+                    if isinstance(block, dict) else None
+                ) or LEGACY_BASE_VERSION
+                if base < minimum:
+                    logger.warning(
+                        "提示词 %s 的覆盖基于旧版本 v%s（当前 v%s 不兼容），已忽略；请基于新内置版本重新编辑",
+                        prompt_id, base, definition.version,
+                    )
+                    replacement = None
             if replacement is not None:
                 text = replacement[:MAX_PROMPT_OVERRIDE_CHARS]
             appended = _append_text(block)

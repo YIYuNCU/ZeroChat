@@ -2385,6 +2385,21 @@ def clear_short_term(role_id: str):
         _set_meta(conn, "updated_at", datetime.now().isoformat())
         # memory.json 由前端维护，后端不主动覆盖。
 
+def read_meta_value(role_id: str, key: str, default: Optional[str] = None) -> Optional[str]:
+    """读取 memory_meta 中的单个键（供跨模块保存轻量运行态，如最近互动平台）。"""
+    if is_tool_role_id(role_id):
+        return default
+    with _get_connection(role_id) as conn:
+        return _get_meta(conn, key, default)
+
+
+def write_meta_value(role_id: str, key: str, value: Optional[str]) -> None:
+    if is_tool_role_id(role_id):
+        return
+    with _get_connection(role_id) as conn:
+        _set_meta(conn, key, value)
+
+
 def clear_short_term_by_conversation(role_id: str, conversation_key: str):
     """按会话 key 清除短期记忆（group:{id} 或 private:{sender_id}）"""
     if is_tool_role_id(role_id):

@@ -38,3 +38,9 @@ placeholders: ["NO_REPLY_DIRECTIVE"]   # 正文用到的 {NAME} 占位符，必�
 ## 升级内置文案
 
 修改正文后必须把 `version` 加 1。已有的用户覆盖会因 `__base_version__` 落后而在设置页提示“基于旧版”。
+
+### 不兼容升级：`onebot.system_directive` v3
+
+v3 起 QQ 与 App 共用 `chat.format_protocol` 输出协议，指令里的 `<format_markers>`（旧式 `<>`/`//`/`[]`/`**` 标记）改为 `<delivery_rules>`
+（只有 `<对话>` 会送达 QQ，`$` 分条）。旧版覆盖会让模型输出旧标记，因此 `__base_version__` 低于 3（或缺失）的覆盖在渲染时被忽略并记录警告
+（`prompt_config_service.MIN_COMPATIBLE_BASE_VERSION`），需要在设置页基于新版重新编辑。

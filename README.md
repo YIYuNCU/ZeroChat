@@ -51,7 +51,9 @@
 
 - **QQ 协议接入** — 通过 OneBot V11 协议（NapCat 框架）连接 QQ，支持群聊/私聊
 - **双传输模式** — 支持 HTTP POST 事件推送与反向 WebSocket 连接
-- **消息聚合** — 15 秒消息聚合窗口，合并连续短消息减少 AI 调用次数
+- **消息聚合** — 角色级等待秒数（默认 15，0–30，0 为立即回复），合并同一发送者的连续消息
+- **与 App 同体验** — QQ 使用与 App 相同的输出协议与分条节奏，只发送 `<对话>`；主用户 QQ 私聊同步进 App 聊天记录
+- **按平台投递** — 提醒发到创建它的平台，主动消息/续写发到最近互动的平台（需开启「主动消息发到 QQ」）
 - **用户屏蔽** — AI 可通过 Function Calling 自主屏蔽骚扰用户
 
 ### 🧠 记忆系统
@@ -133,7 +135,7 @@ zerochat/
     │   ├── moments.py               # 朋友圈 API
     │   ├── tasks.py                 # 定时任务 API
     │   ├── settings.py              # 设置 API
-    │   └── onebot.py                # OneBot V11 QQ 协议适配
+    │   └── onebot.py                # OneBot V11 路由层（逻辑在 services/onebot/）
     ├── services/                    # 业务逻辑服务（24个）
     │   ├── ai_service.py            # AI API 调用（OpenAI 兼容 + Embedding）
     │   ├── ai_tools.py              # AI Function Calling 工具（schedule_task, block_user）
@@ -359,7 +361,9 @@ AI 助手模型：
 通过 OneBot V11 协议 + NapCat 框架实现 QQ 平台接入：
 
 - 每个 AI 角色可独立配置是否启用 QQ 接入
-- 消息 15 秒聚合窗口，合并连续消息减少 API 调用
+- 消息聚合等待秒数可配置（默认 15，0–30），合并连续消息减少 API 调用
+- QQ 与 App 使用同一输出协议：仅 `<对话>` 发往 QQ，动作/声音/心理保留在记忆中
+- 群聊仅首条消息引用并 @ 发送者，私聊不引用
 - AI 通过 Function Calling 的 `block_user` 工具自主屏蔽骚扰用户
 - 支持群聊和私聊两种场景
 

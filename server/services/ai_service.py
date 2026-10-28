@@ -14,7 +14,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from services import persona_card
 from services import prompt_config_service as prompt_config
 from services import settings_service
-from services.chat_envelope import ChatEnvelope
+from services.chat_envelope import ChatEnvelope, stats_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -1169,8 +1169,13 @@ def _build_system_prompt(
     include_runtime_context: bool = True,
     settings: Optional[Dict[str, Any]] = None,
     enable_voice: bool = False,
+    allow_stats: bool = True,
 ) -> str:
-    """Build system prompt from role data and the configurable prompt registry."""
+    """Build system prompt from role data and the configurable prompt registry.
+
+    QQ（``is_onebot``）与 App 共用同一套输出协议（标签 / ``$`` / 无回复），再叠加 QQ
+    场景指令；数值系统仅在 ``allow_stats`` 时注入（QQ 下只对主用户私聊开放）。
+    """
     parts: List[str] = []
     stats_config = role_data.get("stats_config") or {}
     stats_enabled = bool(stats_config.get("enabled") and stats_config.get("stats"))
@@ -1215,23 +1220,20 @@ def _build_system_prompt(
     # system_rules → persona → input_format → stats_spec → output_reminder → runtime_context。
     rules: List[str] = [
         _prompt_section("instruction_priority", prompt(prompt_config.CHAT_INSTRUCTION_PRIORITY_ID)),
+        _prompt_section("output_protocol", prompt(prompt_config.CHAT_FORMAT_PROTOCOL_ID)),
     ]
+    if stats_enabled and allow_stats:
+        rules.append(_prompt_section(
+            "stats_protocol", prompt(prompt_config.CHAT_STATS_BLOCK_ID)
+        ))
+    if sound_enabled:
+        rules.append(_prompt_section(
+            "sound_rules", prompt(prompt_config.CHAT_SOUND_DEDUP_ID)
+        ))
     if is_onebot:
         rules.append(_prompt_section(
             "onebot_directive", prompt(prompt_config.ONEBOT_SYSTEM_DIRECTIVE_ID)
         ))
-    else:
-        rules.append(_prompt_section(
-            "output_protocol", prompt(prompt_config.CHAT_FORMAT_PROTOCOL_ID)
-        ))
-        if stats_enabled:
-            rules.append(_prompt_section(
-                "stats_protocol", prompt(prompt_config.CHAT_STATS_BLOCK_ID)
-            ))
-        if sound_enabled:
-            rules.append(_prompt_section(
-                "sound_rules", prompt(prompt_config.CHAT_SOUND_DEDUP_ID)
-            ))
 
     # 通用工具能力（所有场景可用）；表情工具分支由 variant 决定，
     # 可选表情包插件的指引在其声明了 PROMPT 时并入。
@@ -1252,7 +1254,7 @@ def _build_system_prompt(
     parts.append(_prompt_section(
         "input_format", prompt(prompt_config.CHAT_USER_MESSAGE_JSON_HINT_ID)
     ))
-    if not is_onebot:
+    if allow_stats:
         stats_instruction = _build_stats_instruction(
             role_data,
             include_current_values=False,
@@ -1260,12 +1262,12 @@ def _build_system_prompt(
         )
         if stats_instruction:
             parts.append(_prompt_section("stats_spec", stats_instruction))
-        parts.append(_prompt_section(
-            "output_reminder",
-            prompt(prompt_config.CHAT_REPLY_FORMAT_HINT_ID)
-            + "\n\n"
-            + prompt(prompt_config.CHAT_NO_REPLY_ID),
-        ))
+    parts.append(_prompt_section(
+        "output_reminder",
+        prompt(prompt_config.CHAT_REPLY_FORMAT_HINT_ID)
+        + "\n\n"
+        + prompt(prompt_config.CHAT_NO_REPLY_ID),
+    ))
     if include_runtime_context and extra_context:
         parts.append(_runtime_context_section(extra_context))
     return "\n\n".join(part for part in parts if part)
@@ -1373,6 +1375,7 @@ from services.ai_tools import (
     execute_web_search,
     execute_write_memory,
     execute_recognize_image,
+    current_platform,
 )
 
 # 可选表情包插件：存在则并入工具集/提示词/分发，缺失则完全回退到内置行为。
@@ -1407,6 +1410,8 @@ async def generate_with_role(
     messages = []
     is_onebot = origin.startswith("onebot")
     is_third_party = is_onebot and sender != "user"
+    owner_dm = stats_allowed(origin, sender)
+    current_platform.set("qq" if (is_onebot and owner_dm) else "app")
     resolved_model, _, _, _, _, _, _, _ = _get_role_ai_config(role_data)
     system_content = _build_system_prompt(
         role_data,
@@ -1414,6 +1419,7 @@ async def generate_with_role(
         is_onebot=is_onebot,
         include_runtime_context=False,
         enable_voice=enable_voice,
+        allow_stats=owner_dm,
     )
     system_parts = [system_content] if system_content else []
     if extra_context:
@@ -1452,10 +1458,11 @@ async def generate_with_role(
         active_tools.extend(_SEND_EMOTION_EMOJI_TOOL)
     active_tools.extend(_WEB_SEARCH_TOOL)
     active_tools.extend(_WRITE_MEMORY_TOOL)
-    # set_alarm 作用于用户设备的系统闹钟/日历，仅对有设备的场景开放
-    # continue_if_no_reply（无回复续写）同样仅对有设备的场景开放
+    # set_alarm 作用于用户设备的系统闹钟/日历，仅对 App 场景开放
+    # continue_if_no_reply（无回复续写）对 App 与「主用户 QQ 私聊」开放（续写会按来源平台投递）
     if not is_onebot:
         active_tools.extend(_SET_ALARM_TOOL)
+    if owner_dm:
         active_tools.extend(_CONTINUE_IF_NO_REPLY_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)

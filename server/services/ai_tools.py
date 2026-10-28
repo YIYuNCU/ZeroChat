@@ -6,6 +6,7 @@ import json
 import logging
 import random
 import uuid
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -18,6 +19,10 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / "data"
 TASKS_FILE = DATA_DIR / "tasks" / "scheduled.json"
 ROLES_DIR = DATA_DIR / "roles"
+
+#: 本轮对话发生的平台（"app" / "qq"），由 generate_with_role 在入口设置。
+#: 工具（如 schedule_task）据此记录提醒应送达的平台，避免把 origin 逐层传进工具执行器。
+current_platform: ContextVar[str] = ContextVar("zerochat_chat_platform", default="app")
 
 
 def _role_dir(role_id: str) -> Path:
@@ -188,6 +193,9 @@ async def execute_schedule_task(role_data: Dict, message: str, trigger_time: str
         "enabled": True,
         "created_at": datetime.now().isoformat(),
     }
+    if current_platform.get() == "qq":
+        # 仅 QQ 来源记录该字段，App 创建的任务记录与旧版逐字段一致
+        task_record["platform"] = "qq"
 
     try:
         TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)

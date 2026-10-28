@@ -20,7 +20,15 @@ class OneBotConnection:
         self.websocket = websocket
         self.role_id = role_id
         self.self_id = self_id
+        self.server_url = ""  # 由路由在握手后写入，供表情图片 HTTP 地址使用
         self._pending_echoes: Dict[str, asyncio.Future] = {}
+
+    def fail_pending(self, reason: str = "disconnected") -> None:
+        """连接被替换 / 断开时立即结束所有等待中的 API 调用，而不是等满 30 秒。"""
+        pending, self._pending_echoes = self._pending_echoes, {}
+        for future in pending.values():
+            if not future.done():
+                future.set_result({"status": "failed", "retcode": -1, "error": reason})
 
     async def send_action(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """发送 API 调用并等待 echo 响应"""
@@ -62,6 +70,7 @@ class OneBotConnectionManager:
         """注册新连接（替换同角色的旧连接）"""
         old = self._connections.pop(role_id, None)
         if old:
+            old.fail_pending("replaced")
             try:
                 await old.websocket.close()
             except Exception:
@@ -71,9 +80,15 @@ class OneBotConnectionManager:
         logger.info(f"OneBot WS 连接建立: role={role_id}, self_id={self_id}")
         return conn
 
-    def disconnect(self, role_id: str):
-        """移除连接"""
-        self._connections.pop(role_id, None)
+    def disconnect(self, role_id: str, conn: Optional[OneBotConnection] = None):
+        """移除连接。传入 conn 时仅当它仍是当前连接才移除，避免旧连接收尾时误删新连接。"""
+        current = self._connections.get(role_id)
+        if conn is not None:
+            conn.fail_pending()
+            if current is not conn:
+                return
+        if current is not None:
+            self._connections.pop(role_id, None)
         logger.info(f"OneBot WS 连接断开: role={role_id}")
 
     def get_connection(self, role_id: str) -> Optional[OneBotConnection]:

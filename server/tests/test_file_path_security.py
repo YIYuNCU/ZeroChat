@@ -9,7 +9,8 @@ import uuid
 
 from fastapi import HTTPException, UploadFile
 
-from routers import ai_behavior, onebot, roles
+from routers import ai_behavior, roles
+from services.onebot import paths as onebot_paths
 from services import memory_service
 from transport import ws_dispatcher
 
@@ -71,12 +72,12 @@ class FilePathSecurityTests(unittest.IsolatedAsyncioTestCase):
             roles_root = Path(temp_dir) / "roles"
             roles_root.mkdir()
             with patch.object(ai_behavior, "ROLES_DIR", roles_root), patch.object(
-                onebot, "ROLES_DIR", roles_root
+                onebot_paths, "ROLES_DIR", roles_root
             ), patch.object(memory_service, "ROLES_DIR", roles_root):
                 with self.assertRaises(HTTPException):
                     ai_behavior._role_dir("..")
                 with self.assertRaises(ValueError):
-                    onebot._role_dir("../other")
+                    onebot_paths.role_dir("../other")
                 with self.assertRaises(ValueError):
                     memory_service.get_memory_db("..")
 

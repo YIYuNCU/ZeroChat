@@ -65,11 +65,9 @@ class ExampleRenderingTests(unittest.TestCase):
         self.assertIn("<assistant><对话>早安</对话></assistant>", text)
         self.assertIn("<assistant><对话>晚安</对话><动作>挥手</动作></assistant>", text)
 
-    def test_onebot_mode_strips_protocol_tags(self):
-        text = compile_persona(self._ROLE, is_onebot=True)
-        self.assertIn("<assistant>早安</assistant>", text)
-        self.assertIn("<assistant>晚安挥手</assistant>", text)
-        self.assertNotIn("<对话>", text)
+    def test_onebot_mode_uses_the_same_protocol_tags_as_the_app(self):
+        # QQ 与 App 共用输出协议，示例回复在两端都是标签格式
+        self.assertEqual(compile_persona(self._ROLE, is_onebot=True), compile_persona(self._ROLE))
 
     def test_examples_with_an_empty_side_are_dropped(self):
         text = compile_persona({"persona_card": {"identity": "x", "example_dialogues": [

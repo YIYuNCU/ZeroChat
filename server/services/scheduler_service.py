@@ -378,15 +378,18 @@ async def _trigger_task(task: Dict):
     global _event_callback
     
     if _event_callback:
+        context = {
+            "task_id": task.get("id"),
+            "chat_id": task.get("chat_id"),
+            "task_message": task.get("message", ""),
+        }
+        if task.get("platform"):
+            context["platform"] = task["platform"]  # 创建任务时所在的平台（qq），投递时优先
         await _event_callback({
             "role_id": task.get("role_id"),
             "event_type": "task",
             "content": task.get("ai_prompt") or task.get("message", ""),
-            "context": {
-                "task_id": task.get("id"),
-                "chat_id": task.get("chat_id"),
-                "task_message": task.get("message", ""),
-            }
+            "context": context,
         })
 
     # 仅一次性任务在触发后标记完成；daily/weekly 重复任务保持 enabled，

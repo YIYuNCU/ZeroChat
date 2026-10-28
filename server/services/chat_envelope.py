@@ -217,6 +217,13 @@ def envelope_from_legacy(
     return build_envelope(ctx, default_origin=origin or ORIGIN_ZEROCHAT, default_sender=sender or "user")
 
 
+def stats_allowed(origin: str, sender: str) -> bool:
+    """数值系统 / 续写是否对该来源开放：App 全部开放；QQ 仅主用户私聊（sender == "user"）。"""
+    if not is_onebot_origin(origin):
+        return True
+    return origin == ORIGIN_ONEBOT_PRIVATE and sender == "user"
+
+
 def conversation_key(envelope: ChatEnvelope, is_main_user: Optional[bool] = None) -> str:
     """记忆隔离键。既有分支行为不变，并为 zerochat_group 提供独立群记忆。
 

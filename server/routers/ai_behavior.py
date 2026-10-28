@@ -32,6 +32,7 @@ from services.chat_envelope import (
     conversation_key as build_conversation_key,
     envelope_from_legacy,
     group_context_text,
+    stats_allowed,
 )
 
 logger = logging.getLogger(__name__)
@@ -485,9 +486,9 @@ async def detect_intent(request: IntentDetectRequest):
 # ========== 聊天处理 ==========
 
 def _with_voice_transcripts(
-    reply: str, voice_messages: List[Dict[str, Any]], plain: bool,
+    reply: str, voice_messages: List[Dict[str, Any]], plain: bool = False,
 ) -> str:
-    """把已发出的语音转写并入助手记忆文本（App 用 <对话> 块，OneBot 用纯文本）。"""
+    """把已发出的语音转写并入助手记忆文本（默认用 <对话> 块，QQ 与 App 一致；plain 仅为兼容保留）。"""
     lines = []
     for item in voice_messages:
         spoken = str(item.get("text") or "").strip()
@@ -603,9 +604,9 @@ async def _run_memory_ai_pipeline(
 
     normalized_request_id = str(request_id or local_context.get("request_id") or "").strip() or f"req_{uuid.uuid4().hex}"
 
-    # 数值系统：当前值随本次用户消息发送（仅主 App 路径，onebot 不启用四部分/数值）
+    # 数值系统：当前值随本次用户消息发送（App 全部开放；QQ 仅主用户私聊）
     stats_current = None
-    if not origin.startswith("onebot"):
+    if stats_allowed(origin, user_sender):
         try:
             from services import stats_service
             stats_current = stats_service.get_current_values(role_id, role)
@@ -694,7 +695,7 @@ async def _run_memory_ai_pipeline(
     if include_assistant_memory and not no_reply:
         # 语音转写写入助手记忆，让模型在后续轮次记得自己说过什么。
         assistant_memory_content = _with_voice_transcripts(
-            ai_reply, voice_messages, origin.startswith("onebot"),
+            ai_reply, voice_messages,
         )
         await _run_db(
             role_id, functools.partial(
@@ -853,11 +854,12 @@ def _build_followup_budget_hint(
 ) -> Optional[str]:
     """构造「无回复续写」剩余额度提示，供 handle_chat 在生成主回复时参考。
 
-    continue_if_no_reply 仅对有设备（非 onebot）的场景开放，且需角色启用该功能；
-    这里复用同样的条件，避免在工具实际不可用时误导模型。
+    continue_if_no_reply 对 App 与「主用户 QQ 私聊」开放，且需角色启用该功能；
+    这里复用同样的条件（stats_allowed），避免在工具实际不可用时误导模型。
     """
     origin = str(event_context.get("origin") or "zerochat").strip() or "zerochat"
-    if origin.startswith("onebot"):
+    sender = str(event_context.get("sender") or "user").strip() or "user"
+    if not stats_allowed(origin, sender):
         return None
     followup_config = role.get("followup_config") or {}
     if not followup_config.get("enabled", True):
@@ -1009,6 +1011,13 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
     if envelope.is_owner:
         from services import scheduler_service
         scheduler_service.schedule_proactive_for_role(role_id, reset=True)
+        # 记录主用户最近一次 1:1 互动的平台，供主动消息 / 续写按来源投递（群聊不算）
+        if envelope.origin in ("zerochat", "onebot_private"):
+            from services.onebot import delivery
+            await delivery.record_owner_platform(
+                role_id,
+                delivery.PLATFORM_QQ if envelope.origin == "onebot_private" else delivery.PLATFORM_APP,
+            )
     no_reply = pipeline_result.get("no_reply") is True
     # 情绪表情已封装为 send_emotion_emoji 工具，由 AI 主动调用
     return AIResponse(

@@ -9,6 +9,21 @@ from services.memory_service import close_all_connections as close_db_connection
 from transport.push_hub import publish_server_push
 
 
+async def _deliver_via_qq(event, result, content: str, logger) -> bool:
+    """尝试把调度器产生的内容投递到 QQ。返回 True 表示已处理，调用方不必再走 App。"""
+    try:
+        from services.onebot import delivery
+
+        ctx = event.context or {}
+        platform = await delivery.resolve_platform(event.role_id, event.event_type.value, ctx)
+        if platform != delivery.PLATFORM_QQ:
+            return False
+        return await delivery.deliver_to_qq(event.role_id, content, result.metadata or {})
+    except Exception as exc:  # noqa: BLE001 - QQ 出任何问题都回落 App，不丢消息
+        logger.warning(f"QQ 投递失败，回落 App: {exc}")
+        return False
+
+
 def create_scheduler_event_handler(logger):
     async def handle_ai_event(event_data: dict):
         from routers.ai_behavior import AIEvent, handle_ai_event as process_event
@@ -41,6 +56,13 @@ def create_scheduler_event_handler(logger):
                 or role.get("name")
                 or "AI"
             )
+
+            # 提醒 / 主动消息 / 续写：按来源平台投递（生成只做一次）。
+            # QQ 投递成功后不再写入 App 的通知链路（已由 mirror 静默同步进历史）；
+            # QQ 不可用或发送失败则回落到下面的 App 流程。
+            if event_type in ("task", "proactive", "followup"):
+                if await _deliver_via_qq(event, result, content, logger):
+                    return result
 
             if event_type == "moment":
                 if action == "post":
@@ -186,6 +208,12 @@ def create_lifespan(data_dir: Path, config_dir: Path, runtime_dir: Path, logger)
         yield
 
         scheduler_service.stop_scheduler()
+        try:
+            from services.onebot.pipeline import pipeline as onebot_pipeline
+
+            await onebot_pipeline.shutdown()
+        except Exception:  # noqa: BLE001 - 关闭阶段不阻塞
+            logger.warning("OneBot 聚合器关闭失败", exc_info=True)
         from services.chat_io_service import close_file_workers
         await close_file_workers()
         await aclose_http_client()

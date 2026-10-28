@@ -1,6 +1,10 @@
 /// OneBot V11 接口配置模型
 /// 用于配置角色的 OneBot 消息接收接口
 class OneBotConfig {
+  /// 聚合等待秒数的默认值与上限（与服务端 onebot_config.wait_seconds 一致）
+  static const int defaultWaitSeconds = 15;
+  static const int maxWaitSeconds = 30;
+
   /// 是否启用 OneBot 接口
   final bool enabled;
 
@@ -19,6 +23,12 @@ class OneBotConfig {
   /// 群聊白名单（群号列表），为空则不处理群聊
   final List<int> allowedGroups;
 
+  /// 同一发送者连续消息的聚合等待秒数（0 = 立即回复，上限 30）
+  final int waitSeconds;
+
+  /// 允许主动消息 / 续写 / 提醒投递到主用户的 QQ 私聊（默认关闭，仍发到 App）
+  final bool deliverProactive;
+
   const OneBotConfig({
     this.enabled = false,
     this.secret = '',
@@ -26,6 +36,8 @@ class OneBotConfig {
     this.mainUserId = 0,
     this.allowedUsers = const [],
     this.allowedGroups = const [],
+    this.waitSeconds = defaultWaitSeconds,
+    this.deliverProactive = false,
   });
 
   factory OneBotConfig.defaultConfig() => const OneBotConfig();
@@ -47,6 +59,10 @@ class OneBotConfig {
               .where((e) => e > 0)
               .toList() ??
           [],
+      waitSeconds: (int.tryParse(json['wait_seconds']?.toString() ?? '') ??
+              defaultWaitSeconds)
+          .clamp(0, maxWaitSeconds),
+      deliverProactive: json['deliver_proactive'] as bool? ?? false,
     );
   }
 
@@ -58,6 +74,8 @@ class OneBotConfig {
       'main_user_id': mainUserId,
       'allowed_users': allowedUsers,
       'allowed_groups': allowedGroups,
+      'wait_seconds': waitSeconds,
+      'deliver_proactive': deliverProactive,
     };
   }
 
@@ -68,6 +86,8 @@ class OneBotConfig {
     int? mainUserId,
     List<int>? allowedUsers,
     List<int>? allowedGroups,
+    int? waitSeconds,
+    bool? deliverProactive,
   }) {
     return OneBotConfig(
       enabled: enabled ?? this.enabled,
@@ -76,6 +96,8 @@ class OneBotConfig {
       mainUserId: mainUserId ?? this.mainUserId,
       allowedUsers: allowedUsers ?? this.allowedUsers,
       allowedGroups: allowedGroups ?? this.allowedGroups,
+      waitSeconds: waitSeconds ?? this.waitSeconds,
+      deliverProactive: deliverProactive ?? this.deliverProactive,
     );
   }
 }

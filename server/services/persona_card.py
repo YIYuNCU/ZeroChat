@@ -42,7 +42,6 @@ RESERVED_TAGS = (
 _RESERVED_TAG_RE = re.compile(
     r"<(/?)(" + "|".join(RESERVED_TAGS) + r")(?=[\s>/])", re.IGNORECASE
 )
-_PROTOCOL_TAG_RE = re.compile(r"</?(?:对话|动作|声音|心理|数值|事实)>")
 _DIALOGUE_TAG_RE = re.compile(r"<对话>")
 
 #: (card field, heading) in compile order, excluding examples which sit between
@@ -145,9 +144,8 @@ def _coerce_card(raw: Any) -> Dict[str, Any]:
         return cleaned
 
 
-def _render_example_reply(text: str, is_onebot: bool) -> str:
-    if is_onebot:
-        return _PROTOCOL_TAG_RE.sub("", text).strip()
+def _render_example_reply(text: str, is_onebot: bool = False) -> str:
+    # QQ 与 App 共用同一套输出协议，示例回复在两端都用标签格式（is_onebot 仅为兼容保留）。
     if _DIALOGUE_TAG_RE.search(text):
         return text
     return f"<对话>{text}</对话>"

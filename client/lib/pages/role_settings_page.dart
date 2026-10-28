@@ -70,6 +70,8 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _onebotMainUserIdController;
   late TextEditingController _onebotAllowedUsersController;
   late TextEditingController _onebotAllowedGroupsController;
+  late TextEditingController _onebotWaitSecondsController;
+  late bool _onebotDeliverProactive;
   List<String> _availableAiModels = [];
   bool _isLoadingAiModels = false;
   String? _selectedModelProfileId;
@@ -166,6 +168,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _onebotAllowedUsersController = TextEditingController(
       text: widget.role.onebotConfig.allowedUsers.join(','),
     );
+    _onebotWaitSecondsController = TextEditingController(
+      text: widget.role.onebotConfig.waitSeconds.toString(),
+    );
+    _onebotDeliverProactive = widget.role.onebotConfig.deliverProactive;
     _onebotAllowedGroupsController = TextEditingController(
       text: widget.role.onebotConfig.allowedGroups.join(','),
     );
@@ -208,6 +214,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _onebotMainUserIdController.dispose();
     _onebotAllowedUsersController.dispose();
     _onebotAllowedGroupsController.dispose();
+    _onebotWaitSecondsController.dispose();
     super.dispose();
   }
 
@@ -724,6 +731,50 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                   inputFormatters: [
                     FilteringTextInputFormatter.allow(RegExp(r'[0-9,]')),
                   ],
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '等待秒数',
+                  controller: _onebotWaitSecondsController,
+                  hintText: '连续消息等待合并，0-30，0 为立即回复',
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9]')),
+                  ],
+                ),
+                const Divider(height: 1, indent: 16),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('主动消息发到 QQ', style: TextStyle(fontSize: 16)),
+                            SizedBox(height: 4),
+                            Text(
+                              '主动消息、续写、提醒跟随最近一次互动的平台；QQ 不在线时仍发到应用',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFF888888),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Switch(
+                        value: _onebotDeliverProactive,
+                        activeThumbColor: const Color(0xFF07C160),
+                        onChanged: (v) =>
+                            setState(() => _onebotDeliverProactive = v),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ],
@@ -1658,6 +1709,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         mainUserId: int.tryParse(_onebotMainUserIdController.text.trim()) ?? 0,
         allowedUsers: _parseIntList(_onebotAllowedUsersController.text),
         allowedGroups: _parseIntList(_onebotAllowedGroupsController.text),
+        waitSeconds: (int.tryParse(_onebotWaitSecondsController.text.trim()) ??
+                OneBotConfig.defaultWaitSeconds)
+            .clamp(0, OneBotConfig.maxWaitSeconds),
+        deliverProactive: _onebotDeliverProactive,
       ),
       statsConfig: StatsConfig(
         enabled: _statsEnabled,

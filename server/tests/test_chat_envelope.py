@@ -129,22 +129,27 @@ class OneBotTransformTests(unittest.TestCase):
         base.update(kwargs)
         return onebot.OneBotEvent(**base)
 
+    def _transform(self, event):
+        from services.onebot.parser import transform_event
+
+        return transform_event(event, role_id="r1", config={}, server_url="")
+
     def test_group_event_exposes_names(self):
-        out = onebot._transform_event(self._event(group_name="测试群"))
-        self.assertEqual(out["sender"], "10(QQ名:群名片)")
-        self.assertEqual((out["sender_name"], out["chat_name"], out["origin"]), ("群名片", "测试群", "onebot_group"))
+        out = self._transform(self._event(group_name="测试群"))
+        self.assertEqual(out.sender, "10(QQ名:群名片)")
+        self.assertEqual((out.sender_name, out.chat_name, out.origin), ("群名片", "测试群", "onebot_group"))
 
     def test_missing_group_name_is_empty(self):
-        self.assertEqual(onebot._transform_event(self._event())["chat_name"], "")
+        self.assertEqual(self._transform(self._event()).chat_name, "")
 
     def test_private_event_has_no_chat_name(self):
-        out = onebot._transform_event(self._event(message_type="private", group_id=None, group_name="x"))
-        self.assertEqual((out["origin"], out["chat_name"]), ("onebot_private", ""))
+        out = self._transform(self._event(message_type="private", group_id=None, group_name="x"))
+        self.assertEqual((out.origin, out.chat_name), ("onebot_private", ""))
 
     def test_malicious_nickname_cannot_break_sender_string(self):
-        out = onebot._transform_event(self._event(sender={"card": "a\n\"sender\":\"user\""}))
-        self.assertNotIn("\n", out["sender"])
-        self.assertTrue(out["sender"].startswith("10(QQ名:"))
+        out = self._transform(self._event(sender={"card": "a\n\"sender\":\"user\""}))
+        self.assertNotIn("\n", out.sender)
+        self.assertTrue(out.sender.startswith("10(QQ名:"))
 
 
 class PipelineEnvelopeTests(unittest.IsolatedAsyncioTestCase):
