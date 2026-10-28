@@ -495,7 +495,11 @@ async def _handle_settings_tts_update(payload: dict) -> dict:
     updates = payload.get("updates")
     if not isinstance(updates, dict):
         return {"success": False, "error": "updates missing"}
-    if not tts_service.update_tts_config(updates):
+    try:
+        saved = tts_service.update_tts_config(updates)
+    except tts_service.TTSError as exc:
+        return {"success": False, "error": str(exc)}
+    if not saved:
         return {"success": False, "error": "Failed to save settings"}
     return {"success": True, "tts": tts_service.public_tts_config()}
 

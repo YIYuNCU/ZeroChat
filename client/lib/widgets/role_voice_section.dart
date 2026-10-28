@@ -11,11 +11,15 @@ class RoleVoiceSection extends StatefulWidget {
   final Map<String, dynamic> metadata;
   final ValueChanged<Map<String, dynamic>> onChanged;
 
+  /// 是否显示顶部的灰色小标题；嵌在带标题的可折叠分组里时应关掉，避免重复。
+  final bool showHeader;
+
   const RoleVoiceSection({
     super.key,
     required this.roleName,
     required this.metadata,
     required this.onChanged,
+    this.showHeader = true,
   });
 
   @override
@@ -98,13 +102,14 @@ class _RoleVoiceSectionState extends State<RoleVoiceSection> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Padding(
-          padding: EdgeInsets.only(left: 16, bottom: 8),
-          child: Text(
-            '语音（仅此角色）',
-            style: TextStyle(fontSize: 13, color: Color(0xFF888888)),
+        if (widget.showHeader)
+          const Padding(
+            padding: EdgeInsets.only(left: 16, bottom: 8),
+            child: Text(
+              '语音（仅此角色）',
+              style: TextStyle(fontSize: 13, color: Color(0xFF888888)),
+            ),
           ),
-        ),
         Material(
           color: Colors.white,
           child: Column(

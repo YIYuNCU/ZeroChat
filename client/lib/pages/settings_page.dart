@@ -6,6 +6,7 @@ import '../services/settings_service.dart';
 import '../services/image_service.dart';
 import '../services/background_runtime_service.dart';
 import '../services/secure_backend_client.dart';
+import '../widgets/settings_group.dart';
 
 /// 设置页面
 /// 整合背景设置等功能
@@ -50,70 +51,100 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 10),
 
           // 背景设置
-          _buildSectionHeader('背景'),
-          _buildSection([
-            _buildImageItem(
-              title: '朋友圈封面',
-              currentPath: SettingsService.instance.coverImageUrl,
-              onSelect: () => _selectImage('cover'),
-            ),
-            const Divider(height: 1, indent: 16),
-            _buildImageItem(
-              title: '聊天背景',
-              currentPath: SettingsService.instance.chatBackgroundUrl,
-              onSelect: () => _selectImage('background'),
-            ),
-          ]),
+          SettingsGroup(
+            title: '背景',
+            subtitle: _backgroundSummary(),
+            icon: Icons.wallpaper,
+            initiallyExpanded: true,
+            children: [
+              _buildImageItem(
+                title: '朋友圈封面',
+                currentPath: SettingsService.instance.coverImageUrl,
+                onSelect: () => _selectImage('cover'),
+              ),
+              const Divider(height: 1, indent: 16),
+              _buildImageItem(
+                title: '聊天背景',
+                currentPath: SettingsService.instance.chatBackgroundUrl,
+                onSelect: () => _selectImage('background'),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text(
+                  '点击设置背景图片，支持从相册选择本地图片。',
+                  style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+                ),
+              ),
+            ],
+          ),
 
-          const SizedBox(height: 20),
+          const SizedBox(height: 10),
 
           // 消息等待时间设置
-          _buildSectionHeader('消息发送'),
-          _buildSection([_buildWaitIntervalItem()]),
-
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Text(
-              '输入停顿时间：发送消息后，若你仍在输入框中打字，请求会持续等待；停止输入满指定秒数后，才把这段时间发送的消息合并为一条发送给 AI，方便多段慢速输入。设为 0 表示立即发送。',
-              style: TextStyle(color: Color(0xFF888888), fontSize: 12),
-            ),
-          ),
-
-          const SizedBox(height: 20),
-
-          _buildSectionHeader('运行'),
-          _buildSection([
-            _buildBackgroundRuntimeItem(),
-            const Divider(height: 1, indent: 16),
-            _buildBackgroundPollIntervalItem(),
-            const Divider(height: 1, indent: 16),
-            _buildBackgroundWatchdogIntervalItem(),
-            if (Platform.isAndroid) ...[
-              const Divider(height: 1, indent: 16),
-              _buildBatteryOptimizationItem(),
+          SettingsGroup(
+            title: '消息发送',
+            subtitle: _waitSummary(),
+            icon: Icons.send_outlined,
+            children: [
+              _buildWaitIntervalItem(),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text(
+                  '输入停顿时间：发送消息后，若你仍在输入框中打字，请求会持续等待；停止输入满指定秒数后，才把这段时间发送的消息合并为一条发送给 AI，方便多段慢速输入。设为 0 表示立即发送。',
+                  style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+                ),
+              ),
             ],
-          ]),
+          ),
 
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Text(
-              '开启后应用切到后台仍会保持运行（仅 Android 生效）。关闭后将停止后台常驻服务。',
-              style: TextStyle(color: Color(0xFF888888), fontSize: 12),
-            ),
+          const SizedBox(height: 10),
+
+          // 后台运行相关
+          SettingsGroup(
+            title: '后台与保活',
+            subtitle: _runtimeSummary(),
+            icon: Icons.sync,
+            children: [
+              _buildBackgroundRuntimeItem(),
+              const Divider(height: 1, indent: 16),
+              _buildBackgroundPollIntervalItem(),
+              const Divider(height: 1, indent: 16),
+              _buildBackgroundWatchdogIntervalItem(),
+              if (Platform.isAndroid) ...[
+                const Divider(height: 1, indent: 16),
+                _buildBatteryOptimizationItem(),
+              ],
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text(
+                  '开启后应用切到后台仍会保持运行（仅 Android 生效）。关闭后将停止后台常驻服务。',
+                  style: TextStyle(color: Color(0xFF888888), fontSize: 12),
+                ),
+              ),
+            ],
           ),
 
           const SizedBox(height: 20),
-
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16),
-            child: Text(
-              '点击设置背景图片，支持从相册选择本地图片。',
-              style: TextStyle(color: Color(0xFF888888), fontSize: 12),
-            ),
-          ),
         ],
       ),
     );
+  }
+
+  String _backgroundSummary() {
+    final cover = SettingsService.instance.coverImageUrl.isNotEmpty;
+    final background = SettingsService.instance.chatBackgroundUrl.isNotEmpty;
+    return '封面${cover ? '已设置' : '未设置'} · 聊天背景${background ? '已设置' : '未设置'}';
+  }
+
+  String _waitSummary() {
+    final seconds = SettingsService.instance.messageWaitSeconds;
+    return seconds == 0 ? '输入停顿：立即发送' : '输入停顿：$seconds 秒';
+  }
+
+  String _runtimeSummary() {
+    final settings = SettingsService.instance;
+    if (!settings.backgroundRuntimeEnabled) return '已关闭';
+    return '已开启 · 轮询 ${settings.backgroundPollIntervalSeconds} 秒';
   }
 
   /// 构建等待时间设置项
@@ -174,16 +205,6 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildSectionHeader(String title) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      child: Text(
-        title,
-        style: const TextStyle(color: Color(0xFF888888), fontSize: 13),
       ),
     );
   }
@@ -397,13 +418,6 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildSection(List<Widget> children) {
-    return Container(
-      color: Colors.white,
-      child: Column(children: children),
     );
   }
 

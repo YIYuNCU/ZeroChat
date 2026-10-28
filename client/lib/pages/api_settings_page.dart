@@ -12,6 +12,7 @@ import '../services/secure_backend_client.dart';
 import '../services/secure_websocket_client.dart';
 import '../services/settings_service.dart';
 import '../widgets/quiet_rule_editor.dart';
+import '../widgets/settings_group.dart';
 import 'tts_settings_page.dart';
 
 class ApiSettingsPage extends StatelessWidget {
@@ -994,6 +995,26 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
           const _SectionGap(),
           _Section(
             children: [
+              _FieldRow(
+                label: 'API 地址',
+                controller: _url,
+                hint: '留空使用默认聊天 API',
+              ),
+              _FieldRow(
+                label: 'API Key',
+                controller: _key,
+                hint: '留空使用默认聊天 API',
+                obscure: true,
+              ),
+              _FieldRow(label: '模型', controller: _model, hint: '留空使用默认聊天模型'),
+            ],
+          ),
+          const _SectionGap(),
+          SettingsGroup(
+            title: '模型档案',
+            icon: Icons.bookmarks_outlined,
+            subtitle: _profileSummaryText(_profileId, _chatProfiles),
+            children: [
               _ProfileSelector(
                 value: _profileId,
                 profiles: _chatProfiles,
@@ -1008,20 +1029,11 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
             ],
           ),
           const _SectionGap(),
-          _Section(
+          SettingsGroup(
+            title: '高级参数',
+            icon: Icons.tune,
+            subtitle: _apiFormatLabels[_format] ?? _format,
             children: [
-              _FieldRow(
-                label: 'API 地址',
-                controller: _url,
-                hint: '留空使用默认聊天 API',
-              ),
-              _FieldRow(
-                label: 'API Key',
-                controller: _key,
-                hint: '留空使用默认聊天 API',
-                obscure: true,
-              ),
-              _FieldRow(label: '模型', controller: _model, hint: '留空使用默认聊天模型'),
               _FormatSelector(
                 value: _format,
                 onChanged: (value) => setState(() => _format = value),
@@ -1032,23 +1044,21 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
                 hint: '0 - 2，总结建议 0.1',
               ),
               _FieldRow(label: '超时时间（秒）', controller: _timeout, hint: '默认 60'),
-            ],
-          ),
-          const _SectionGap(),
-          _Section(
-            children: [
               _FieldRow(label: '推理强度', controller: _effort, hint: '留空继承默认聊天模型'),
               _FieldRow(label: '思考预算', controller: _budget, hint: '留空继承默认聊天模型'),
             ],
           ),
           const _SectionGap(),
-          _PageHint(
-            '系统提示词：留空使用内置提示词。填写后将追加在内置提示词之后，'
-            '便于补充输出格式要求。需要整体改写内置提示词时，用下面的'
-            '「编辑提示词」。',
-          ),
-          _Section(
+          SettingsGroup(
+            title: '系统提示词',
+            icon: Icons.description_outlined,
+            subtitle: '留空使用内置提示词',
             children: [
+              const _PageHint(
+                '系统提示词：留空使用内置提示词。填写后将追加在内置提示词之后，'
+                '便于补充输出格式要求。需要整体改写内置提示词时，用下面的'
+                '「编辑提示词」。',
+              ),
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16,
@@ -1116,9 +1126,41 @@ void _showBuiltinPrompt(BuildContext context, String text) {
   );
 }
 
+/// 系统提示词页里的分组；按提示词 id / 来源分类，未识别的归入「其他」。
+enum _PromptCategory {
+  rules('通用规则', Icons.rule_outlined),
+  tools('工具、语音与表情', Icons.build_outlined),
+  stats('数值系统', Icons.bar_chart_outlined),
+  onebot('QQ / OneBot', Icons.chat_outlined),
+  other('其他', Icons.more_horiz);
+
+  final String title;
+  final IconData icon;
+  const _PromptCategory(this.title, this.icon);
+}
+
+_PromptCategory _promptCategoryOf(ConfigurablePrompt prompt) {
+  final id = prompt.id.toLowerCase();
+  if (prompt.group == 'onebot' || id.startsWith('onebot.')) {
+    return _PromptCategory.onebot;
+  }
+  if (id.contains('stats')) return _PromptCategory.stats;
+  if (id.contains('tool') ||
+      id.contains('voice') ||
+      id.contains('sound') ||
+      id.contains('emoji')) {
+    return _PromptCategory.tools;
+  }
+  return prompt.group == 'chat' ? _PromptCategory.rules : _PromptCategory.other;
+}
+
 /// 提示词编辑页：直接编辑 md 全文的全局覆盖（按角色覆盖在角色设置页）。
 class PromptsPage extends StatefulWidget {
-  const PromptsPage({super.key});
+  /// 提示词注册表加载函数；默认走 [SettingsService.loadPromptRegistry]，测试可注入。
+  final Future<Map<String, ConfigurablePrompt>> Function({bool force})?
+  loadRegistry;
+
+  const PromptsPage({super.key, this.loadRegistry});
 
   @override
   State<PromptsPage> createState() => _PromptsPageState();
@@ -1127,6 +1169,7 @@ class PromptsPage extends StatefulWidget {
 class _PromptsPageState extends State<PromptsPage> {
   bool _loading = true;
   String? _error;
+  Map<String, ConfigurablePrompt>? _registry;
 
   @override
   void initState() {
@@ -1140,7 +1183,9 @@ class _PromptsPageState extends State<PromptsPage> {
       _error = null;
     });
     try {
-      await SettingsService.instance.loadPromptRegistry(force: true);
+      final load =
+          widget.loadRegistry ?? SettingsService.instance.loadPromptRegistry;
+      _registry = await load(force: true);
       if (mounted) setState(() => _loading = false);
     } catch (e) {
       if (mounted) {
@@ -1186,7 +1231,7 @@ class _PromptsPageState extends State<PromptsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final registry = SettingsService.instance.promptRegistry;
+    final registry = _registry ?? SettingsService.instance.promptRegistry;
     // 只列聊天系统提示词：两个记忆总结的提示词属于各自功能页，不在这里重复出现。
     final prompts =
         registry.values
@@ -1232,21 +1277,47 @@ class _PromptsPageState extends State<PromptsPage> {
                   '和表情插件强绑定，不可修改），事件总结与核心记忆总结的提示词在'
                   '各自的功能页配置。',
                 ),
-                _Section(
-                  children: [
-                    for (final prompt in prompts)
-                      _promptRow(
-                        prompt: prompt,
-                        overridden: _isOverridden(prompt),
-                        stale: _isStale(prompt),
-                        onTap: () => _editGlobal(prompt),
-                      ),
-                  ],
-                ),
+                ..._promptGroups(prompts),
                 const SizedBox(height: 30),
               ],
             ),
     );
+  }
+
+  /// 提示词按用途分组，组内沿用原有的条目行；空分组不显示。
+  List<Widget> _promptGroups(List<ConfigurablePrompt> prompts) {
+    final byCategory = <_PromptCategory, List<ConfigurablePrompt>>{};
+    for (final prompt in prompts) {
+      byCategory.putIfAbsent(_promptCategoryOf(prompt), () => []).add(prompt);
+    }
+    final widgets = <Widget>[];
+    for (final category in _PromptCategory.values) {
+      final items = byCategory[category];
+      if (items == null || items.isEmpty) continue;
+      if (widgets.isNotEmpty) widgets.add(const _SectionGap());
+      final customized = items.where(_isOverridden).length;
+      widgets.add(
+        SettingsGroup(
+          title: category.title,
+          icon: category.icon,
+          subtitle: customized == 0
+              ? '${items.length} 项'
+              : '${items.length} 项 · $customized 项已自定义',
+          children: [
+            for (var i = 0; i < items.length; i++) ...[
+              if (i > 0) const Divider(height: 1, indent: 16),
+              _promptRow(
+                prompt: items[i],
+                overridden: _isOverridden(items[i]),
+                stale: _isStale(items[i]),
+                onTap: () => _editGlobal(items[i]),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+    return widgets;
   }
 
   Widget _promptRow({
@@ -2166,6 +2237,33 @@ String _responseSummary(String value) {
       : normalized;
 }
 
+const _apiFormatLabels = {
+  'auto': '自动识别',
+  'openai_compatible': 'OpenAI 兼容',
+  'zhipu_compatible': '智谱兼容',
+  'gemini_native': 'Gemini 原生',
+};
+
+const _visionModeLabels = {
+  'standalone': '独立识图',
+  'pre_model': '预处理模型',
+  'tool': '工具调用',
+};
+
+/// 思考开关与强度的一行摘要，用于折叠分组的副标题。
+String _thinkingSummaryText(bool enabled, String effort) {
+  if (!enabled) return '已关闭';
+  return effort.trim().isEmpty ? '已启用' : '已启用 · 强度 ${effort.trim()}';
+}
+
+/// 模型档案分组的副标题：当前选中的档案名，或可选档案数量。
+String _profileSummaryText(String? selectedId, List<ModelApiProfile> profiles) {
+  for (final profile in profiles) {
+    if (profile.id == selectedId) return profile.name;
+  }
+  return profiles.isEmpty ? '暂无档案' : '未使用档案 · 共 ${profiles.length} 个';
+}
+
 class _ModelSettingsPageState extends State<ModelSettingsPage> {
   late final TextEditingController _url;
   late final TextEditingController _key;
@@ -2487,6 +2585,22 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
     });
   }
 
+  String _thinkingSummary() =>
+      _thinkingSummaryText(_thinkingEnabled, _reasoningEffort.text);
+
+  String _advancedSummary() {
+    final parts = <String>[
+      if (widget.kind.hasFormat) _apiFormatLabels[_format] ?? _format,
+      if (widget.kind == ModelSettingsKind.chat && _stream) '流式',
+      if (widget.kind.hasVisionMode)
+        _visionModeLabels[_visionMode] ?? _visionMode,
+    ];
+    return parts.join(' · ');
+  }
+
+  String _profileSummary(List<ModelApiProfile> profiles) =>
+      _profileSummaryText(_profileId, profiles);
+
   @override
   Widget build(BuildContext context) {
     final profiles = SettingsService.instance.modelProfilesFor(
@@ -2526,13 +2640,6 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
                 controller: _url,
                 hint: 'https://api.example.com/v1',
               ),
-              if (widget.kind.hasFormat) ...[
-                const Divider(height: 1),
-                _FormatSelector(
-                  value: _format,
-                  onChanged: (value) => setState(() => _format = value),
-                ),
-              ],
               const Divider(height: 1),
               _FieldRow(
                 label: 'API Key',
@@ -2546,21 +2653,29 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
                 models: _models,
                 onChanged: _applyModel,
               ),
-              if (widget.kind == ModelSettingsKind.chat) ...[
-                const Divider(height: 1),
-                _FieldRow(
-                  label: '超时时间（秒）',
-                  controller: _timeout,
-                  hint: '1-3600',
-                ),
-                const Divider(height: 1),
-                SwitchListTile(
-                  title: const Text('使用流式传输'),
-                  value: _stream,
-                  onChanged: (value) => setState(() => _stream = value),
-                ),
-              ],
-              if (widget.kind != ModelSettingsKind.embedding) ...[
+              const Divider(height: 1),
+              _ActionRow(
+                icon: Icons.cloud_download_outlined,
+                label: _fetching ? '获取中...' : '获取模型列表',
+                busy: _fetching,
+                onTap: _fetching ? null : _fetchModels,
+              ),
+              const Divider(height: 1),
+              _ActionRow(
+                icon: Icons.play_circle_outline,
+                label: _testing ? '测试中...' : '测试当前配置',
+                busy: _testing,
+                onTap: _testing ? null : _test,
+              ),
+            ],
+          ),
+          if (widget.kind != ModelSettingsKind.embedding) ...[
+            const _SectionGap(),
+            SettingsGroup(
+              title: '思考与推理',
+              icon: Icons.psychology_outlined,
+              subtitle: _thinkingSummary(),
+              children: [
                 SwitchListTile(
                   title: const Text('启用模型思考'),
                   value: _thinkingEnabled,
@@ -2597,31 +2712,49 @@ class _ModelSettingsPageState extends State<ModelSettingsPage> {
                     ),
                   ),
               ],
-              const Divider(height: 1),
-              _ActionRow(
-                icon: Icons.cloud_download_outlined,
-                label: _fetching ? '获取中...' : '获取模型列表',
-                busy: _fetching,
-                onTap: _fetching ? null : _fetchModels,
-              ),
-              const Divider(height: 1),
-              _ActionRow(
-                icon: Icons.play_circle_outline,
-                label: _testing ? '测试中...' : '测试当前配置',
-                busy: _testing,
-                onTap: _testing ? null : _test,
-              ),
-              if (widget.kind.hasVisionMode) ...[
-                const Divider(height: 1),
-                _VisionModeSelector(
-                  value: _visionMode,
-                  onChanged: (value) => setState(() => _visionMode = value),
-                ),
+            ),
+          ],
+          if (widget.kind.hasFormat) ...[
+            const _SectionGap(),
+            SettingsGroup(
+              title: '高级',
+              icon: Icons.tune,
+              subtitle: _advancedSummary(),
+              children: [
+                if (widget.kind.hasFormat)
+                  _FormatSelector(
+                    value: _format,
+                    onChanged: (value) => setState(() => _format = value),
+                  ),
+                if (widget.kind == ModelSettingsKind.chat) ...[
+                  const Divider(height: 1),
+                  _FieldRow(
+                    label: '超时时间（秒）',
+                    controller: _timeout,
+                    hint: '1-3600',
+                  ),
+                  const Divider(height: 1),
+                  SwitchListTile(
+                    title: const Text('使用流式传输'),
+                    value: _stream,
+                    onChanged: (value) => setState(() => _stream = value),
+                  ),
+                ],
+                if (widget.kind.hasVisionMode) ...[
+                  const Divider(height: 1),
+                  _VisionModeSelector(
+                    value: _visionMode,
+                    onChanged: (value) => setState(() => _visionMode = value),
+                  ),
+                ],
               ],
-            ],
-          ),
+            ),
+          ],
           const _SectionGap(),
-          _Section(
+          SettingsGroup(
+            title: '模型档案',
+            icon: Icons.bookmarks_outlined,
+            subtitle: _profileSummary(profiles),
             children: [
               _ProfileSelector(
                 value: _profileId,

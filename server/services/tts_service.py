@@ -1,10 +1,12 @@
 """AI 语音合成（TTS）服务。
 
-支持三个后端：
+支持四个后端：
 
 * ``mimo``        – 小米 MiMo-TTS（OpenAI Chat Completions 兼容，朗读文本放在 assistant 消息里）
 * ``qwen``        – 阿里云百炼 Qwen-TTS（非实时 multimodal-generation 接口）
 * ``gpt_sovits``  – GPT-SoVITS ``api_v2.py`` 的 ``/tts`` 接口
+* ``custom``      – 自定义请求格式：地址 / 请求头 / 请求体是带 ``{{占位符}}`` 的模板，
+                    响应可以是音频二进制、JSON 里的 base64 或音频 URL
 
 全局配置存放在 ``settings.json`` 的 ``tts_config``（API Key 只存服务端，读取时掩码）；
 单个角色可通过 ``role.metadata["voice"]`` 覆盖音色 / 风格 / GPT-SoVITS 参考音频，
@@ -16,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import logging
 import re
 import time
@@ -41,7 +44,7 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / "data"
 ROLES_DIR = DATA_DIR / "roles"
 
-PROVIDERS = ("mimo", "qwen", "gpt_sovits")
+PROVIDERS = ("mimo", "qwen", "gpt_sovits", "custom")
 DEFAULT_PROVIDER = "mimo"
 
 #: 单条语音音频的大小上限（下载或解码后）。
@@ -62,6 +65,20 @@ _ROLE_VOICE_KEYS = {
     "mimo": ("voice", "style"),
     "qwen": ("voice", "style"),
     "gpt_sovits": ("ref_audio_path", "prompt_text", "prompt_lang", "text_lang"),
+    "custom": ("voice", "style"),
+}
+
+#: 自定义供应商模板里允许使用的占位符。
+CUSTOM_PLACEHOLDERS = ("text", "voice", "style", "model", "api_key")
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+_TEXT_PLACEHOLDER_RE = re.compile(r"\{\{\s*text\s*\}\}")
+
+#: JSON 模板字段的长度上限；其余字段沿用 ``_text`` 的默认上限。
+_LONG_TEXT_KEYS = {"headers": 8000, "body": 8000}
+#: 枚举字段及其合法取值（method 大写，response_type 小写）。
+_ENUM_KEYS = {
+    "method": ("GET", "POST"),
+    "response_type": ("binary", "base64", "url"),
 }
 
 
@@ -111,6 +128,18 @@ def default_tts_config() -> Dict[str, Any]:
             "text_split_method": "cut5",
             "speed_factor": 1.0,
         },
+        "custom": {
+            "api_url": "",
+            "api_key": "",
+            "method": "POST",
+            "headers": '{\n  "Authorization": "Bearer {{api_key}}"\n}',
+            "body": '{\n  "model": "{{model}}",\n  "input": "{{text}}",\n  "voice": "{{voice}}"\n}',
+            "model": "",
+            "voice": "",
+            "style": "",
+            "response_type": "binary",
+            "response_path": "",
+        },
     }
 
 
@@ -153,6 +182,13 @@ def sanitize_tts_config(value: Any) -> Dict[str, Any]:
                 continue
             if key == "speed_factor":
                 section[key] = _clamp_float(incoming[key], 0.5, 2.0, section[key])
+            elif key in _ENUM_KEYS:
+                raw = _text(incoming[key], 20)
+                choice = raw.upper() if key == "method" else raw.lower()
+                if choice in _ENUM_KEYS[key]:
+                    section[key] = choice
+            elif key in _LONG_TEXT_KEYS:
+                section[key] = _text(incoming[key], _LONG_TEXT_KEYS[key])
             else:
                 section[key] = _text(incoming[key])
     return base
@@ -168,7 +204,10 @@ def _is_unchanged_secret(value: Any) -> bool:
 
 
 def update_tts_config(updates: Any) -> bool:
-    """合并部分更新；api_key 为空、``***`` 或掩码值时保留旧值。"""
+    """合并部分更新；api_key 为空、``***`` 或掩码值时保留旧值。
+
+    提交了 ``custom`` 段时会先校验模板，不合法抛 ``TTSError``（消息可直接展示）。
+    """
     if not isinstance(updates, dict):
         return False
     current = load_tts_config()
@@ -186,6 +225,8 @@ def update_tts_config(updates: Any) -> bool:
                 if key in section and val is not None:
                     section[key] = val
         merged[provider_name] = section
+    if isinstance(updates.get("custom"), dict):
+        validate_custom_section(sanitize_tts_config(merged)["custom"])
     return settings_service.save_settings({_KEY_CONFIG: sanitize_tts_config(merged)})
 
 
@@ -194,6 +235,8 @@ def _provider_ready(provider: str, params: Dict[str, Any]) -> bool:
         return False
     if provider in ("mimo", "qwen"):
         return bool(str(params.get("api_key") or "").strip() and str(params.get("model") or "").strip())
+    if provider == "custom":
+        return params.get("response_type") == "binary" or bool(str(params.get("response_path") or "").strip())
     return bool(str(params.get("ref_audio_path") or "").strip())
 
 
@@ -273,12 +316,12 @@ def _make_client(timeout: float) -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=timeout, follow_redirects=False)
 
 
-def _require_http_url(url: str) -> str:
+def _require_http_url(url: str, *, strip_slash: bool = True) -> str:
     value = str(url or "").strip()
     parsed = urlparse(value)
     if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
         raise TTSError("TTS 服务地址无效")
-    return value.rstrip("/")
+    return value.rstrip("/") if strip_slash else value
 
 
 def _sniff_audio(data: bytes, hint: str = "") -> tuple[str, str]:
@@ -321,8 +364,10 @@ def _error_detail(response: httpx.Response) -> str:
         error = body.get("error")
         message = (
             (error.get("message") if isinstance(error, dict) else error)
-            or body.get("message") or ""
+            or body.get("message") or body.get("detail") or body.get("msg") or ""
         )
+        if not isinstance(message, str):
+            message = json.dumps(message, ensure_ascii=False)
         return str(message).strip()[:100]
     return ""
 
@@ -338,18 +383,36 @@ def _raise_for_status(response: httpx.Response) -> None:
     raise TTSError(f"TTS 服务返回错误（{status}）{suffix}")
 
 
-async def _post_json(
-    url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: float,
+async def _send_request(
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    timeout: float,
+    *,
+    json_body: Any = None,
+    params: Optional[Dict[str, Any]] = None,
 ) -> httpx.Response:
     try:
         async with _make_client(timeout) as client:
-            response = await client.post(url, json=payload, headers=headers)
+            response = await client.request(
+                method, url, json=json_body, params=params, headers=headers,
+            )
     except httpx.TimeoutException as exc:
         raise TTSError("TTS 请求超时") from exc
+    except httpx.InvalidURL as exc:
+        raise TTSError("TTS 服务地址无效") from exc
     except httpx.HTTPError as exc:
         raise TTSError(f"TTS 服务连接失败（{type(exc).__name__}）") from exc
+    except UnicodeError as exc:
+        raise TTSError("TTS 请求头包含无法编码的字符") from exc
     _raise_for_status(response)
     return response
+
+
+async def _post_json(
+    url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: float,
+) -> httpx.Response:
+    return await _send_request("POST", url, headers, timeout, json_body=payload)
 
 
 def _json_body(response: httpx.Response) -> Dict[str, Any]:
@@ -465,10 +528,153 @@ async def _synthesize_gpt_sovits(params: Dict[str, Any], text: str, style: str, 
     return _build_audio(response.content)
 
 
+# ---------------------------------------------------------------------------
+# 自定义请求格式
+# ---------------------------------------------------------------------------
+
+def _render_template(template: str, values: Dict[str, str], *, url_encode: bool = False) -> str:
+    """替换 ``{{name}}`` 占位符；未知占位符原样保留。"""
+    def repl(match: "re.Match[str]") -> str:
+        value = values.get(match.group(1))
+        if value is None:
+            return match.group(0)
+        return quote(value, safe="") if url_encode else value
+
+    return _PLACEHOLDER_RE.sub(repl, template)
+
+
+def _render_node(node: Any, values: Dict[str, str]) -> Any:
+    """递归替换 JSON 里的字符串值。先解析再替换，文本里的引号 / 换行不会破坏结构。"""
+    if isinstance(node, str):
+        return _render_template(node, values)
+    if isinstance(node, list):
+        return [_render_node(item, values) for item in node]
+    if isinstance(node, dict):
+        return {key: _render_node(value, values) for key, value in node.items()}
+    return node
+
+
+def _parse_json_template(raw: Any, label: str, *, expect_object: bool = False) -> Any:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        node = json.loads(text)
+    except ValueError as exc:
+        raise TTSError(f"自定义{label}不是合法的 JSON") from exc
+    if expect_object and not isinstance(node, dict):
+        raise TTSError(f"自定义{label}必须是 JSON 对象")
+    return node
+
+
+def validate_custom_section(section: Dict[str, Any]) -> None:
+    """校验自定义供应商的模板，不合法抛 ``TTSError``。未填地址视为尚未配置，不校验。"""
+    url = str(section.get("api_url") or "").strip()
+    if not url:
+        return
+    sample = {name: "x" for name in CUSTOM_PLACEHOLDERS}
+    _require_http_url(_render_template(url, sample, url_encode=True), strip_slash=False)
+    method = str(section.get("method") or "POST").upper()
+    headers = str(section.get("headers") or "")
+    body = str(section.get("body") or "")
+    _parse_json_template(headers, "请求头", expect_object=True)
+    _parse_json_template(body, "请求体", expect_object=(method == "GET"))
+    for name in _PLACEHOLDER_RE.findall(" ".join((url, headers, body))):
+        if name not in CUSTOM_PLACEHOLDERS:
+            available = "、".join("{{%s}}" % n for n in CUSTOM_PLACEHOLDERS)
+            raise TTSError("未知占位符 {{%s}}，可用：%s" % (name, available))
+    if not _TEXT_PLACEHOLDER_RE.search(url + "\n" + body):
+        raise TTSError("请求地址或请求体中必须包含 {{text}} 占位符")
+    if section.get("response_type") != "binary" and not str(section.get("response_path") or "").strip():
+        raise TTSError("响应类型为 base64 / url 时必须填写响应字段路径")
+
+
+def _extract_by_path(body: Any, path: str) -> Any:
+    """按 ``a.b.0.c`` 或 ``a.b[0].c`` 取 JSON 里的值，找不到返回 ``None``。"""
+    normalized = re.sub(r"\[(\d+)\]", r".\1", path.strip()).lstrip("$").lstrip(".")
+    node = body
+    for part in filter(None, normalized.split(".")):
+        if isinstance(node, list):
+            try:
+                node = node[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif isinstance(node, dict):
+            if part not in node:
+                return None
+            node = node[part]
+        else:
+            return None
+    return node
+
+
+def _build_custom_audio(data: bytes, hint: str = "") -> SynthesizedAudio:
+    if data[:4] in (b"OggS", b"fLaC") or data[4:8] == b"ftyp":
+        raise TTSError("暂不支持该音频格式，请让接口返回 wav 或 mp3")
+    return _build_audio(data, hint)
+
+
+async def _synthesize_custom(params: Dict[str, Any], text: str, style: str, timeout: float) -> SynthesizedAudio:
+    values = {
+        "text": text,
+        "voice": str(params.get("voice") or ""),
+        "style": style,
+        "model": str(params.get("model") or ""),
+        "api_key": str(params.get("api_key") or ""),
+    }
+    method = "GET" if str(params.get("method") or "").upper() == "GET" else "POST"
+    url = _require_http_url(
+        _render_template(str(params.get("api_url") or ""), values, url_encode=True),
+        strip_slash=False,
+    )
+
+    headers_node = _parse_json_template(params.get("headers"), "请求头", expect_object=True)
+    headers = {
+        str(key): value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        for key, value in (_render_node(headers_node, values) or {}).items()
+        if value is not None
+    }
+    body_node = _parse_json_template(params.get("body"), "请求体", expect_object=(method == "GET"))
+    rendered = _render_node(body_node, values) if body_node is not None else None
+
+    if method == "GET":
+        query = {
+            key: value if isinstance(value, (str, int, float, bool)) else json.dumps(value, ensure_ascii=False)
+            for key, value in (rendered or {}).items()
+            if value is not None
+        }
+        response = await _send_request("GET", url, headers, timeout, params=query or None)
+    else:
+        response = await _send_request("POST", url, headers, timeout, json_body=rendered)
+
+    response_type = str(params.get("response_type") or "binary")
+    if response_type == "binary":
+        content_type = response.headers.get("content-type", "")
+        data = response.content
+        if "json" in content_type.lower() or data.lstrip()[:1] in (b"{", b"["):
+            raise TTSError("TTS 返回的是 JSON 而不是音频，请把响应类型改为 base64 或 url 并填写字段路径")
+        return _build_custom_audio(data, content_type)
+
+    path = str(params.get("response_path") or "").strip()
+    if not path:
+        raise TTSError("自定义 TTS 未配置响应字段路径")
+    value = _extract_by_path(_json_body(response), path)
+    if not isinstance(value, str) or not value.strip():
+        raise TTSError(f"TTS 响应中找不到字段 {path[:60]}")
+    value = value.strip()
+    if response_type == "url":
+        data, hint = await _download_audio(value, timeout)
+        return _build_custom_audio(data, hint)
+    if value.startswith("data:") and "," in value:  # data URI
+        value = value.split(",", 1)[1]
+    return _build_custom_audio(_decode_b64_audio(value))
+
+
 _ADAPTERS = {
     "mimo": _synthesize_mimo,
     "qwen": _synthesize_qwen,
     "gpt_sovits": _synthesize_gpt_sovits,
+    "custom": _synthesize_custom,
 }
 
 

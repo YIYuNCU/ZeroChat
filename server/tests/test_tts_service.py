@@ -270,6 +270,213 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
+class CustomProviderConfigTests(unittest.TestCase):
+    def _section(self, **overrides) -> dict:
+        section = dict(tts_service.default_tts_config()["custom"])
+        section.update(api_url="https://tts.example/v1/speech", **overrides)
+        return section
+
+    def test_default_template_is_valid_and_not_ready_without_url(self):
+        cfg = tts_service.default_tts_config()
+        tts_service.validate_custom_section(cfg["custom"])  # 未填地址：跳过
+        tts_service.validate_custom_section(self._section())
+        self.assertFalse(tts_service.public_tts_config(cfg)["configured"])
+        cfg.update(provider="custom")
+        cfg["custom"]["api_url"] = "https://tts.example/v1/speech"
+        self.assertTrue(tts_service.public_tts_config(cfg)["configured"])
+
+    def test_sanitize_normalizes_enums_and_keeps_templates(self):
+        cfg = tts_service.sanitize_tts_config({
+            "custom": {"method": "get", "response_type": "BASE64", "body": '{"t": "{{text}}"}' + " " * 5000},
+        })
+        self.assertEqual(cfg["custom"]["method"], "GET")
+        self.assertEqual(cfg["custom"]["response_type"], "base64")
+        self.assertEqual(cfg["custom"]["body"], '{"t": "{{text}}"}')
+        bad = tts_service.sanitize_tts_config({"custom": {"method": "DELETE", "response_type": "zip"}})
+        self.assertEqual(bad["custom"]["method"], "POST")
+        self.assertEqual(bad["custom"]["response_type"], "binary")
+
+    def test_validation_errors(self):
+        cases = {
+            "headers": ("{not json", "请求头"),
+            "body": ("[1, 2]{{text}}", "请求体"),
+        }
+        for key, (value, label) in cases.items():
+            with self.assertRaises(tts_service.TTSError) as ctx:
+                tts_service.validate_custom_section(self._section(**{key: value}))
+            self.assertIn(label, str(ctx.exception))
+        with self.assertRaises(tts_service.TTSError) as ctx:
+            tts_service.validate_custom_section(self._section(body='{"t": "{{txt}}"}'))
+        self.assertIn("{{txt}}", str(ctx.exception))
+        with self.assertRaises(tts_service.TTSError):
+            tts_service.validate_custom_section(self._section(body='{"t": "hi"}'))  # 缺 {{text}}
+        with self.assertRaises(tts_service.TTSError):
+            tts_service.validate_custom_section(self._section(response_type="url", response_path=""))
+        with self.assertRaises(tts_service.TTSError):
+            tts_service.validate_custom_section(self._section(method="GET", body='["{{text}}"]'))
+
+    def test_update_rejects_invalid_custom_section_and_keeps_key(self):
+        stored = tts_service.default_tts_config()
+        stored["custom"]["api_key"] = "sk-custom-0123456789"
+        saved = {}
+
+        def fake_save(values):
+            saved.update(values)
+            return True
+
+        with patch("services.tts_service.settings_service.load_settings", return_value={"tts_config": stored}), \
+                patch("services.tts_service.settings_service.save_settings", side_effect=fake_save):
+            with self.assertRaises(tts_service.TTSError):
+                tts_service.update_tts_config({"custom": {"api_url": "https://x.example", "body": "oops"}})
+            self.assertEqual(saved, {})
+            tts_service.update_tts_config({"custom": {"api_url": "https://x.example/tts", "api_key": ""}})
+            self.assertEqual(saved["tts_config"]["custom"]["api_key"], "sk-custom-0123456789")
+            self.assertEqual(saved["tts_config"]["custom"]["api_url"], "https://x.example/tts")
+
+    def test_role_overrides_apply_to_custom(self):
+        cfg = tts_service.default_tts_config()
+        cfg.update(enabled=True, provider="custom")
+        cfg["custom"].update(api_url="https://x.example/tts", voice="global")
+        role = {"id": "r1", "metadata": {"voice": {"voice": "role-voice", "ref_audio_path": "/ignored.wav"}}}
+        with patch("services.tts_service.settings_service.load_settings", return_value={"tts_config": cfg}):
+            resolved = tts_service.resolve_tts_config(role)
+        self.assertEqual(resolved["params"]["voice"], "role-voice")
+        self.assertTrue(resolved["configured"])
+
+
+class CustomAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def _params(self, **overrides) -> dict:
+        params = {
+            "api_url": "https://tts.example/v1/speech",
+            "api_key": "ck-123", "model": "m-1", "voice": "alloy",
+        }
+        params.update(overrides)
+        return params
+
+    async def test_default_template_posts_json_and_reads_binary(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["url"] = str(request.url)
+            seen["auth"] = request.headers.get("authorization")
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, content=_wav_bytes(), headers={"content-type": "audio/wav"})
+
+        with patch("services.tts_service._make_client", _client_factory(handler)):
+            audio = await tts_service.synthesize(_resolved("custom", **self._params()), '他说"你好"\n再见', "温柔")
+        self.assertEqual(seen["method"], "POST")
+        self.assertEqual(seen["url"], "https://tts.example/v1/speech")
+        self.assertEqual(seen["auth"], "Bearer ck-123")
+        # 引号 / 换行经 JSON 解析后再替换，结构不会被破坏。
+        self.assertEqual(seen["body"], {"model": "m-1", "input": '他说"你好"\n再见', "voice": "alloy"})
+        self.assertEqual(audio.ext, ".wav")
+
+    async def test_custom_headers_style_placeholder_and_nested_body(self):
+        seen = {}
+
+        def handler(request):
+            seen["key"] = request.headers.get("x-api-key")
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, content=_wav_bytes())
+
+        params = self._params(
+            headers='{"X-Api-Key": "{{api_key}}"}',
+            body='{"payload": {"items": ["{{text}}", "{{style}}"], "speed": 1.2, "stream": false}}',
+        )
+        with patch("services.tts_service._make_client", _client_factory(handler)):
+            await tts_service.synthesize(_resolved("custom", **params), "嗨", "开心")
+        self.assertEqual(seen["key"], "ck-123")
+        self.assertEqual(seen["body"], {"payload": {"items": ["嗨", "开心"], "speed": 1.2, "stream": False}})
+
+    async def test_get_encodes_url_and_query(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["url"] = request.url
+            seen["body"] = request.content
+            return httpx.Response(200, content=_wav_bytes())
+
+        params = self._params(
+            method="GET", api_url="https://tts.example/say/{{voice}}?q={{text}}",
+            headers="", body='{"fmt": "wav", "lang": "{{style}}"}',
+        )
+        with patch("services.tts_service._make_client", _client_factory(handler)):
+            await tts_service.synthesize(_resolved("custom", **params), "你好 & 世界", "zh")
+        self.assertEqual(seen["method"], "GET")
+        self.assertEqual(seen["url"].params["q"], "你好 & 世界")
+        self.assertEqual(seen["url"].params["fmt"], "wav")
+        self.assertEqual(seen["url"].params["lang"], "zh")
+        self.assertEqual(seen["url"].path, "/say/alloy")
+        self.assertEqual(seen["body"], b"")
+
+    async def test_base64_response_with_path_and_data_uri(self):
+        data = base64.b64encode(_wav_bytes()).decode()
+        for value in (data, f"data:audio/wav;base64,{data}"):
+            def handler(request, value=value):
+                return httpx.Response(200, json={"result": [{"audio": value}]})
+
+            params = self._params(response_type="base64", response_path="result[0].audio")
+            with patch("services.tts_service._make_client", _client_factory(handler)):
+                audio = await tts_service.synthesize(_resolved("custom", **params), "你好", "")
+            self.assertAlmostEqual(audio.duration_ms, 500, delta=5)
+
+    async def test_url_response_downloads_audio_and_blocks_unsafe_url(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((request.method, str(request.url)))
+            if request.method == "POST":
+                return httpx.Response(200, json={"data": {"url": "https://cdn.example/a.wav"}})
+            return httpx.Response(200, content=_wav_bytes())
+
+        params = self._params(response_type="url", response_path="data.url")
+        with patch("services.tts_service._make_client", _client_factory(handler)), \
+                patch("services.tts_service.is_safe_external_url", return_value=True):
+            await tts_service.synthesize(_resolved("custom", **params), "你好", "")
+        self.assertEqual(calls[1], ("GET", "https://cdn.example/a.wav"))
+
+        with patch("services.tts_service._make_client", _client_factory(handler)), \
+                patch("services.tts_service.is_safe_external_url", return_value=False):
+            with self.assertRaises(tts_service.TTSError):
+                await tts_service.synthesize(_resolved("custom", **params), "你好", "")
+
+    async def test_response_errors_are_friendly(self):
+        def json_handler(request):
+            return httpx.Response(200, json={"code": 0})
+
+        with patch("services.tts_service._make_client", _client_factory(json_handler)):
+            with self.assertRaises(tts_service.TTSError) as ctx:  # 声明 binary 却返回 JSON
+                await tts_service.synthesize(_resolved("custom", **self._params()), "你好", "")
+            self.assertIn("JSON", str(ctx.exception))
+            missing = self._params(response_type="base64", response_path="data.audio")
+            with self.assertRaises(tts_service.TTSError) as ctx:
+                await tts_service.synthesize(_resolved("custom", **missing), "你好", "")
+            self.assertIn("data.audio", str(ctx.exception))
+
+        def ogg_handler(request):
+            return httpx.Response(200, content=b"OggS" + b"\x00" * 64)
+
+        with patch("services.tts_service._make_client", _client_factory(ogg_handler)):
+            with self.assertRaises(tts_service.TTSError):
+                await tts_service.synthesize(_resolved("custom", **self._params()), "你好", "")
+
+        def denied(request):
+            return httpx.Response(403, json={"detail": "nope"})
+
+        with patch("services.tts_service._make_client", _client_factory(denied)):
+            with self.assertRaises(tts_service.TTSError) as ctx:
+                await tts_service.synthesize(_resolved("custom", **self._params(api_key="ck-secret")), "你好", "")
+        self.assertNotIn("ck-secret", str(ctx.exception))
+
+    async def test_invalid_templates_raise_tts_error(self):
+        for bad in (self._params(headers="{oops"), self._params(body="[1]", method="GET"),
+                    self._params(api_url="ftp://x.example")):
+            with self.assertRaises(tts_service.TTSError):
+                await tts_service.synthesize(_resolved("custom", **bad), "你好", "")
+
+
 class StorageTests(unittest.TestCase):
     def setUp(self):
         self.root = _make_temp_root()

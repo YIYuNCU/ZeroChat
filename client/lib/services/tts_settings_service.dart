@@ -23,12 +23,27 @@ class TtsProviderField {
   /// 数值字段：提交时按数字发送，无法解析则不提交。
   final bool numeric;
 
+  /// 多行文本字段（如 JSON 模板），页面用等宽字体的多行输入框展示。
+  final bool multiline;
+
+  /// 固定选项（下拉选择）；为空表示自由输入。取值即提交给服务端的值。
+  final List<String> options;
+
+  /// 条件显示：仅当同一供应商的 `hideWhenKey` 字段值等于 `hideWhenValue` 时隐藏。
+  /// 隐藏只影响展示，字段值仍会随表单一起提交。
+  final String? hideWhenKey;
+  final String? hideWhenValue;
+
   const TtsProviderField(
     this.key,
     this.label,
     this.hint, {
     this.secret = false,
     this.numeric = false,
+    this.multiline = false,
+    this.options = const [],
+    this.hideWhenKey,
+    this.hideWhenValue,
   });
 }
 
@@ -38,7 +53,10 @@ class TtsProviderSpec {
   final String label;
   final List<TtsProviderField> fields;
 
-  const TtsProviderSpec(this.id, this.label, this.fields);
+  /// 显示在该供应商参数下方的说明文字（可选）。
+  final String help;
+
+  const TtsProviderSpec(this.id, this.label, this.fields, {this.help = ''});
 }
 
 /// 支持的 TTS 供应商；顺序即页面展示顺序。
@@ -67,13 +85,67 @@ const List<TtsProviderSpec> ttsProviderSpecs = [
     TtsProviderField('text_split_method', '切分方式', 'cut5'),
     TtsProviderField('speed_factor', '语速', '1.0', numeric: true),
   ]),
+  TtsProviderSpec(
+    'custom',
+    '自定义',
+    [
+      TtsProviderField(
+        'api_url',
+        '接口地址',
+        'https://example.com/v1/audio/speech',
+      ),
+      TtsProviderField('api_key', 'API Key', '', secret: true),
+      TtsProviderField('method', '请求方法', '', options: ['POST', 'GET']),
+      TtsProviderField(
+        'headers',
+        '请求头',
+        '{"Authorization": "Bearer {{api_key}}"}',
+        multiline: true,
+      ),
+      TtsProviderField(
+        'body',
+        '请求体',
+        '{"input": "{{text}}", "voice": "{{voice}}"}',
+        multiline: true,
+      ),
+      TtsProviderField('model', '模型', '对应 {{model}}（可选）'),
+      TtsProviderField('voice', '默认音色', '对应 {{voice}}（可选）'),
+      TtsProviderField('style', '默认风格', '对应 {{style}}（可选）'),
+      TtsProviderField(
+        'response_type',
+        '响应类型',
+        '',
+        options: ['binary', 'base64', 'url'],
+      ),
+      TtsProviderField(
+        'response_path',
+        '响应字段',
+        '例如 data.audio 或 choices[0].audio',
+        hideWhenKey: 'response_type',
+        hideWhenValue: 'binary',
+      ),
+    ],
+    help:
+        '请求头、请求体为 JSON 模板，可用占位符：{{text}}（必须）、{{voice}}、'
+        '{{style}}、{{model}}、{{api_key}}；接口地址里也可使用，会自动 URL 编码。'
+        'GET 时请求体的键值会作为查询参数。响应类型：binary 直接返回音频；'
+        'base64 / url 表示音频在 JSON 的「响应字段」里。仅支持 wav / mp3。'
+        '建议用 {{api_key}} 引用密钥，不要把密钥直接写进请求头。',
+  ),
 ];
+
+/// 下拉选项的展示名；未登记的选项直接显示原值。
+const Map<String, String> ttsOptionLabels = {
+  'binary': 'binary（直接返回音频）',
+  'base64': 'base64（JSON 内的 base64）',
+  'url': 'url（JSON 内的音频链接）',
+};
 
 /// 后端返回的 TTS 全局设置（`settings_tts_get`）。
 class TtsSettings {
   final bool enabled;
 
-  /// 当前使用的供应商 id：`mimo` / `qwen` / `gpt_sovits`。
+  /// 当前使用的供应商 id：`mimo` / `qwen` / `gpt_sovits` / `custom`。
   final String provider;
   final int timeoutSeconds;
   final int maxChars;

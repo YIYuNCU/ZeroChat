@@ -4,11 +4,14 @@ import 'dart:convert';
 import '../models/ai_model_profile.dart';
 import '../models/onebot_config.dart';
 import '../models/role.dart';
+import '../models/role_prompt_overrides.dart';
+import '../models/role_voice_config.dart';
 import '../models/stats_config.dart';
 import '../services/secure_backend_client.dart';
 import '../services/settings_service.dart';
 import '../widgets/role_prompt_overrides_section.dart';
 import '../widgets/role_voice_section.dart';
+import '../widgets/settings_group.dart';
 
 /// 角色参数设置页面
 /// 调整 AI 角色的参数配置
@@ -250,8 +253,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           const SizedBox(height: 10),
 
           // 基本信息
-          _buildSection(
+          SettingsGroup(
             title: '基本信息',
+            icon: Icons.person_outline,
+            initiallyExpanded: true,
             children: [
               _buildTextField(label: '角色名称', controller: _nameController),
               const Divider(height: 1, indent: 16),
@@ -265,122 +270,95 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
 
           const SizedBox(height: 10),
 
-          // 结构化人设
-          _buildSection(
-            title: '结构化人设',
-            children: [
-              _buildPersonaField(
-                label: '身份与背景',
-                controller: _identityController,
-                hintText: '角色是谁、来历与背景',
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildPersonaField(
-                label: '性格与价值观',
-                controller: _personalityController,
-                hintText: '性格特点、价值观与行为倾向',
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildPersonaField(
-                label: '与用户的关系',
-                controller: _relationshipController,
-                hintText: '与用户的关系及相处方式',
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildPersonaField(
-                label: '当前情境',
-                controller: _scenarioController,
-                hintText: '对话发生的场景与处境',
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildPersonaField(
-                label: '说话方式',
-                controller: _speakingStyleController,
-                hintText: '语气、口癖、措辞习惯',
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildPersonaField(
-                label: '禁区',
-                controller: _boundariesController,
-                hintText: '角色不会做或不会说的内容',
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildExampleEditor(),
-            ],
-          ),
-
-          const SizedBox(height: 10),
-
-          // 补充设定（原系统提示词）
-          _buildSection(
-            title: '补充设定（自由文本）',
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: TextField(
-                  controller: _promptController,
-                  maxLines: 5,
-                  decoration: const InputDecoration(
-                    hintText: '以上结构化字段之外的补充内容',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ),
-            ],
-          ),
+          // 人设：结构化人设 + 补充设定（自由文本）
+          _buildPersonaGroup(),
 
           const SizedBox(height: 10),
 
           // 按角色的提示词覆盖（直接编辑 md 全文）
-          RolePromptOverridesSection(
-            roleName: widget.role.name,
-            metadata: _metadata,
-            onChanged: (metadata) => setState(() => _metadata = metadata),
+          SettingsGroup(
+            title: '提示词',
+            icon: Icons.edit_note,
+            subtitle: _promptOverridesSummary(),
+            children: [
+              RolePromptOverridesSection(
+                showHeader: false,
+                roleName: widget.role.name,
+                metadata: _metadata,
+                onChanged: (metadata) => setState(() => _metadata = metadata),
+              ),
+            ],
           ),
 
           const SizedBox(height: 10),
 
           // 按角色的语音（TTS）配置：开关、音色、风格
-          RoleVoiceSection(
-            roleName: widget.role.name,
-            metadata: _metadata,
-            onChanged: (metadata) => setState(() => _metadata = metadata),
+          SettingsGroup(
+            title: '语音',
+            icon: Icons.record_voice_over_outlined,
+            subtitle: _voiceSummary(),
+            children: [
+              RoleVoiceSection(
+                showHeader: false,
+                roleName: widget.role.name,
+                metadata: _metadata,
+                onChanged: (metadata) => setState(() => _metadata = metadata),
+              ),
+            ],
           ),
 
           const SizedBox(height: 10),
 
           // 后端角色配置
-          _buildSection(
-            title: '后端角色配置',
-            children: [
-              _buildModelProfileSelector(),
-              if (!_hasSelectedModelProfile) ...[
-                const Divider(height: 1, indent: 16),
-                _buildAiModelField(),
+          ListenableBuilder(
+            listenable: Listenable.merge([
+              _aiModelController,
+              _aiTemperatureController,
+            ]),
+            builder: (context, _) => SettingsGroup(
+              title: 'AI 模型',
+              icon: Icons.smart_toy_outlined,
+              subtitle: _modelSummary(),
+              children: [
+                _buildModelProfileSelector(),
+                if (!_hasSelectedModelProfile) ...[
+                  const Divider(height: 1, indent: 16),
+                  _buildAiModelField(),
+                  const Divider(height: 1, indent: 16),
+                  _buildTextField(
+                    label: 'API地址',
+                    controller: _aiApiUrlController,
+                  ),
+                  const Divider(height: 1, indent: 16),
+                  _buildTextField(
+                    label: '密钥',
+                    controller: _aiApiKeyController,
+                    obscureText: true,
+                  ),
+                ],
                 const Divider(height: 1, indent: 16),
                 _buildTextField(
-                  label: 'API地址',
-                  controller: _aiApiUrlController,
-                ),
-                const Divider(height: 1, indent: 16),
-                _buildTextField(
-                  label: '密钥',
-                  controller: _aiApiKeyController,
-                  obscureText: true,
+                  label: '温度',
+                  controller: _aiTemperatureController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+                  ],
                 ),
               ],
-              const Divider(height: 1, indent: 16),
-              _buildTextField(
-                label: '温度',
-                controller: _aiTemperatureController,
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                ),
-                inputFormatters: [
-                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
-                ],
-              ),
-              const Divider(height: 1, indent: 16),
+            ),
+          ),
+
+          const SizedBox(height: 10),
+
+          // 性别与周期
+          SettingsGroup(
+            title: '性别与周期',
+            icon: Icons.wc,
+            subtitle: '性别 $_gender',
+            children: [
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16,
@@ -441,8 +419,11 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           const SizedBox(height: 10),
 
           // 上下文设置
-          _buildSection(
-            title: '上下文设置',
+          SettingsGroup(
+            title: '上下文与搜索',
+            icon: Icons.forum_outlined,
+            subtitle:
+                '$_maxContextRounds 轮 · $_maxContextLength 字符 · 联网搜索${_allowWebSearch ? "开" : "关"}',
             children: [
               Padding(
                 padding: const EdgeInsets.all(16),
@@ -570,15 +551,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                   ],
                 ),
               ),
-            ],
-          ),
-
-          const SizedBox(height: 10),
-
-          // 其他设置
-          _buildSection(
-            title: '其他设置',
-            children: [
+              const Divider(height: 1, indent: 16),
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16,
@@ -615,8 +588,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           const SizedBox(height: 10),
 
           // OneBot 接口
-          _buildSection(
-            title: 'OneBot V11 接口',
+          SettingsGroup(
+            title: 'OneBot 接口',
+            icon: Icons.hub_outlined,
+            subtitle: _onebotEnabled ? '已启用' : '未启用',
             children: [
               Padding(
                 padding: const EdgeInsets.symmetric(
@@ -783,8 +758,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           const SizedBox(height: 10),
 
           // 消息显示设置（对话始终显示）
-          _buildSection(
+          SettingsGroup(
             title: '消息显示',
+            icon: Icons.visibility_outlined,
+            subtitle: '已显示 $_shownMessagePartCount/7 项',
             children: [
               _buildSwitchRow(
                 title: '显示动作',
@@ -840,8 +817,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           const SizedBox(height: 10),
 
           // 数值系统
-          _buildSection(
+          SettingsGroup(
             title: '数值系统',
+            icon: Icons.insights_outlined,
+            subtitle: _statsEnabled ? '已启用 · ${_statItems.length} 项' : '未启用',
             children: [
               _buildSwitchRow(
                 title: '启用数值',
@@ -880,8 +859,10 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
           const SizedBox(height: 10),
 
           // 状态管理（归档）
-          _buildSection(
+          SettingsGroup(
             title: '状态管理',
+            icon: Icons.archive_outlined,
+            subtitle: _archived ? '已归档' : '正常',
             children: [
               _buildSwitchRow(
                 title: '归档角色',
@@ -917,6 +898,139 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
       ),
     );
   }
+
+  /// 人设分组：结构化人设 + 补充设定（自由文本）。
+  /// 摘要依赖输入框内容，用 ListenableBuilder 跟随输入刷新。
+  Widget _buildPersonaGroup() {
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        _identityController,
+        _personalityController,
+        _relationshipController,
+        _scenarioController,
+        _speakingStyleController,
+        _boundariesController,
+        _promptController,
+      ]),
+      builder: (context, _) => SettingsGroup(
+        title: '人设',
+        icon: Icons.badge_outlined,
+        subtitle: _personaSummary(),
+        children: [
+          _buildPersonaField(
+            label: '身份与背景',
+            controller: _identityController,
+            hintText: '角色是谁、来历与背景',
+          ),
+          const Divider(height: 1, indent: 16),
+          _buildPersonaField(
+            label: '性格与价值观',
+            controller: _personalityController,
+            hintText: '性格特点、价值观与行为倾向',
+          ),
+          const Divider(height: 1, indent: 16),
+          _buildPersonaField(
+            label: '与用户的关系',
+            controller: _relationshipController,
+            hintText: '与用户的关系及相处方式',
+          ),
+          const Divider(height: 1, indent: 16),
+          _buildPersonaField(
+            label: '当前情境',
+            controller: _scenarioController,
+            hintText: '对话发生的场景与处境',
+          ),
+          const Divider(height: 1, indent: 16),
+          _buildPersonaField(
+            label: '说话方式',
+            controller: _speakingStyleController,
+            hintText: '语气、口癖、措辞习惯',
+          ),
+          const Divider(height: 1, indent: 16),
+          _buildPersonaField(
+            label: '禁区',
+            controller: _boundariesController,
+            hintText: '角色不会做或不会说的内容',
+          ),
+          const Divider(height: 1, indent: 16),
+          _buildExampleEditor(),
+          const Divider(height: 1, indent: 16),
+          // 补充设定（原系统提示词）
+          const Padding(
+            padding: EdgeInsets.only(left: 16, top: 12),
+            child: Text(
+              '补充设定（自由文本）',
+              style: TextStyle(fontSize: 13, color: Color(0xFF888888)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: TextField(
+              controller: _promptController,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                hintText: '以上结构化字段之外的补充内容',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _personaSummary() {
+    final filled = [
+      _identityController,
+      _personalityController,
+      _relationshipController,
+      _scenarioController,
+      _speakingStyleController,
+      _boundariesController,
+    ].where((c) => c.text.trim().isNotEmpty).length;
+    final extras = <String>[
+      if (_examples.isNotEmpty) '示例 ${_examples.length} 组',
+      if (_promptController.text.trim().isNotEmpty) '含补充设定',
+    ];
+    return ['已填 $filled/6 项', ...extras].join(' · ');
+  }
+
+  String _promptOverridesSummary() {
+    final count = readRolePromptOverrides(_metadata).length;
+    return count > 0 ? '已自定义 $count 项' : '沿用全局提示词';
+  }
+
+  String _voiceSummary() {
+    final config = readRoleVoiceConfig(_metadata);
+    if (!config.enabled) return '已关闭';
+    return config.voice.isEmpty ? '允许发送语音' : '允许发送语音 · 音色 ${config.voice}';
+  }
+
+  String _modelSummary() {
+    final profileId = _selectedModelProfileId;
+    String? profileName;
+    if (_hasSelectedModelProfile) {
+      for (final profile in SettingsService.instance.modelProfiles) {
+        if (profile.id == profileId) profileName = profile.name;
+      }
+    }
+    final name = profileName ?? _aiModelController.text.trim();
+    final temperature = _aiTemperatureController.text.trim();
+    return [
+      if (name.isNotEmpty) name,
+      if (temperature.isNotEmpty) '温度 $temperature',
+    ].join(' · ');
+  }
+
+  int get _shownMessagePartCount => [
+    _showAction,
+    _showPsychology,
+    _showStats,
+    _showSound,
+    _showNoReply,
+    _showToolCalls,
+    _showReasoning,
+  ].where((shown) => shown).length;
 
   Widget _buildSwitchRow({
     required String title,
@@ -1710,8 +1824,8 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         allowedUsers: _parseIntList(_onebotAllowedUsersController.text),
         allowedGroups: _parseIntList(_onebotAllowedGroupsController.text),
         waitSeconds: (int.tryParse(_onebotWaitSecondsController.text.trim()) ??
-                OneBotConfig.defaultWaitSeconds)
-            .clamp(0, OneBotConfig.maxWaitSeconds),
+                    OneBotConfig.defaultWaitSeconds)
+                .clamp(0, OneBotConfig.maxWaitSeconds),
         deliverProactive: _onebotDeliverProactive,
       ),
       statsConfig: StatsConfig(

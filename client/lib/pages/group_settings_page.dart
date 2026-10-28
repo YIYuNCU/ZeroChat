@@ -6,6 +6,7 @@ import '../services/group_chat_service.dart';
 import '../services/role_service.dart';
 import '../services/chat_list_service.dart';
 import '../core/message_store.dart';
+import '../widgets/settings_group.dart';
 
 /// 群聊设置页面
 /// 管理群成员、群名称、解散群聊
@@ -114,94 +115,112 @@ class _GroupSettingsPageState extends State<GroupSettingsPage> {
           const SizedBox(height: 10),
 
           // 聊天记录和记忆
-          _buildSection([
-            _buildItem(
-              title: '聊天记录',
-              trailing: Text(
-                '${MessageStore.instance.getMessageCount(widget.groupId)} 条',
-                style: const TextStyle(color: Color(0xFF888888)),
+          SettingsGroup(
+            title: '聊天记录与记忆',
+            subtitle:
+                '${MessageStore.instance.getMessageCount(widget.groupId)} 条记录 · ${_group!.coreMemory.length} 条记忆',
+            icon: Icons.history,
+            children: [
+              _buildItem(
+                title: '聊天记录',
+                trailing: Text(
+                  '${MessageStore.instance.getMessageCount(widget.groupId)} 条',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _showChatHistory,
               ),
-              onTap: _showChatHistory,
-            ),
-            const Divider(height: 1, indent: 16),
-            _buildItem(
-              title: '核心记忆总结轮数',
-              trailing: Text(
-                '${_group!.summaryEveryNRounds} 轮',
-                style: const TextStyle(color: Color(0xFF888888)),
+              const Divider(height: 1, indent: 16),
+              _buildItem(
+                title: '核心记忆总结轮数',
+                trailing: Text(
+                  '${_group!.summaryEveryNRounds} 轮',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _editSummaryRounds,
               ),
-              onTap: _editSummaryRounds,
-            ),
-            const Divider(height: 1, indent: 16),
-            _buildItem(
-              title: '核心记忆',
-              trailing: Text(
-                '${_group!.coreMemory.length} 条',
-                style: const TextStyle(color: Color(0xFF888888)),
+              const Divider(height: 1, indent: 16),
+              _buildItem(
+                title: '核心记忆',
+                trailing: Text(
+                  '${_group!.coreMemory.length} 条',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _showCoreMemory,
               ),
-              onTap: _showCoreMemory,
-            ),
-          ]),
+            ],
+          ),
 
           const SizedBox(height: 10),
 
           // 防刷屏设置
-          _buildSection([
-            _buildItem(
-              title: 'AI 回复冷却',
-              trailing: Text(
-                '${_group!.cooldownSeconds} 秒',
-                style: const TextStyle(color: Color(0xFF888888)),
+          SettingsGroup(
+            title: '防刷屏',
+            subtitle:
+                '冷却 ${_group!.cooldownSeconds} 秒 · 每分钟最多 ${_group!.maxRepliesPerMinute} 条',
+            icon: Icons.speed,
+            children: [
+              _buildItem(
+                title: 'AI 回复冷却',
+                trailing: Text(
+                  '${_group!.cooldownSeconds} 秒',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _editCooldown,
               ),
-              onTap: _editCooldown,
-            ),
-            const Divider(height: 1, indent: 16),
-            _buildItem(
-              title: '每分钟最大回复',
-              trailing: Text(
-                '${_group!.maxRepliesPerMinute} 条',
-                style: const TextStyle(color: Color(0xFF888888)),
+              const Divider(height: 1, indent: 16),
+              _buildItem(
+                title: '每分钟最大回复',
+                trailing: Text(
+                  '${_group!.maxRepliesPerMinute} 条',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _editMaxReplies,
               ),
-              onTap: _editMaxReplies,
-            ),
-          ]),
+            ],
+          ),
 
           const SizedBox(height: 10),
 
           // AI 行为设置
-          _buildSection([
-            _buildItem(
-              title: 'AI 回复概率',
-              trailing: Text(
-                '${(_group!.aiReplyProbability * 100).toInt()}%',
-                style: const TextStyle(color: Color(0xFF888888)),
+          SettingsGroup(
+            title: 'AI 行为',
+            subtitle:
+                '回复概率 ${(_group!.aiReplyProbability * 100).toInt()}% · 互相回复${_group!.allowAiToAiInteraction ? '开' : '关'}',
+            icon: Icons.smart_toy_outlined,
+            children: [
+              _buildItem(
+                title: 'AI 回复概率',
+                trailing: Text(
+                  '${(_group!.aiReplyProbability * 100).toInt()}%',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _editAiReplyProbability,
               ),
-              onTap: _editAiReplyProbability,
-            ),
-            const Divider(height: 1, indent: 16),
-            _buildItem(
-              title: 'AI 互相回复',
-              trailing: Switch(
-                value: _group!.allowAiToAiInteraction,
-                onChanged: (value) async {
-                  await GroupChatService.updateGroup(
-                    _group!.copyWith(allowAiToAiInteraction: value),
-                  );
-                  _loadGroup();
-                },
-                activeThumbColor: const Color(0xFF07C160),
+              const Divider(height: 1, indent: 16),
+              _buildItem(
+                title: 'AI 互相回复',
+                trailing: Switch(
+                  value: _group!.allowAiToAiInteraction,
+                  onChanged: (value) async {
+                    await GroupChatService.updateGroup(
+                      _group!.copyWith(allowAiToAiInteraction: value),
+                    );
+                    _loadGroup();
+                  },
+                  activeThumbColor: const Color(0xFF07C160),
+                ),
               ),
-            ),
-            const Divider(height: 1, indent: 16),
-            _buildItem(
-              title: '连续发言上限',
-              trailing: Text(
-                '${_group!.maxConsecutiveSpeaks} 次',
-                style: const TextStyle(color: Color(0xFF888888)),
+              const Divider(height: 1, indent: 16),
+              _buildItem(
+                title: '连续发言上限',
+                trailing: Text(
+                  '${_group!.maxConsecutiveSpeaks} 次',
+                  style: const TextStyle(color: Color(0xFF888888)),
+                ),
+                onTap: _editMaxConsecutiveSpeaks,
               ),
-              onTap: _editMaxConsecutiveSpeaks,
-            ),
-          ]),
+            ],
+          ),
 
           const SizedBox(height: 10),
 

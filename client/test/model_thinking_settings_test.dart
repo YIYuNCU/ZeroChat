@@ -74,6 +74,9 @@ void main() {
     await tester.pumpWidget(
       const MaterialApp(home: ModelSettingsPage(kind: ModelSettingsKind.chat)),
     );
+    // 思考设置收在默认收起的分组里，先展开。
+    await tester.tap(find.text('思考与推理'));
+    await tester.pumpAndSettle();
     expect(
       find.byWidgetPredicate(
         (widget) =>

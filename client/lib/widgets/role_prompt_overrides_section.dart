@@ -21,12 +21,16 @@ class RolePromptOverridesSection extends StatefulWidget {
   /// 提示词注册表加载函数；默认走 [SettingsService]，测试可注入。
   final PromptRegistryLoader? loadRegistry;
 
+  /// 是否显示顶部的灰色小标题；嵌在带标题的可折叠分组里时应关掉，避免重复。
+  final bool showHeader;
+
   const RolePromptOverridesSection({
     super.key,
     required this.roleName,
     required this.metadata,
     required this.onChanged,
     this.loadRegistry,
+    this.showHeader = true,
   });
 
   @override
@@ -155,13 +159,14 @@ class _RolePromptOverridesSectionState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Padding(
-          padding: EdgeInsets.only(left: 16, bottom: 8),
-          child: Text(
-            '提示词（仅此角色）',
-            style: TextStyle(fontSize: 13, color: Color(0xFF888888)),
+        if (widget.showHeader)
+          const Padding(
+            padding: EdgeInsets.only(left: 16, bottom: 8),
+            child: Text(
+              '提示词（仅此角色）',
+              style: TextStyle(fontSize: 13, color: Color(0xFF888888)),
+            ),
           ),
-        ),
         // 用 Material 而不是带颜色的 Container，ListTile 的水波纹才能正常绘制。
         Material(
           color: Colors.white,

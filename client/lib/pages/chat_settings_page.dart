@@ -12,6 +12,7 @@ import '../services/secure_websocket_client.dart';
 import '../core/message_store.dart';
 import '../widgets/countdown_interval_dialog.dart';
 import '../widgets/quiet_rule_editor.dart';
+import '../widgets/settings_group.dart';
 import '../widgets/smart_avatar_image.dart';
 import 'role_settings_page.dart';
 import 'task_manager_page.dart';
@@ -108,6 +109,10 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final messageCount = MessageStore.instance.getMessageCount(widget.chatId);
+    final pendingTaskCount = TaskService.getTasksForChat(
+      widget.chatId,
+    ).where((t) => !t.isCompleted).length;
     return Scaffold(
       backgroundColor: const Color(0xFFEDEDED),
       appBar: AppBar(
@@ -133,303 +138,7 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           const SizedBox(height: 10),
 
-          // 聊天背景
-          _buildSection([
-            _buildItem(
-              title: '聊天背景',
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _currentRole.chatBackgroundUrl.isNotEmpty ? '角色专属' : '跟随全局',
-                    style: const TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _showChatBackgroundOptions,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 聊天记录
-          _buildSection([
-            _buildItem(
-              title: '聊天记录',
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '${MessageStore.instance.getMessageCount(widget.chatId)} 条',
-                    style: const TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _showChatHistory,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 核心记忆
-          _buildSection([
-            _buildItem(
-              title: '核心记忆',
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '${_backendCoreMemory.length} 条',
-                    style: const TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _showCoreMemory,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 短期记忆（对话历史）
-          _buildSection([
-            _buildItem(
-              title: '短期记忆',
-              trailing: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '对话历史',
-                    style: TextStyle(color: Color(0xFF888888), fontSize: 15),
-                  ),
-                  SizedBox(width: 4),
-                  Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _showShortTermMemory,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 向量记忆（长期语义记忆）
-          _buildSection([
-            _buildItem(
-              title: '向量记忆',
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '$_vectorMemoryCount 条',
-                    style: const TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _showVectorMemoryOptions,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // Token 用量统计
-          _buildSection([
-            _buildItem(
-              title: 'Token 用量',
-              trailing: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '用量与缓存',
-                    style: TextStyle(color: Color(0xFF888888), fontSize: 15),
-                  ),
-                  SizedBox(width: 4),
-                  Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _showTokenUsage,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 主动消息配置
-          _buildSection([
-            _buildItem(
-              title: '主动消息',
-              trailing: Switch(
-                value: _currentRole.proactiveConfig.enabled,
-                onChanged: (value) => _toggleProactiveMessage(value),
-                activeThumbColor: const Color(0xFF07C160),
-              ),
-            ),
-            if (_currentRole.proactiveConfig.enabled) ...[
-              const Divider(height: 1, indent: 16),
-              _buildItem(
-                title: '触发提示词',
-                trailing: const Icon(
-                  Icons.arrow_forward_ios,
-                  size: 16,
-                  color: Color(0xFFCCCCCC),
-                ),
-                onTap: _editProactivePrompt,
-              ),
-              const Divider(height: 1, indent: 16),
-              _buildItem(
-                title: '倒计时区间',
-                trailing: Text(
-                  _formatProactiveInterval(_currentRole.proactiveConfig),
-                  style: const TextStyle(color: Color(0xFF888888)),
-                ),
-                onTap: _editProactiveCountdown,
-              ),
-            ],
-            const Divider(height: 1, indent: 16),
-            _buildItem(
-              title: '安静时间',
-              trailing: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 160),
-                child: Text(
-                  _formatQuietPeriods(_currentRole.proactiveConfig.quietRules),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.end,
-                  style: const TextStyle(color: Color(0xFF888888)),
-                ),
-              ),
-              onTap: _editQuietPeriods,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 无回复续写配置
-          _buildSection([
-            _buildItem(
-              title: '无回复续写',
-              subtitle: 'AI 说完话后，若你迟迟不回复，可主动继续跟进',
-              trailing: Switch(
-                value: _currentRole.followupConfig.enabled,
-                onChanged: (value) => _toggleFollowup(value),
-                activeThumbColor: const Color(0xFF07C160),
-              ),
-            ),
-            if (_currentRole.followupConfig.enabled) ...[
-              const Divider(height: 1, indent: 16),
-              _buildItem(
-                title: '最大续写次数',
-                trailing: Text(
-                  '${_currentRole.followupConfig.maxChain} 次',
-                  style: const TextStyle(color: Color(0xFF888888)),
-                ),
-                onTap: _editFollowupMaxChain,
-              ),
-            ],
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 定时任务
-          _buildSection([
-            _buildItem(
-              title: '定时任务',
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '${TaskService.getTasksForChat(widget.chatId).where((t) => !t.isCompleted).length} 个',
-                    style: const TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _openTaskManager,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 外挂 JSON 记录
-          _buildSection([
-            _buildItem(
-              title: '外挂记录',
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _currentRole.attachedJsonContent?.isNotEmpty == true
-                        ? '已导入 (${_currentRole.attachedJsonContent!.length} 字)'
-                        : '未导入',
-                    style: const TextStyle(
-                      color: Color(0xFF888888),
-                      fontSize: 15,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  const Icon(
-                    Icons.arrow_forward_ios,
-                    size: 16,
-                    color: Color(0xFFCCCCCC),
-                  ),
-                ],
-              ),
-              onTap: _showAttachedJsonOptions,
-            ),
-          ]),
-
-          const SizedBox(height: 10),
-
-          // 角色设置入口
+          // 角色设置入口（高频入口，保持平铺在顶部）
           _buildSection([
             _buildItem(
               title: '角色设置',
@@ -467,7 +176,311 @@ class _ChatSettingsPageState extends State<ChatSettingsPage> {
 
           const SizedBox(height: 10),
 
-          // 清空聊天记录
+          // 外观：聊天背景
+          SettingsGroup(
+            title: '外观',
+            icon: Icons.wallpaper_outlined,
+            subtitle: _currentRole.chatBackgroundUrl.isNotEmpty
+                ? '聊天背景：角色专属'
+                : '聊天背景：跟随全局',
+            children: [
+              _buildItem(
+                title: '聊天背景',
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _currentRole.chatBackgroundUrl.isNotEmpty
+                          ? '角色专属'
+                          : '跟随全局',
+                      style: const TextStyle(
+                        color: Color(0xFF888888),
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.arrow_forward_ios,
+                      size: 16,
+                      color: Color(0xFFCCCCCC),
+                    ),
+                  ],
+                ),
+                onTap: _showChatBackgroundOptions,
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 记忆：核心 / 短期 / 向量
+          SettingsGroup(
+            title: '记忆',
+            icon: Icons.psychology_outlined,
+            subtitle:
+                '核心 ${_backendCoreMemory.length} 条 · 向量 $_vectorMemoryCount 条',
+            children: [
+              // 核心记忆
+              _buildItem(
+                title: '核心记忆',
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '${_backendCoreMemory.length} 条',
+                      style: const TextStyle(
+                        color: Color(0xFF888888),
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.arrow_forward_ios,
+                      size: 16,
+                      color: Color(0xFFCCCCCC),
+                    ),
+                  ],
+                ),
+                onTap: _showCoreMemory,
+              ),
+              const Divider(height: 1, indent: 16),
+              // 短期记忆（对话历史）
+              _buildItem(
+                title: '短期记忆',
+                trailing: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '对话历史',
+                      style: TextStyle(color: Color(0xFF888888), fontSize: 15),
+                    ),
+                    SizedBox(width: 4),
+                    Icon(
+                      Icons.arrow_forward_ios,
+                      size: 16,
+                      color: Color(0xFFCCCCCC),
+                    ),
+                  ],
+                ),
+                onTap: _showShortTermMemory,
+              ),
+              const Divider(height: 1, indent: 16),
+              // 向量记忆（长期语义记忆）
+              _buildItem(
+                title: '向量记忆',
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '$_vectorMemoryCount 条',
+                      style: const TextStyle(
+                        color: Color(0xFF888888),
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.arrow_forward_ios,
+                      size: 16,
+                      color: Color(0xFFCCCCCC),
+                    ),
+                  ],
+                ),
+                onTap: _showVectorMemoryOptions,
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 主动消息与续写：主动消息 / 安静时间 / 无回复续写
+          SettingsGroup(
+            title: '主动消息与续写',
+            icon: Icons.notifications_active_outlined,
+            subtitle:
+                '主动消息${_currentRole.proactiveConfig.enabled ? '已开' : '已关'}'
+                ' · 续写${_currentRole.followupConfig.enabled ? '已开' : '已关'}',
+            children: [
+              // 主动消息配置
+              _buildItem(
+                title: '主动消息',
+                trailing: Switch(
+                  value: _currentRole.proactiveConfig.enabled,
+                  onChanged: (value) => _toggleProactiveMessage(value),
+                  activeThumbColor: const Color(0xFF07C160),
+                ),
+              ),
+              if (_currentRole.proactiveConfig.enabled) ...[
+                const Divider(height: 1, indent: 16),
+                _buildItem(
+                  title: '触发提示词',
+                  trailing: const Icon(
+                    Icons.arrow_forward_ios,
+                    size: 16,
+                    color: Color(0xFFCCCCCC),
+                  ),
+                  onTap: _editProactivePrompt,
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildItem(
+                  title: '倒计时区间',
+                  trailing: Text(
+                    _formatProactiveInterval(_currentRole.proactiveConfig),
+                    style: const TextStyle(color: Color(0xFF888888)),
+                  ),
+                  onTap: _editProactiveCountdown,
+                ),
+              ],
+              const Divider(height: 1, indent: 16),
+              _buildItem(
+                title: '安静时间',
+                trailing: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 160),
+                  child: Text(
+                    _formatQuietPeriods(
+                      _currentRole.proactiveConfig.quietRules,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.end,
+                    style: const TextStyle(color: Color(0xFF888888)),
+                  ),
+                ),
+                onTap: _editQuietPeriods,
+              ),
+              const Divider(height: 1, indent: 16),
+              // 无回复续写配置
+              _buildItem(
+                title: '无回复续写',
+                subtitle: 'AI 说完话后，若你迟迟不回复，可主动继续跟进',
+                trailing: Switch(
+                  value: _currentRole.followupConfig.enabled,
+                  onChanged: (value) => _toggleFollowup(value),
+                  activeThumbColor: const Color(0xFF07C160),
+                ),
+              ),
+              if (_currentRole.followupConfig.enabled) ...[
+                const Divider(height: 1, indent: 16),
+                _buildItem(
+                  title: '最大续写次数',
+                  trailing: Text(
+                    '${_currentRole.followupConfig.maxChain} 次',
+                    style: const TextStyle(color: Color(0xFF888888)),
+                  ),
+                  onTap: _editFollowupMaxChain,
+                ),
+              ],
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 记录与数据：聊天记录 / 外挂记录 / 定时任务 / Token 用量
+          SettingsGroup(
+            title: '记录与数据',
+            icon: Icons.folder_outlined,
+            subtitle: '聊天记录 $messageCount 条 · 定时任务 $pendingTaskCount 个',
+            children: [
+              // 聊天记录
+              _buildItem(
+                title: '聊天记录',
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '$messageCount 条',
+                      style: const TextStyle(
+                        color: Color(0xFF888888),
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.arrow_forward_ios,
+                      size: 16,
+                      color: Color(0xFFCCCCCC),
+                    ),
+                  ],
+                ),
+                onTap: _showChatHistory,
+              ),
+              const Divider(height: 1, indent: 16),
+              // 外挂 JSON 记录
+              _buildItem(
+                title: '外挂记录',
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _currentRole.attachedJsonContent?.isNotEmpty == true
+                          ? '已导入 (${_currentRole.attachedJsonContent!.length} 字)'
+                          : '未导入',
+                      style: const TextStyle(
+                        color: Color(0xFF888888),
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.arrow_forward_ios,
+                      size: 16,
+                      color: Color(0xFFCCCCCC),
+                    ),
+                  ],
+                ),
+                onTap: _showAttachedJsonOptions,
+              ),
+              const Divider(height: 1, indent: 16),
+              // 定时任务
+              _buildItem(
+                title: '定时任务',
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '$pendingTaskCount 个',
+                      style: const TextStyle(
+                        color: Color(0xFF888888),
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.arrow_forward_ios,
+                      size: 16,
+                      color: Color(0xFFCCCCCC),
+                    ),
+                  ],
+                ),
+                onTap: _openTaskManager,
+              ),
+              const Divider(height: 1, indent: 16),
+              // Token 用量统计
+              _buildItem(
+                title: 'Token 用量',
+                trailing: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '用量与缓存',
+                      style: TextStyle(color: Color(0xFF888888), fontSize: 15),
+                    ),
+                    SizedBox(width: 4),
+                    Icon(
+                      Icons.arrow_forward_ios,
+                      size: 16,
+                      color: Color(0xFFCCCCCC),
+                    ),
+                  ],
+                ),
+                onTap: _showTokenUsage,
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          // 清空聊天记录（危险操作，保持平铺在底部）
           _buildSection([
             _buildItem(
               title: '清空聊天记录',

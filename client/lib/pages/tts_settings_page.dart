@@ -1,10 +1,17 @@
 import 'package:flutter/material.dart';
 
 import '../services/tts_settings_service.dart';
+import '../widgets/settings_group.dart';
+
+/// 各供应商里收进「高级请求格式」折叠组的字段 key（请求模板与响应解析）。
+/// 未登记的供应商没有高级字段，全部平铺。
+const Map<String, Set<String>> _ttsAdvancedFieldKeys = {
+  'custom': {'method', 'headers', 'body', 'response_type', 'response_path'},
+};
 
 /// 语音合成（TTS）设置页。
 ///
-/// 配置保存在后端：全局开关、当前供应商（MiMo / Qwen / GPT-SoVITS）及其参数。
+/// 配置保存在后端：全局开关、当前供应商（MiMo / Qwen / GPT-SoVITS / 自定义）及其参数。
 /// 密钥只在用户输入了新值时才提交，留空表示保持服务端原值。
 class TtsSettingsPage extends StatefulWidget {
   /// 设置读写服务；默认走 [TtsSettingsService.instance]，测试可注入。
@@ -224,12 +231,124 @@ class _TtsSettingsPageState extends State<TtsSettingsPage> {
     ),
   );
 
-  List<Widget> _providerFields() {
+  /// 下拉字段的当前值：控制器里的值不在选项内（如旧后端返回空）时取第一项。
+  String _optionValue(String provider, TtsProviderField field) {
+    final text = _controllers[_controllerKey(provider, field.key)]!.text.trim();
+    return field.options.contains(text) ? text : field.options.first;
+  }
+
+  bool _isHidden(TtsProviderSpec spec, TtsProviderField field) {
+    final dependsOn = field.hideWhenKey;
+    if (dependsOn == null) return false;
+    final other = spec.fields.firstWhere((f) => f.key == dependsOn);
+    final value = other.options.isEmpty
+        ? _controllers[_controllerKey(spec.id, other.key)]!.text.trim()
+        : _optionValue(spec.id, other);
+    return value == field.hideWhenValue;
+  }
+
+  Widget _optionRow({
+    required Key key,
+    required String label,
+    required TtsProviderField field,
+    required String provider,
+  }) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+    child: Row(
+      children: [
+        SizedBox(width: 82, child: Text(label)),
+        Expanded(
+          child: DropdownButton<String>(
+            key: key,
+            value: _optionValue(provider, field),
+            isExpanded: true,
+            underline: const SizedBox.shrink(),
+            items: [
+              for (final option in field.options)
+                DropdownMenuItem<String>(
+                  value: option,
+                  child: Text(ttsOptionLabels[option] ?? option),
+                ),
+            ],
+            onChanged: (value) {
+              if (value == null) return;
+              setState(() {
+                _controllers[_controllerKey(provider, field.key)]!.text = value;
+              });
+            },
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _multilineRow({
+    required Key key,
+    required String label,
+    required TextEditingController controller,
+    String hint = '',
+  }) => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label),
+        const SizedBox(height: 6),
+        TextField(
+          key: key,
+          controller: controller,
+          minLines: 3,
+          maxLines: 10,
+          keyboardType: TextInputType.multiline,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+          decoration: InputDecoration(
+            isDense: true,
+            filled: true,
+            fillColor: const Color(0xFFF7F7F7),
+            border: const OutlineInputBorder(borderSide: BorderSide.none),
+            hintText: hint,
+            hintStyle: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  /// 当前供应商的字段行：[core] 平铺显示，[advanced] 收进「高级请求格式」组。
+  ({List<Widget> core, List<Widget> advanced}) _providerFields() {
     final spec = ttsProviderSpecs.firstWhere((s) => s.id == _provider);
-    final rows = <Widget>[];
+    final advancedKeys = _ttsAdvancedFieldKeys[spec.id] ?? const <String>{};
+    final coreRows = <Widget>[];
+    final advancedRows = <Widget>[];
     for (final field in spec.fields) {
+      if (_isHidden(spec, field)) continue;
       final key = _controllerKey(spec.id, field.key);
+      final rows = advancedKeys.contains(field.key) ? advancedRows : coreRows;
       if (rows.isNotEmpty) rows.add(const Divider(height: 1, indent: 16));
+      if (field.options.isNotEmpty) {
+        rows.add(
+          _optionRow(
+            key: ValueKey('tts-field-$key'),
+            label: field.label,
+            field: field,
+            provider: spec.id,
+          ),
+        );
+        continue;
+      }
+      if (field.multiline) {
+        rows.add(
+          _multilineRow(
+            key: ValueKey('tts-field-$key'),
+            label: field.label,
+            controller: _controllers[key]!,
+            hint: field.hint,
+          ),
+        );
+        continue;
+      }
       var hint = field.hint;
       if (field.secret) {
         final masked = _maskedKeys[key] ?? '';
@@ -248,7 +367,37 @@ class _TtsSettingsPageState extends State<TtsSettingsPage> {
         ),
       );
     }
-    return rows;
+    if (spec.help.isNotEmpty) {
+      // 帮助文字讲的是请求模板和占位符，有高级组时放进组内。
+      (advancedRows.isNotEmpty ? advancedRows : coreRows).add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+          child: Text(
+            spec.help,
+            key: const ValueKey('tts-provider-help'),
+            style: const TextStyle(
+              fontSize: 12,
+              height: 1.5,
+              color: Color(0xFF777777),
+            ),
+          ),
+        ),
+      );
+    }
+    return (core: coreRows, advanced: advancedRows);
+  }
+
+  /// 「高级请求格式」组的副标题：请求方法与响应类型的当前值。
+  String _advancedSummary(TtsProviderSpec spec) {
+    final parts = <String>[
+      for (final field in spec.fields)
+        if (field.options.isNotEmpty &&
+            (_ttsAdvancedFieldKeys[spec.id] ?? const <String>{}).contains(
+              field.key,
+            ))
+          _optionValue(spec.id, field),
+    ];
+    return parts.where((part) => part.isNotEmpty).join(' · ');
   }
 
   Widget _buildBody() {
@@ -272,6 +421,7 @@ class _TtsSettingsPageState extends State<TtsSettingsPage> {
     }
 
     final spec = ttsProviderSpecs.firstWhere((s) => s.id == _provider);
+    final fields = _providerFields();
     return ListView(
       children: [
         const SizedBox(height: 10),
@@ -294,16 +444,22 @@ class _TtsSettingsPageState extends State<TtsSettingsPage> {
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
             child: SizedBox(
               width: double.infinity,
-              child: SegmentedButton<String>(
+              // 四个供应商在窄屏上放不下一排分段按钮，用可换行的选择标签。
+              child: Wrap(
                 key: const ValueKey('tts-provider'),
-                showSelectedIcon: false,
-                segments: [
+                spacing: 8,
+                runSpacing: 4,
+                children: [
                   for (final s in ttsProviderSpecs)
-                    ButtonSegment<String>(value: s.id, label: Text(s.label)),
+                    ChoiceChip(
+                      key: ValueKey('tts-provider-${s.id}'),
+                      label: Text(s.label),
+                      selected: _provider == s.id,
+                      showCheckmark: false,
+                      selectedColor: const Color(0xFFD9F2E3),
+                      onSelected: (_) => setState(() => _provider = s.id),
+                    ),
                 ],
-                selected: {_provider},
-                onSelectionChanged: (selection) =>
-                    setState(() => _provider = selection.first),
               ),
             ),
           ),
@@ -354,7 +510,16 @@ class _TtsSettingsPageState extends State<TtsSettingsPage> {
               ],
             ),
           ),
-          ..._providerFields(),
+          ...fields.core,
+          if (fields.advanced.isNotEmpty) ...[
+            const Divider(height: 1, indent: 16),
+            SettingsGroup(
+              title: '高级请求格式',
+              icon: Icons.tune,
+              subtitle: _advancedSummary(spec),
+              children: fields.advanced,
+            ),
+          ],
         ]),
         const SizedBox(height: 12),
         _section([

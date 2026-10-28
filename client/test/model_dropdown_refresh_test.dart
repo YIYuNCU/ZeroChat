@@ -115,6 +115,11 @@ void main() {
       await pumpPage(tester);
       await loadModels(tester);
 
+      // 档案选择在默认收起的「模型档案」分组里。
+      final profileGroup = find.text('模型档案');
+      await tester.ensureVisible(profileGroup);
+      await tester.tap(profileGroup);
+      await tester.pumpAndSettle();
       final profileRow = dropdownContaining(profileId);
       await tester.ensureVisible(profileRow);
       await tester.tap(profileRow);
