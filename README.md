@@ -21,6 +21,8 @@
 
 - **多角色对话** — 创建多个 AI 角色，每个角色拥有独立人设、记忆和系统提示词
 - **分段发送** — AI 回复自动按 `$` 符号分段，模拟真人打字节奏与延迟
+- **分段式提示词** — 系统提示词由多个独立段落文件组合而成（格式协议、语音规则、工具规则等），可按模型单独覆盖
+- **结构化人设卡** — 角色人设以结构化卡片组织，AI 理解更准确
 - **情感表情系统** — AI 根据对话情绪自动选择匹配的表情包（支持自定义表情文件夹）
 - **图片识别** — 发送图片给 AI，支持 Vision API 识别图片内容，可指定前置模型处理
 - **外挂记录** — 支持 JSON、TXT 等文本文件加载至角色信息中，与聊天记录同级发送
@@ -69,10 +71,12 @@
 
 ### ⚙️ 可配置性
 
-- **全局 Base Prompt** — 统一设置所有角色共用的基础提示词
-- **角色级配置** — 温度、频率惩罚、存在惩罚、最大上下文轮数等独立配置
-- **多模型支持** — 支持为对话、意图识别、视觉理解、Embedding 分别指定不同的 API 和模型
-- **前后端同步** — 角色数据、消息、记忆通过 WebSocket 实时同步
+- **全局 + 角色双层提示词** — 全局 Base Prompt 统一设置，角色可整篇替换覆盖
+- **按模型覆盖提示词** — 同一份提示词可为不同模型单独定制（`model_prompt_overrides`）
+- **角色级配置** — 温度、频率惩罚、存在惩罚、最大上下文轮数、思考预算等独立配置
+- **多模型支持** — 支持为对话、意图识别、视觉理解、Embedding、核心记忆总结、事件总结分别指定不同的 API 和模型
+- **语音配置** — 全局 TTS 供应商/音色/风格，按角色单独覆盖或关闭
+- **前后端同步** — 角色数据、消息、记忆、配置通过 WebSocket 实时同步
 
 ### 🔐 安全传输
 
@@ -96,25 +100,29 @@ zerochat/
 │       │   ├── group_scheduler.dart         # 群聊发言调度
 │       │   ├── moments_scheduler.dart       # 朋友圈调度（发布、互动、回复）
 │       │   └── segment_sender.dart          # 分段发送工具
-│       ├── models/                  # 数据模型（12个）
-│       ├── pages/                   # UI 页面（19个）
-│       ├── services/                # 服务层（22个）
+│       ├── models/                  # 数据模型（21个）
+│       ├── pages/                   # UI 页面（22个）
+│       ├── services/                # 服务层（36个）
 │       │   ├── api_service.dart             # REST API 客户端
 │       │   ├── secure_websocket_client.dart  # 加密 WebSocket 客户端
 │       │   ├── secure_backend_client.dart    # 加密 HTTP 客户端（AES）
 │       │   ├── realtime_sync_service.dart    # WebSocket 实时同步
 │       │   ├── memory_service.dart          # 记忆管理服务
+│       │   ├── tts_settings_service.dart     # 语音合成（TTS）配置服务
+│       │   ├── voice_playback_service.dart   # 语音消息播放服务
 │       │   ├── background_runtime_service.dart   # 后台保活与调度
 │       │   ├── notification_service.dart    # 本地通知
-│       │   └── ...（14个更多服务）
-│       └── widgets/                 # 可复用 UI 组件（4个）
+│       │   └── ...（27个更多服务）
+│       └── widgets/                 # 可复用 UI 组件（11个）
 │
 └── server/                          # FastAPI 后端
     ├── main.py                      # 服务入口
     ├── requirements.txt             # Python 依赖
-    ├── start.bat / start.sh         # 一键启动脚本
+    ├── start.bat                    # 一键启动脚本（Windows）
     ├── config/
+    │   ├── settings.example.json    # 配置模板（首次运行自动复制为 settings.json）
     │   └── settings.json            # 运行时配置（API 密钥、Token、加密密钥等）
+    ├── prompts/                     # 内置提示词文件（聊天/群聊/OneBot/总结）
     ├── core/                        # 核心基础设施
     │   ├── lifecycle.py             # 启动/关闭生命周期钩子
     │   ├── middleware.py            # 中间件（请求日志、安全鉴权）
@@ -126,21 +134,38 @@ zerochat/
     │   ├── tasks.py                 # 定时任务 API
     │   ├── settings.py              # 设置 API
     │   └── onebot.py                # OneBot V11 QQ 协议适配
-    ├── services/                    # 业务逻辑服务（8个）
+    ├── services/                    # 业务逻辑服务（24个）
     │   ├── ai_service.py            # AI API 调用（OpenAI 兼容 + Embedding）
     │   ├── ai_tools.py              # AI Function Calling 工具（schedule_task, block_user）
+    │   ├── tts_service.py           # 语音合成服务（MiMo-TTS / Qwen-TTS / GPT-SoVITS）
+    │   ├── vision_service.py        # 视觉理解服务（图片识别）
     │   ├── memory_service.py        # 记忆存储（SQLite）
     │   ├── vector_memory.py         # 向量记忆（语义检索）
     │   ├── scheduler_service.py     # APScheduler 任务调度
     │   ├── search_service.py        # 联网搜索（DuckDuckGo）
     │   ├── settings_service.py      # 配置管理
+    │   ├── prompt_store.py          # 提示词文件管理
+    │   ├── prompt_config_service.py # 提示词配置
+    │   ├── stats_service.py         # 统计服务
+    │   ├── chat_envelope.py         # 统一对话请求信封
+    │   ├── chat_io_service.py       # 聊天输入输出处理
+    │   ├── persona_card.py          # 结构化人设卡
+    │   ├── sync_revision.py         # 同步版本管理
+    │   ├── settings_sync.py         # 配置同步
+    │   ├── tool_prompts.py          # 工具提示词
+    │   ├── summary_config_service.py # 总结配置
+    │   ├── conditional_sync.py      # 条件同步
+    │   ├── message_format.py        # 消息格式化
+    │   ├── json_parse.py            # JSON 解析
+    │   ├── emoji_ivs_plugin.py      # 表情 IVS 插件
     │   └── security_service.py      # 认证与加密
-    └── transport/                   # 传输层（5个）
-        ├── ws_endpoint.py           # 安全 WebSocket 端点
-        ├── ws_dispatcher.py         # WebSocket 消息分发
-        ├── onebot_ws.py             # OneBot 反向 WebSocket 连接管理
-        ├── push_hub.py              # 服务端推送中心
-        └── file_routes.py           # 文件上传/下载
+    ├── transport/                   # 传输层（5个）
+    │   ├── ws_endpoint.py           # 安全 WebSocket 端点
+    │   ├── ws_dispatcher.py         # WebSocket 消息分发
+    │   ├── onebot_ws.py             # OneBot 反向 WebSocket 连接管理
+    │   ├── push_hub.py              # 服务端推送中心
+    │   └── file_routes.py           # 文件上传/下载
+    └── tests/                       # 测试套件（30+ 测试文件）
 ```
 
 ---
@@ -173,7 +198,10 @@ cd zerochat-server
 # Windows:
 start.bat
 # Linux/Mac:
-chmod +x start.sh && ./start.sh
+python3 -m venv .venv
+source .venv/bin/activate  # 或 .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+python main.py
 ```
 
 启动后访问 `http://服务器IP:8000` 确认服务正常。
@@ -185,6 +213,10 @@ chmod +x start.sh && ./start.sh
 **3. 在应用内配置连接**
 
 进入 **我 → AI 接口设置**，配置 API URL、API Key、模型和后端地址。
+
+**4. （可选）配置语音合成**
+
+如需 AI 语音消息功能，进入 **我 → 语音合成（TTS）**，选择供应商（MiMo-TTS / Qwen-TTS / GPT-SoVITS）并填写对应参数。GPT-SoVITS 需额外部署 TTS 推理服务并保证服务器可访问参考音频路径。
 
 #### 🔐 传输安全
 
@@ -208,14 +240,19 @@ chmod +x start.sh && ./start.sh
 ```bash
 # 1. 启动后端
 cd server
-start.bat          # Windows
-# 或: chmod +x start.sh && ./start.sh  # Linux/Mac
+start.bat          # Windows（自动创建虚拟环境并安装依赖）
+# Linux/Mac:
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 
 # 2. 启动前端
 cd client
 flutter pub get
 flutter run
 ```
+
+> 后端配置：首次启动会将 `server/config/settings.example.json` 复制为 `settings.json`，也可在应用内通过 WebSocket 同步配置，无需手动编辑。
 
 ### 🌐 没有云服务器？
 
@@ -234,9 +271,11 @@ flutter run
 | **后端框架** | Python 3.12 + FastAPI + Uvicorn（异步 ASGI） |
 | **前端框架** | Flutter 3.x + Dart 3.x（跨平台移动端，Android/iOS） |
 | **AI 集成** | OpenAI 兼容 API（DeepSeek / SiliconFlow / 自定义）、多模型并行配置 |
+| **语音合成** | MiMo-TTS / Qwen-TTS / GPT-SoVITS（自部署） |
 | **实时通信** | WebSocket + AES 加密双向传输 |
 | **任务调度** | APScheduler（主动消息、定时任务、朋友圈发布） |
 | **记忆存储** | SQLite + 向量嵌入（BAAI/bge-m3 语义检索） |
+| **提示词体系** | 文件化分段提示词 + 结构化人设卡 + 按模型覆盖 |
 | **协议接入** | OneBot V11（QQ 协议，HTTP POST + 反向 WebSocket） |
 | **搜索工具** | DuckDuckGo Search（AI 联网搜索） |
 | **安全** | Token 鉴权 + AES 加密 + WebSocket 帧加密 |
@@ -264,6 +303,15 @@ flutter run
 
 ## 🧠 技术特色
 
+### 提示词体系
+
+ZeroChat 的提示词从硬编码字符串重构为文件化分段体系：
+
+- **分段文件** — 每个功能（格式协议、语音规则、工具规则、表情规则等）独立为 `server/prompts/` 下的 `.md` 文件，便于维护和版本控制
+- **分段式系统提示词** — 聊天请求按需组合多个段落，避免无关内容占用上下文
+- **结构化人设卡** — 角色人设以结构化卡片（身份、性格、关系、背景等字段）组织，比纯文本描述更稳定
+- **双层覆盖** — 全局 Base Prompt 统一设置，角色可整篇替换；同一份提示词可为不同模型单独覆盖（`model_prompt_overrides`）
+
 ### 记忆系统详解
 
 ZeroChat 采用三层记忆架构，通过 AI 自主管理实现长效记忆：
@@ -277,6 +325,15 @@ ZeroChat 采用三层记忆架构，通过 AI 自主管理实现长效记忆：
 AI 助手模型：
 - **核心记忆总结助手** — 从对话中提炼用户关键信息写入核心记忆
 - **事件总结助手** — 总结上一窗口内容，避免记忆断层
+
+### AI 语音消息
+
+服务端集成 TTS 引擎，AI 回复可自动转为语音消息：
+
+- **多供应商支持** — MiMo-TTS、Qwen-TTS（阿里云）、GPT-SoVITS（自部署）
+- **按角色配置** — 每个角色可单独指定音色、风格、参考音频，或完全关闭语音
+- **自动降级** — 语音合成失败时自动退回纯文字，不影响聊天流程
+- **客户端播放** — 语音消息以微信风格气泡展示，点击播放，支持「转文字」查看内容
 
 ### OneBot QQ 集成
 
