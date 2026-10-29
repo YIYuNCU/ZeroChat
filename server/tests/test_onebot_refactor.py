@@ -429,6 +429,53 @@ class WakeKeywordTests(unittest.TestCase):
             rnd.assert_not_called()
 
 
+class ProviderQuietTests(unittest.IsolatedAsyncioTestCase):
+    def _quiet(self, value):
+        from services import scheduler_service
+
+        return patch.object(scheduler_service, "is_role_provider_quiet", return_value=value)
+
+    def test_quiet_drops_private_at_group_and_owner_chat(self):
+        from services.onebot import policy
+
+        config = {"allowed_users": [10], "allowed_groups": [9], "main_user_id": 10}
+        cases = [
+            _inbound("你好", user_id=10, sender="1(QQ名:a)"),                   # 私聊
+            _inbound("你好", user_id=10, group_id=9, sender="1(QQ名:a)"),       # 群聊 @ / 关键词唤醒
+            _inbound("你好"),                                                    # 主用户私聊（非指令）
+        ]
+        with self._quiet(True):
+            for inbound in cases:
+                self.assertEqual(policy.gate(inbound, config), "模型静默时间，不回复")
+
+    def test_quiet_keeps_owner_commands_working(self):
+        from services.onebot import policy
+
+        with self._quiet(True):
+            self.assertIsNone(policy.gate(_inbound("/help"), {}))
+
+    def test_not_quiet_behaves_as_before(self):
+        from services.onebot import policy
+
+        config = {"allowed_users": [10]}
+        with self._quiet(False):
+            self.assertIsNone(policy.gate(_inbound("你好", sender="1(QQ名:a)"), config))
+
+    async def test_batch_waiting_into_quiet_time_is_dropped_without_calling_ai(self):
+        from services.onebot import pipeline as pl
+
+        p = pl.OneBotPipeline()
+        ai = AsyncMock()
+        with self._quiet(True), patch("routers.ai_behavior.handle_ai_event", ai), patch.object(
+            pl.mirror, "mirror_user", new=AsyncMock()
+        ) as mu:
+            plan = await p._process_batch([_inbound("在吗")], MagicMock())
+        self.assertTrue(plan.empty)
+        ai.assert_not_awaited()
+        mu.assert_not_awaited()
+        await p.shutdown()
+
+
 class StatsAndPlatformContextTests(unittest.TestCase):
     def test_stats_allowed_matrix(self):
         from services.chat_envelope import stats_allowed

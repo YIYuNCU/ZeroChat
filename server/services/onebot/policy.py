@@ -91,18 +91,32 @@ def should_random_reply(role_id: str, conv_key: str, now: Optional[float] = None
     return False
 
 
+def check_provider_quiet(role_id: str) -> Optional[str]:
+    """模型（供应商+模型）静默时间内返回拒绝原因：此时 OneBot 渠道完全不回复。"""
+    from services import scheduler_service
+
+    if scheduler_service.is_role_provider_quiet(role_id):
+        return "模型静默时间，不回复"
+    return None
+
+
 def gate(inbound: Inbound, config: Dict[str, Any]) -> Optional[str]:
-    """@ 检测 / 随机回复 / 白名单。主用户的 / 指令不受 @ 与白名单限制，否则无法管理。"""
+    """静默 / @ 检测 / 随机回复 / 白名单。
+
+    模型静默时间内，所有消息（私聊、@、关键词唤醒、随机回复）一律丢弃，不调用模型。
+    主用户的 / 指令不调用模型，因此不受静默、@ 与白名单限制，否则无法管理。
+    """
     is_command = inbound.is_owner and inbound.content.startswith("/")
+
+    if not is_command:
+        quiet = check_provider_quiet(inbound.role_id)
+        if quiet:
+            return quiet
 
     if inbound.is_group and not is_command and not inbound.at_bot:
         # 不在白名单的群聊不检查自动回复
         if inbound.group_id not in (config.get("allowed_groups") or []):
             return "群聊不在白名单，跳过随机回复"
-        from services import scheduler_service
-
-        if scheduler_service.is_role_provider_quiet(inbound.role_id):
-            return "供应商静默，跳过随机回复"
         if not should_random_reply(inbound.role_id, inbound.conv_key):
             return "未 @机器人"
 

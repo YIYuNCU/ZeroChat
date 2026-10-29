@@ -93,6 +93,11 @@ class OneBotPipeline:
 
         first, last = batch[0], batch[-1]
         role_id = first.role_id
+        # 聚合等待期间可能刚好进入静默时间：此时丢弃这批消息，不调用模型也不回复
+        quiet = policy.check_provider_quiet(role_id)
+        if quiet:
+            logger.info("OneBot 丢弃 %d 条消息: role=%s %s", len(batch), role_id, quiet)
+            return ReplyPlan()
         merged = merge_batch(batch)
         mirrored = mirror.should_mirror(first)
 
