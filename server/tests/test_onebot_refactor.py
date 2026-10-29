@@ -275,6 +275,91 @@ class OneBotConfigModelTests(unittest.TestCase):
         self.assertEqual(dumped, {"enabled": True})
 
 
+class StickerUrlTests(unittest.TestCase):
+    @staticmethod
+    def _ws(url):
+        from starlette.datastructures import URL
+
+        return MagicMock(url=URL(url))
+
+    def test_default_port_behind_proxy_has_no_none_suffix(self):
+        from services.onebot.sender import build_server_url
+
+        self.assertEqual(build_server_url(self._ws("wss://zerochat.example.com/onebot/ws/1")),
+                         "https://zerochat.example.com")
+        self.assertEqual(build_server_url(self._ws("ws://example.com/onebot/ws/1")), "http://example.com")
+        self.assertEqual(build_server_url(self._ws("wss://example.com:443/x")), "https://example.com")
+
+    def test_explicit_port_and_ipv6(self):
+        from services.onebot.sender import build_server_url
+
+        self.assertEqual(build_server_url(self._ws("ws://127.0.0.1:8000/x")), "http://127.0.0.1:8000")
+        self.assertEqual(build_server_url(self._ws("ws://[::1]:8000/x")), "http://[::1]:8000")
+
+    def test_sticker_url_quotes_segments(self):
+        from services.onebot.paths import ROLES_DIR
+        from services.onebot.sender import sticker_url
+
+        path = ROLES_DIR / "r1" / "emojis" / "开心 happy" / "a b.png"
+        self.assertEqual(
+            sticker_url(path, "https://h/"),
+            "https://h/files/public/emojis/r1/%E5%BC%80%E5%BF%83%20happy/a%20b.png",
+        )
+
+
+class WakeKeywordTests(unittest.TestCase):
+    def _transform(self, message, config=None, **kw):
+        from services.onebot.models import OneBotEvent
+        from services.onebot.parser import transform_event
+
+        base = {"post_type": "message", "message_type": "group", "user_id": 5, "group_id": 9,
+                "message": message, "message_id": 1, "self_id": 100, "sender": {"nickname": "n"}}
+        base.update(kw)
+        cfg = {"self_id": 100}
+        cfg.update(config or {})
+        return transform_event(OneBotEvent(**base), role_id="r1", config=cfg)
+
+    @staticmethod
+    def _text(text):
+        return [{"type": "text", "data": {"text": text}}]
+
+    def test_keyword_counts_as_mention_ignoring_case(self):
+        cfg = {"wake_keywords": ["小零", "Zero"]}
+        self.assertTrue(self._transform(self._text("小零你在吗"), cfg).at_bot)
+        self.assertTrue(self._transform(self._text("hey ZERO"), cfg).at_bot)
+
+    def test_no_keyword_no_mention(self):
+        self.assertFalse(self._transform(self._text("大家好"), {"wake_keywords": ["小零"]}).at_bot)
+        self.assertFalse(self._transform(self._text("小零"), {}).at_bot)
+
+    def test_blank_keywords_never_match(self):
+        self.assertFalse(self._transform(self._text("大家好"), {"wake_keywords": ["", "  "]}).at_bot)
+
+    def test_keyword_in_image_or_at_segments_is_ignored(self):
+        message = [
+            {"type": "at", "data": {"qq": "777"}},
+            {"type": "image", "data": {"url": "http://x/小零.png"}},
+        ]
+        self.assertFalse(self._transform(message, {"wake_keywords": ["小零", "777", "图片"]}).at_bot)
+
+    def test_real_at_still_works_and_private_is_always_true(self):
+        at = [{"type": "at", "data": {"qq": "100"}}, {"type": "text", "data": {"text": " hi"}}]
+        self.assertTrue(self._transform(at).at_bot)
+        self.assertTrue(self._transform(self._text("hi"), message_type="private", group_id=None).at_bot)
+
+    def test_string_message_format(self):
+        self.assertTrue(self._transform("小零在吗", {"wake_keywords": ["小零"]}).at_bot)
+
+    def test_gate_lets_keyword_message_through_without_random_reply(self):
+        from services.onebot import policy
+
+        config = {"allowed_groups": [9], "wake_keywords": ["小零"]}
+        inbound = self._transform(self._text("小零在吗"), config)
+        with patch.object(policy, "should_random_reply", return_value=False) as rnd:
+            self.assertIsNone(policy.gate(inbound, config))
+            rnd.assert_not_called()
+
+
 class StatsAndPlatformContextTests(unittest.TestCase):
     def test_stats_allowed_matrix(self):
         from services.chat_envelope import stats_allowed

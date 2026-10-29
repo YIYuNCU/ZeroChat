@@ -23,6 +23,9 @@ class OneBotConfig {
   /// 群聊白名单（群号列表），为空则不处理群聊
   final List<int> allowedGroups;
 
+  /// 唤醒关键词：群聊中提到任一关键词（忽略大小写）即视为 @了机器人
+  final List<String> wakeKeywords;
+
   /// 同一发送者连续消息的聚合等待秒数（0 = 立即回复，上限 30）
   final int waitSeconds;
 
@@ -36,6 +39,7 @@ class OneBotConfig {
     this.mainUserId = 0,
     this.allowedUsers = const [],
     this.allowedGroups = const [],
+    this.wakeKeywords = const [],
     this.waitSeconds = defaultWaitSeconds,
     this.deliverProactive = false,
   });
@@ -59,6 +63,11 @@ class OneBotConfig {
               .where((e) => e > 0)
               .toList() ??
           [],
+      wakeKeywords: (json['wake_keywords'] as List<dynamic>?)
+              ?.map((e) => e.toString().trim())
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          [],
       waitSeconds: (int.tryParse(json['wait_seconds']?.toString() ?? '') ??
               defaultWaitSeconds)
           .clamp(0, maxWaitSeconds),
@@ -74,6 +83,7 @@ class OneBotConfig {
       'main_user_id': mainUserId,
       'allowed_users': allowedUsers,
       'allowed_groups': allowedGroups,
+      'wake_keywords': wakeKeywords,
       'wait_seconds': waitSeconds,
       'deliver_proactive': deliverProactive,
     };
@@ -86,6 +96,7 @@ class OneBotConfig {
     int? mainUserId,
     List<int>? allowedUsers,
     List<int>? allowedGroups,
+    List<String>? wakeKeywords,
     int? waitSeconds,
     bool? deliverProactive,
   }) {
@@ -96,6 +107,7 @@ class OneBotConfig {
       mainUserId: mainUserId ?? this.mainUserId,
       allowedUsers: allowedUsers ?? this.allowedUsers,
       allowedGroups: allowedGroups ?? this.allowedGroups,
+      wakeKeywords: wakeKeywords ?? this.wakeKeywords,
       waitSeconds: waitSeconds ?? this.waitSeconds,
       deliverProactive: deliverProactive ?? this.deliverProactive,
     );

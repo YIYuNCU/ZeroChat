@@ -73,6 +73,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
   late TextEditingController _onebotMainUserIdController;
   late TextEditingController _onebotAllowedUsersController;
   late TextEditingController _onebotAllowedGroupsController;
+  late TextEditingController _onebotWakeKeywordsController;
   late TextEditingController _onebotWaitSecondsController;
   late bool _onebotDeliverProactive;
   List<String> _availableAiModels = [];
@@ -178,6 +179,9 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _onebotAllowedGroupsController = TextEditingController(
       text: widget.role.onebotConfig.allowedGroups.join(','),
     );
+    _onebotWakeKeywordsController = TextEditingController(
+      text: widget.role.onebotConfig.wakeKeywords.join(','),
+    );
     _statsEnabled = widget.role.statsConfig.enabled;
     _statItems = List<StatItem>.from(widget.role.statsConfig.stats);
     _showAction = widget.role.showAction;
@@ -217,6 +221,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
     _onebotMainUserIdController.dispose();
     _onebotAllowedUsersController.dispose();
     _onebotAllowedGroupsController.dispose();
+    _onebotWakeKeywordsController.dispose();
     _onebotWaitSecondsController.dispose();
     super.dispose();
   }
@@ -706,6 +711,12 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
                   inputFormatters: [
                     FilteringTextInputFormatter.allow(RegExp(r'[0-9,]')),
                   ],
+                ),
+                const Divider(height: 1, indent: 16),
+                _buildTextField(
+                  label: '唤醒关键词',
+                  controller: _onebotWakeKeywordsController,
+                  hintText: '逗号分隔，群聊提到任一关键词即视为 @机器人',
                 ),
                 const Divider(height: 1, indent: 16),
                 _buildTextField(
@@ -1744,6 +1755,15 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         .toList();
   }
 
+  /// 按中英文逗号拆分关键词，去掉空白项。
+  List<String> _parseKeywordList(String text) {
+    return text
+        .split(RegExp(r'[,，]'))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+
   Future<void> _saveRole() async {
     var parsedAiTemperature =
         double.tryParse(_aiTemperatureController.text.trim()) ??
@@ -1823,6 +1843,7 @@ class _RoleSettingsPageState extends State<RoleSettingsPage> {
         mainUserId: int.tryParse(_onebotMainUserIdController.text.trim()) ?? 0,
         allowedUsers: _parseIntList(_onebotAllowedUsersController.text),
         allowedGroups: _parseIntList(_onebotAllowedGroupsController.text),
+        wakeKeywords: _parseKeywordList(_onebotWakeKeywordsController.text),
         waitSeconds: (int.tryParse(_onebotWaitSecondsController.text.trim()) ??
                     OneBotConfig.defaultWaitSeconds)
                 .clamp(0, OneBotConfig.maxWaitSeconds),

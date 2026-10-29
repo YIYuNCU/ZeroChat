@@ -11,6 +11,7 @@ import base64
 import logging
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from core.utils import ensure_direct_child_path, ensure_simple_path_segment
 from services.onebot.models import Target
@@ -43,13 +44,31 @@ def onebot_ok(response: Any) -> bool:
     return response.get("status") == "ok" or response.get("retcode") == 0
 
 
+def _brief_response(response: Any) -> str:
+    """失败回执的简要描述，只含状态与错误文字，便于排查。"""
+    if not isinstance(response, dict):
+        return repr(response)[:200]
+    keys = ("status", "retcode", "message", "wording", "error")
+    return str({k: response[k] for k in keys if k in response})[:300]
+
+
 def build_server_url(websocket=None) -> str:
     """从 WebSocket 连接或 CONFIG 构建服务器 URL（OneBot 通过 HTTP 取表情图片）。"""
+    if websocket is not None:
+        url = websocket.url
+        hostname = url.hostname
+        if hostname:
+            scheme = "https" if url.scheme == "wss" else "http"
+            if ":" in hostname:  # IPv6 字面量需要方括号
+                hostname = f"[{hostname}]"
+            # 经反向代理走默认端口时 url.port 为 None，不能拼成 ":None"
+            default_port = 443 if scheme == "https" else 80
+            port = url.port
+            if port is None or port == default_port:
+                return f"{scheme}://{hostname}"
+            return f"{scheme}://{hostname}:{port}"
     from main import CONFIG
 
-    if websocket is not None:
-        scheme = "https" if websocket.url.scheme == "wss" else "http"
-        return f"{scheme}://{websocket.url.hostname}:{websocket.url.port}"
     host = CONFIG.get("host", "0.0.0.0")
     port = CONFIG.get("port", 8000)
     if not host or host in ("0.0.0.0", "::"):
@@ -84,7 +103,7 @@ def resolve_sticker(emotion: Any, role_id: str) -> Optional[Path]:
 
 def sticker_url(path: Path, server_url: str) -> str:
     # path = {ROLES_DIR}/{role_id}/emojis/{category}/{filename}
-    parts = path.relative_to(ROLES_DIR).parts
+    parts = [quote(part, safe="") for part in path.relative_to(ROLES_DIR).parts]
     return f"{server_url.rstrip('/')}/files/public/emojis/{parts[0]}/{parts[2]}/{parts[3]}"
 
 
@@ -163,10 +182,12 @@ async def deliver_plan(
                     # 引用 / @ 仅限第一条文字
                     segments = _text_segments(item.text, target, quote_id, quote_pending)
                     quote_pending = False
-                    ok = onebot_ok(await _send(conn, target, segments))
+                    response = await _send(conn, target, segments)
+                    ok = onebot_ok(response)
                     path = None
                 elif item.kind == "voice":
                     ok = await _send_voice(conn, target, role_id, item.voice or {})
+                    response = None
                     path = None
                 elif item.kind == "sticker":
                     path = resolve_sticker(item.sticker, role_id)
@@ -174,7 +195,8 @@ async def deliver_plan(
                         continue
                     seen_stickers.add(str(path))
                     segments = [{"type": "image", "data": {"file": sticker_url(path, base_url)}}]
-                    ok = onebot_ok(await _send(conn, target, segments))
+                    response = await _send(conn, target, segments)
+                    ok = onebot_ok(response)
                 else:
                     continue
             except asyncio.CancelledError:
@@ -190,7 +212,10 @@ async def deliver_plan(
                     except Exception:  # noqa: BLE001 - 回调（如同步到 App）失败不影响发送
                         logger.warning("OneBot 送达回调失败", exc_info=True)
             else:
-                logger.warning("OneBot 发送未成功 role=%s kind=%s", role_id, item.kind)
+                logger.warning(
+                    "OneBot 发送未成功 role=%s kind=%s response=%s",
+                    role_id, item.kind, _brief_response(response),
+                )
     return delivered
 
 

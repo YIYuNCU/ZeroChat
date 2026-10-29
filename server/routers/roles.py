@@ -174,6 +174,8 @@ class OneBotConfig(BaseModel):
     main_user_id: int = 0
     allowed_users: List[int] = []
     allowed_groups: List[int] = []
+    # 群聊中提到任一关键词（忽略大小写）即视为 @ 了机器人
+    wake_keywords: List[str] = []
     disabled_conversations: List[str] = []
     blocked_users: Dict[str, List[str]] = {}
     # 同一发送者连续消息的聚合等待秒数（0 = 立即回复，上限 30）

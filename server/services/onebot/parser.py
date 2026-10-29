@@ -1,4 +1,4 @@
-"""OneBot 消息段解析：纯文本、图片 URL、@bot 判断、昵称。"""
+"""OneBot 消息段解析：纯文本、图片 URL、@bot / 关键词唤醒判断、昵称。"""
 from __future__ import annotations
 
 import logging
@@ -82,6 +82,50 @@ def is_at_bot(message: Any, self_id: Optional[int]) -> bool:
     return False
 
 
+def normalize_wake_keywords(raw: Any) -> List[str]:
+    """清洗配置里的唤醒关键词：去空白、去空串、忽略大小写去重，保持原有顺序。"""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    result: List[str] = []
+    seen = set()
+    for item in raw:
+        word = str(item).strip()
+        key = word.casefold()
+        if word and key not in seen:
+            seen.add(key)
+            result.append(word)
+    return result
+
+
+def _plain_text(message: Any) -> str:
+    """只取用户实际输入的文字（text 段），不含 @、图片、表情等占位符。"""
+    if isinstance(message, str):
+        return message
+    if not isinstance(message, list):
+        return ""
+    return "".join(
+        str((seg.get("data") or {}).get("text", ""))
+        for seg in message
+        if isinstance(seg, dict) and seg.get("type") == "text"
+    )
+
+
+def match_wake_keyword(message: Any, keywords: Any) -> Optional[str]:
+    """消息文字里包含任一唤醒关键词（忽略大小写）时返回命中的关键词，否则返回 None。"""
+    words = normalize_wake_keywords(keywords)
+    if not words:
+        return None
+    text = _plain_text(message).casefold()
+    if not text:
+        return None
+    for word in words:
+        if word.casefold() in text:
+            return word
+    return None
+
+
 def extract_sender_name(event: OneBotEvent) -> str:
     sender = event.sender or {}
     if event.message_type == "group":
@@ -137,6 +181,15 @@ def transform_event(
     else:
         origin, group_id, chat_name = ORIGIN_ONEBOT_PRIVATE, None, ""
 
+    at_bot = True  # 私聊恒为 True
+    if event.message_type == "group":
+        at_bot = is_at_bot(event.message, effective_self_id(config, event))
+        if not at_bot:
+            keyword = match_wake_keyword(event.message, config.get("wake_keywords"))
+            if keyword:
+                at_bot = True
+                logger.info("关键词唤醒: role=%s, group=%s, keyword=%s", role_id, event.group_id, keyword)
+
     return Inbound(
         role_id=role_id,
         origin=origin,
@@ -149,8 +202,5 @@ def transform_event(
         message_id=event.message_id,
         image_urls=image_urls,
         server_url=server_url,
-        at_bot=(
-            is_at_bot(event.message, effective_self_id(config, event))
-            if event.message_type == "group" else True
-        ),
+        at_bot=at_bot,
     )
