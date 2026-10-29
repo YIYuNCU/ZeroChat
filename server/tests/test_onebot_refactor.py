@@ -296,15 +296,84 @@ class StickerUrlTests(unittest.TestCase):
         self.assertEqual(build_server_url(self._ws("ws://127.0.0.1:8000/x")), "http://127.0.0.1:8000")
         self.assertEqual(build_server_url(self._ws("ws://[::1]:8000/x")), "http://[::1]:8000")
 
-    def test_sticker_url_quotes_segments(self):
+    def test_sticker_url_quotes_segments_and_carries_token(self):
+        from services import public_links
         from services.onebot.paths import ROLES_DIR
         from services.onebot.sender import sticker_url
 
         path = ROLES_DIR / "r1" / "emojis" / "开心 happy" / "a b.png"
-        self.assertEqual(
-            sticker_url(path, "https://h/"),
-            "https://h/files/public/emojis/r1/%E5%BC%80%E5%BF%83%20happy/a%20b.png",
-        )
+        url = sticker_url(path, "https://h/")
+        base, _, token = url.partition("?t=")
+        self.assertEqual(base, "https://h/files/public/emojis/r1/%E5%BC%80%E5%BF%83%20happy/a%20b.png")
+        self.assertTrue(public_links.store.consume(token, "r1", "开心 happy", "a b.png"))
+
+
+class PublicLinkTests(unittest.TestCase):
+    def test_token_allows_exactly_max_accesses(self):
+        from services.public_links import PublicLinkStore
+
+        store = PublicLinkStore(max_accesses=5)
+        token = store.issue("r1", "happy", "a.png")
+        self.assertEqual([store.consume(token, "r1", "happy", "a.png") for _ in range(6)],
+                         [True] * 5 + [False])
+
+    def test_wrong_scope_missing_and_unknown_tokens_are_rejected(self):
+        from services.public_links import PublicLinkStore
+
+        store = PublicLinkStore(max_accesses=2)
+        token = store.issue("r1", "happy", "a.png")
+        self.assertFalse(store.consume(token, "r1", "happy", "b.png"))
+        self.assertFalse(store.consume("", "r1", "happy", "a.png"))
+        self.assertFalse(store.consume("nope", "r1", "happy", "a.png"))
+        # 范围不符不消耗次数
+        self.assertEqual([store.consume(token, "r1", "happy", "a.png") for _ in range(3)], [True, True, False])
+
+    def test_expiry_and_independent_tokens_per_send(self):
+        from services.public_links import PublicLinkStore
+
+        now = [1000.0]
+        store = PublicLinkStore(max_accesses=5, ttl_seconds=60, clock=lambda: now[0])
+        first = store.issue("r1", "happy", "a.png")
+        second = store.issue("r1", "happy", "a.png")  # 同一文件再次发送拿到新的次数
+        self.assertNotEqual(first, second)
+        now[0] += 61
+        self.assertFalse(store.consume(first, "r1", "happy", "a.png"))
+        self.assertFalse(store.consume(second, "r1", "happy", "a.png"))
+
+    def test_configure_falls_back_on_invalid_values(self):
+        from services.public_links import PublicLinkStore
+
+        store = PublicLinkStore()
+        store.configure("3", 120)
+        self.assertEqual((store.max_accesses, store.ttl_seconds), (3, 120))
+        store.configure(0, "x")
+        self.assertEqual((store.max_accesses, store.ttl_seconds), (5, 600))
+
+    def test_route_serves_five_times_then_404(self):
+        import tempfile
+        from pathlib import Path
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from services import public_links
+        from transport import file_routes
+
+        with tempfile.TemporaryDirectory() as tmp:
+            role_dir = Path(tmp) / "r1"
+            (role_dir / "emojis" / "happy").mkdir(parents=True)
+            (role_dir / "emojis" / "happy" / "a.png").write_bytes(b"PNGDATA")
+            app = FastAPI()
+            cfg = {"auth_token": "x" * 32, "public_file_max_accesses": 5}
+            with patch.object(file_routes.roles, "get_role_dir", return_value=role_dir):
+                app.include_router(file_routes.create_files_router(cfg))
+                client = TestClient(app)
+                url = "/files/public/emojis/r1/happy/a.png"
+                self.assertEqual(client.get(url).status_code, 404)  # 无令牌
+                token = public_links.store.issue("r1", "happy", "a.png")
+                codes = [client.get(url, params={"t": token}).status_code for _ in range(6)]
+                self.assertEqual(codes, [200] * 5 + [404])
+        public_links.store.configure(None, None)
 
 
 class WakeKeywordTests(unittest.TestCase):

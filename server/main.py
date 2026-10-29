@@ -68,6 +68,9 @@ def load_config():
         "auth_token": "",
         "encryption_secret": "",
         "onebot_enabled": True,
+        # 无需鉴权的公开文件链接（如发给 NapCat 的表情图）：每个链接最多访问次数与有效秒数
+        "public_file_max_accesses": 5,
+        "public_file_link_ttl_seconds": 600,
     }
     if config_file.exists():
         with open(config_file, "r", encoding="utf-8") as f:

@@ -103,8 +103,15 @@ def resolve_sticker(emotion: Any, role_id: str) -> Optional[Path]:
 
 def sticker_url(path: Path, server_url: str) -> str:
     # path = {ROLES_DIR}/{role_id}/emojis/{category}/{filename}
-    parts = [quote(part, safe="") for part in path.relative_to(ROLES_DIR).parts]
-    return f"{server_url.rstrip('/')}/files/public/emojis/{parts[0]}/{parts[2]}/{parts[3]}"
+    from services import public_links
+
+    role_id, _, category, filename = path.relative_to(ROLES_DIR).parts[:4]
+    # 公开端点要求一次性限次令牌（默认最多访问 5 次），见 services/public_links.py
+    token = public_links.store.issue(role_id, category, filename)
+    return (
+        f"{server_url.rstrip('/')}/files/public/emojis/"
+        f"{quote(role_id, safe='')}/{quote(category, safe='')}/{quote(filename, safe='')}?t={token}"
+    )
 
 
 async def _send(conn, target: Target, segments: List[Dict[str, Any]]) -> Any:
