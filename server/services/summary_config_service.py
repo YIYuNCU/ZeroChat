@@ -1,4 +1,4 @@
-"""Independent configuration for the two memory summaries.
+"""Independent configuration for the memory / chat-recall summaries.
 
 Context (event) summaries and core-memory summaries used to borrow their API settings
 from the built-in tool roles ``1000000000002`` / ``1000000000000``. They are now driven
@@ -6,6 +6,7 @@ by their own settings entries so the features no longer depend on any role:
 
 * ``context_summary_config``      – 事件/上下文总结（写入 short_term 的 memory_summary）
 * ``core_memory_summary_config``  – 核心记忆总结（写入 memory_meta.core_memory）
+* ``chat_recall_summary_config``  – 聊天回顾总结（AI 工具 recall_chat_history 按时间/事件查阅历史聊天）
 
 Missing values fall back to the global chat API. A one-time migration copies the legacy
 tool-role profiles into settings so existing installations keep working, after which the
@@ -22,17 +23,20 @@ logger = logging.getLogger(__name__)
 
 CONTEXT_SUMMARY = "context_summary"
 CORE_MEMORY_SUMMARY = "core_memory_summary"
+CHAT_RECALL_SUMMARY = "chat_recall_summary"
 
-SUMMARY_KINDS = (CONTEXT_SUMMARY, CORE_MEMORY_SUMMARY)
+SUMMARY_KINDS = (CONTEXT_SUMMARY, CORE_MEMORY_SUMMARY, CHAT_RECALL_SUMMARY)
 
 CONFIG_KEYS = {
     CONTEXT_SUMMARY: "context_summary_config",
     CORE_MEMORY_SUMMARY: "core_memory_summary_config",
+    CHAT_RECALL_SUMMARY: "chat_recall_summary_config",
 }
 
 PROMPT_IDS = {
     CONTEXT_SUMMARY: prompt_config_service.SUMMARY_CONTEXT_EVENTS_ID,
     CORE_MEMORY_SUMMARY: prompt_config_service.SUMMARY_CORE_MEMORY_ID,
+    CHAT_RECALL_SUMMARY: prompt_config_service.SUMMARY_CHAT_RECALL_ID,
 }
 
 #: Legacy tool-role profiles used only to seed the first migration.

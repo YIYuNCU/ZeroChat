@@ -123,7 +123,7 @@ class ModelThinkingSettings(BaseModel):
 
 
 class SummaryConfigUpdate(BaseModel):
-    """一个记忆总结功能的独立配置（事件总结 / 核心记忆总结）。"""
+    """一个总结功能的独立配置（事件总结 / 核心记忆总结 / 聊天回顾总结）。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -157,6 +157,7 @@ class SettingsUpdate(BaseModel):
     ai_stream: Optional[bool] = None
     context_summary_config: Optional[SummaryConfigUpdate] = None
     core_memory_summary_config: Optional[SummaryConfigUpdate] = None
+    chat_recall_summary_config: Optional[SummaryConfigUpdate] = None
     prompt_overrides: Optional[dict[str, dict[str, str]]] = None
     model_prompt_overrides: Optional[dict[str, dict[str, dict[str, str]]]] = None
     intent_enabled: Optional[bool] = None
@@ -192,7 +193,7 @@ async def get_settings(include_secrets: bool = Query(False)):
             if masked is not None:
                 settings[f"{key_name}_masked"] = masked
                 del settings[key_name]
-        for config_key in ("context_summary_config", "core_memory_summary_config"):
+        for config_key in summary_config_service.CONFIG_KEYS.values():
             entry = settings.get(config_key)
             if not isinstance(entry, dict):
                 continue
@@ -245,6 +246,12 @@ async def update_settings(update: SettingsUpdate):
         summary_config_saved = summary_config_service.update_summary_config(
             summary_config_service.CORE_MEMORY_SUMMARY,
             update.core_memory_summary_config.model_dump(exclude_unset=True),
+        ) and summary_config_saved
+    if update.chat_recall_summary_config is not None:
+        summary_config_changed = True
+        summary_config_saved = summary_config_service.update_summary_config(
+            summary_config_service.CHAT_RECALL_SUMMARY,
+            update.chat_recall_summary_config.model_dump(exclude_unset=True),
         ) and summary_config_saved
     # `model_prompt_overrides` is still accepted from older clients but is no longer applied.
     if update.prompt_overrides is not None:
@@ -326,7 +333,7 @@ async def get_prompt_registry(applies_to: Optional[str] = Query(None)):
 
 @router.get("/settings/summary")
 async def get_summary_settings():
-    """获取两个记忆总结功能的独立配置（API Key 以掩码形式返回）。"""
+    """获取各总结功能的独立配置（API Key 以掩码形式返回）。"""
     result = {}
     for kind in summary_config_service.SUMMARY_KINDS:
         stored = summary_config_service.load_summary_config(kind)

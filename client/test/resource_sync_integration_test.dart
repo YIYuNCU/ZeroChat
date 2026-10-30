@@ -37,6 +37,10 @@ void main() {
         'model': 'summary-model',
         'api_key': 'summary-secret',
       },
+      'chat_recall_summary_config': {
+        'model': 'recall-model',
+        'api_key': 'recall-secret',
+      },
     };
     roles = [
       {
@@ -61,10 +65,14 @@ void main() {
         requests.add({'action': action, 'payload': payload});
         Map<String, dynamic> response;
         if (action == 'settings_get') {
-          final summaryOnly =
-              (payload['groups'] as List?)?.contains('context_summary') == true;
-          final values = summaryOnly
+          final groups = (payload['groups'] as List?) ?? const [];
+          final values = groups.contains('context_summary')
               ? {'context_summary_config': remote['context_summary_config']}
+              : groups.contains('recall_summary')
+              ? {
+                  'chat_recall_summary_config':
+                      remote['chat_recall_summary_config'],
+                }
               : remote;
           response = {
             'settings': values,
@@ -188,6 +196,53 @@ void main() {
     });
   });
 
+  test('chat recall config restores from the server payload', () async {
+    expect(await settings.syncAllSettingsFromBackend(), isTrue);
+    expect(settings.chatRecallSummaryConfig.model, 'recall-model');
+    expect(settings.chatRecallSummaryConfig.apiKey, 'recall-secret');
+    expect(secrets['summary_api_key_chat_recall_summary'], 'recall-secret');
+    expect(settings.contextSummaryConfig.model, 'summary-model');
+    expect(settings.coreMemorySummaryConfig.model, isEmpty);
+  });
+
+  test('recall_summary group read restores only the recall config', () async {
+    remote['chat_recall_summary_config'] = {
+      'model': 'group-recall',
+      'api_key': 'group-secret',
+    };
+    expect(
+      await settings.syncSettingsGroupsFromBackend(['recall_summary']),
+      isTrue,
+    );
+    final read = requests.lastWhere((r) => r['action'] == 'settings_get');
+    expect((read['payload'] as Map)['groups'], ['recall_summary']);
+    expect(settings.chatRecallSummaryConfig.model, 'group-recall');
+    expect(settings.chatRecallSummaryConfig.apiKey, 'group-secret');
+    expect(settings.contextSummaryConfig.model, isEmpty);
+  });
+
+  test('chat recall patch sends only its changed field and key', () async {
+    expect(await settings.syncAllSettingsFromBackend(), isTrue);
+    final config = settings.chatRecallSummaryConfig.copy()
+      ..model = 'edited-recall';
+    await settings.updateChatRecallSummaryConfig(config);
+    expect(
+      await settings.syncSummaryConfigToBackend(SummaryFeature.chatRecall),
+      isTrue,
+    );
+    final update = requests.last['payload'] as Map;
+    expect(update['updates'], {
+      'chat_recall_summary_config': {'model': 'edited-recall'},
+    });
+    expect(update['base_versions'], {
+      'chat_recall_summary_config': 'version-1',
+    });
+    // 已确认的字段不会在全量同步里重复发送。
+    final count = requests.length;
+    expect(await settings.syncApiSettingsToBackend(), isTrue);
+    expect(requests.length, count);
+  });
+
   test('conflict preserves local edits across a background read', () async {
     await settings.syncAllSettingsFromBackend();
     await settings.updateChatApi(
@@ -227,6 +282,55 @@ void main() {
       expect(settings.contextSummaryConfig.apiKey, 'profile-secret');
     },
   );
+
+  const recallProfile = ModelApiProfile(
+    id: 'p',
+    name: 'Local',
+    apiUrl: 'https://provider.test',
+    model: 'p-model',
+    apiKey: 'profile-secret',
+    capabilities: {ModelProfileCapability.chat},
+  );
+
+  test('chat recall profile binding is stashed per backend', () async {
+    await settings.saveApiProfile(recallProfile);
+    await settings.updateContextSummaryConfig(SummaryApiConfig(profileId: 'p'));
+    await settings.updateChatRecallSummaryConfig(
+      SummaryApiConfig(profileId: 'p'),
+    );
+    final originalUrl = settings.backendUrl;
+    await settings.updateBackendUrl('http://127.0.0.1:1');
+    expect(settings.chatRecallSummaryConfig.profileId, isNull);
+    await settings.updateBackendUrl(originalUrl);
+    expect(settings.chatRecallSummaryConfig.profileId, 'p');
+    expect(settings.chatRecallSummaryConfig.apiKey, 'profile-secret');
+  });
+
+  test('stashed snapshots without a recall binding still restore', () async {
+    await settings.saveApiProfile(recallProfile);
+    await settings.updateContextSummaryConfig(SummaryApiConfig(profileId: 'p'));
+    await settings.updateChatRecallSummaryConfig(
+      SummaryApiConfig(profileId: 'p'),
+    );
+    final originalUrl = settings.backendUrl;
+    await settings.updateBackendUrl('http://127.0.0.1:1');
+    // 模拟旧版本写下的快照：绑定表里没有 recall 键。
+    final snapshotKeys = secrets.keys
+        .where((key) => key.endsWith('_snapshot'))
+        .toList();
+    expect(snapshotKeys, isNotEmpty);
+    for (final key in snapshotKeys) {
+      final snapshot = Map<String, dynamic>.from(
+        jsonDecode(secrets[key]!) as Map,
+      );
+      (snapshot['_local_summary_bindings'] as Map).remove('recall');
+      secrets[key] = jsonEncode(snapshot);
+    }
+    await SecureStorageService.init();
+    await settings.updateBackendUrl(originalUrl);
+    expect(settings.contextSummaryConfig.profileId, 'p');
+    expect(settings.chatRecallSummaryConfig.profileId, isNull);
+  });
 
   test(
     'role detail can clear a secret and local drafts survive reload and refresh',

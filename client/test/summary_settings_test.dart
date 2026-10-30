@@ -17,6 +17,8 @@ void main() {
   var failWrites = false;
   const localKey = 'summary_config_context_summary';
   const secretKey = 'summary_api_key_context_summary';
+  const recallLocalKey = 'summary_config_chat_recall_summary';
+  const recallSecretKey = 'summary_api_key_chat_recall_summary';
   const profile = ModelApiProfile(
     id: 'summary-profile',
     name: 'Shared profile',
@@ -82,6 +84,84 @@ void main() {
     },
   );
 
+  test('chat recall feature uses its own storage keys and settings', () {
+    expect(SummaryFeature.chatRecall.storageValue, 'chat_recall_summary');
+    expect(SummaryFeature.chatRecall.title, '聊天回顾总结');
+    expect(
+      SummaryFeature.chatRecall.description,
+      'AI 按指定时间/事件查阅历史聊天时，用此模型总结相关内容',
+    );
+    expect(
+      settings.summaryConfigFor(SummaryFeature.context),
+      same(settings.contextSummaryConfig),
+    );
+    expect(
+      settings.summaryConfigFor(SummaryFeature.coreMemory),
+      same(settings.coreMemorySummaryConfig),
+    );
+    expect(
+      settings.summaryConfigFor(SummaryFeature.chatRecall),
+      same(settings.chatRecallSummaryConfig),
+    );
+  });
+
+  test(
+    'chat recall secret lives in secure storage and is isolated from other features',
+    () async {
+      await settings.updateContextSummaryConfig(
+        SummaryApiConfig(apiKey: 'context-secret', model: 'context-model'),
+      );
+      await settings.updateChatRecallSummaryConfig(
+        SummaryApiConfig(apiKey: 'recall-secret', model: 'recall-model'),
+      );
+      expect(
+        StorageService.getJson(recallLocalKey)!.containsKey('api_key'),
+        isFalse,
+      );
+      expect(secrets[recallSecretKey], 'recall-secret');
+      expect(secrets[secretKey], 'context-secret');
+      await SecureStorageService.init();
+      await SettingsService.init();
+      expect(settings.chatRecallSummaryConfig.apiKey, 'recall-secret');
+      expect(settings.chatRecallSummaryConfig.model, 'recall-model');
+      expect(settings.contextSummaryConfig.apiKey, 'context-secret');
+      expect(settings.coreMemorySummaryConfig.apiKey, isEmpty);
+    },
+  );
+
+  test('chat recall binds a profile and follows later profile edits', () async {
+    await settings.saveApiProfile(profile);
+    await settings.updateChatRecallSummaryConfig(
+      SummaryApiConfig(profileId: profile.id),
+    );
+    expect(settings.chatRecallSummaryConfig.profileId, profile.id);
+    expect(settings.chatRecallSummaryConfig.model, 'old-model');
+    expect(settings.chatRecallSummaryConfig.apiKey, 'profile-secret');
+    expect(settings.contextSummaryConfig.profileId, isNull);
+
+    await settings.saveApiProfile(
+      ModelApiProfile(
+        id: profile.id,
+        name: profile.name,
+        apiUrl: profile.apiUrl,
+        model: 'edited-model',
+        apiKey: 'edited-secret',
+        capabilities: profile.capabilities,
+      ),
+    );
+    final payload = settings.summaryConfigPayload(
+      settings.chatRecallSummaryConfig,
+    );
+    expect(payload['model'], 'edited-model');
+    expect(payload['api_key'], 'edited-secret');
+    expect(payload.containsKey('profile_id'), isFalse);
+
+    await SecureStorageService.init();
+    await SettingsService.init();
+    expect(settings.chatRecallSummaryConfig.profileId, profile.id);
+    expect(StorageService.getJson(recallLocalKey)!['profile_id'], profile.id);
+  });
+
   test('legacy nested secret migrates before plaintext is removed', () async {
     await StorageService.setJson(localKey, {
       'api_key': 'legacy-secret',
@@ -124,15 +204,16 @@ void main() {
     expect(resolved.thinkingBudget, isNull);
   });
 
-  Future<void> openSummary(WidgetTester tester) async {
+  Future<void> openSummary(
+    WidgetTester tester, {
+    SummaryFeature feature = SummaryFeature.context,
+  }) async {
     tester.view.physicalSize = const Size(600, 1600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(
-      const MaterialApp(
-        home: SummaryModelSettingsPage(feature: SummaryFeature.context),
-      ),
+      MaterialApp(home: SummaryModelSettingsPage(feature: feature)),
     );
     await tester.pumpAndSettle();
   }
@@ -182,6 +263,26 @@ void main() {
     expect(settings.contextSummaryConfig.model, 'new-model');
     expect(settings.contextSummaryConfig.apiKey, 'new-secret');
     expect(settings.contextSummaryConfig.thinkingEnabled, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('chat recall page saves its own config and bound profile', (
+    tester,
+  ) async {
+    await settings.saveApiProfile(profile);
+    await settings.updateChatRecallSummaryConfig(
+      SummaryApiConfig(profileId: profile.id),
+    );
+    await openSummary(tester, feature: SummaryFeature.chatRecall);
+    expect(find.text(SummaryFeature.chatRecall.title), findsWidgets);
+    expect(find.text('old-model'), findsWidgets);
+    await tester.tap(find.widgetWithText(TextButton, '保存'));
+    await tester.pumpAndSettle();
+    expect(settings.chatRecallSummaryConfig.profileId, profile.id);
+    expect(settings.chatRecallSummaryConfig.apiKey, 'profile-secret');
+    expect(secrets[recallSecretKey], 'profile-secret');
+    expect(StorageService.getJson(localKey), isNull);
+    expect(settings.contextSummaryConfig.profileId, isNull);
     expect(tester.takeException(), isNull);
   });
 

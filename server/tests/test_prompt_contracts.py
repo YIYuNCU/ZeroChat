@@ -87,7 +87,11 @@ class SummaryPromptContractTests(unittest.TestCase):
         )
 
     def test_summary_prompts_do_not_carry_chat_protocol_text(self):
-        for prompt_id in (prompts.SUMMARY_CORE_MEMORY_ID, prompts.SUMMARY_CONTEXT_EVENTS_ID):
+        for prompt_id in (
+            prompts.SUMMARY_CORE_MEMORY_ID,
+            prompts.SUMMARY_CONTEXT_EVENTS_ID,
+            prompts.SUMMARY_CHAT_RECALL_ID,
+        ):
             with self.subTest(prompt_id=prompt_id):
                 text = prompts.PROMPT_REGISTRY[prompt_id].builtin
                 self.assertNotIn("<对话>", text)

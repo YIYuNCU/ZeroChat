@@ -295,7 +295,8 @@ class SummaryPromptScopingTests(unittest.TestCase):
         self.assertEqual(
             summary_ids,
             {summaries.PROMPT_IDS[summaries.CONTEXT_SUMMARY],
-             summaries.PROMPT_IDS[summaries.CORE_MEMORY_SUMMARY]},
+             summaries.PROMPT_IDS[summaries.CORE_MEMORY_SUMMARY],
+             summaries.PROMPT_IDS[summaries.CHAT_RECALL_SUMMARY]},
         )
         for prompt_id in summary_ids:
             with self.subTest(prompt_id=prompt_id):
@@ -392,6 +393,7 @@ class SettingsDefaultsTests(unittest.TestCase):
         for key in (
             "context_summary_config",
             "core_memory_summary_config",
+            "chat_recall_summary_config",
             "prompt_overrides",
             "model_prompt_overrides",
         ):
@@ -410,6 +412,7 @@ class SettingsDefaultsTests(unittest.TestCase):
             data = json.load(handle)
         self.assertIn("context_summary_config", data)
         self.assertIn("core_memory_summary_config", data)
+        self.assertIn("chat_recall_summary_config", data)
         self.assertIn("prompt_overrides", data)
 
 

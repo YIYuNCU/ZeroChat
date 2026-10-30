@@ -72,7 +72,9 @@ class WsDispatcherWiringTests(unittest.TestCase):
                             response = asyncio.run(ws_dispatcher._handle_settings_get(
                                 {'include_secrets': include_secrets}, 'http://localhost'))
                         updates = {}
-                        for key in summary_config_service.CONFIG_KEYS.values():
+                        # 聊天回顾总结没有旧档案，不参与旧档案迁移。
+                        for kind in summary_config_service.LEGACY_WORKER_IDS:
+                            key = summary_config_service.CONFIG_KEYS[kind]
                             config = response['settings'][key]
                             self.assertEqual(config['model'], 'legacy-model')
                             self.assertEqual('api_key' in config, include_secrets)

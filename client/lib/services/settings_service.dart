@@ -120,6 +120,19 @@ class SettingsService extends ChangeNotifier {
     );
   }
 
+  /// 三个总结功能在服务端设置里的配置键。
+  static const List<String> _summaryConfigKeys = [
+    'context_summary_config',
+    'core_memory_summary_config',
+    'chat_recall_summary_config',
+  ];
+
+  static String _summaryConfigKey(SummaryFeature feature) => switch (feature) {
+    SummaryFeature.context => 'context_summary_config',
+    SummaryFeature.coreMemory => 'core_memory_summary_config',
+    SummaryFeature.chatRecall => 'chat_recall_summary_config',
+  };
+
   String get _baselineKey =>
       'settings_baseline_${ConditionalCacheService.digest('$_backendUrl|${SecureBackendClient.cacheIdentity}')}';
 
@@ -128,7 +141,7 @@ class SettingsService extends ChangeNotifier {
   Map<String, String> _fingerprints(Map<String, dynamic> values) => {
     for (final entry in values.entries)
       entry.key: _fieldFingerprint(entry.value),
-    for (final key in ['context_summary_config', 'core_memory_summary_config'])
+    for (final key in _summaryConfigKeys)
       if (values[key] is Map)
         for (final field in (values[key] as Map).entries)
           '$key.${field.key}': _fieldFingerprint(field.value),
@@ -145,10 +158,7 @@ class SettingsService extends ChangeNotifier {
         if (_settingsBaseline[entry.key] != _fieldFingerprint(entry.value))
           entry.key: entry.value,
     };
-    for (final key in [
-      'context_summary_config',
-      'core_memory_summary_config',
-    ]) {
+    for (final key in _summaryConfigKeys) {
       if (updates[key] is Map) {
         final fields = Map<String, dynamic>.from(updates[key] as Map);
         fields.removeWhere(
@@ -253,9 +263,10 @@ class SettingsService extends ChangeNotifier {
   // 供应商+模型级安静规则（以服务端 settings.json `quiet_rules` 为准）
   List<ProviderQuietRule> _providerQuietRules = [];
 
-  // 记忆总结（事件总结 / 核心记忆总结）不再绑定角色，各自独立配置
+  // 总结功能（事件总结 / 核心记忆总结 / 聊天回顾总结）不再绑定角色，各自独立配置
   SummaryApiConfig _contextSummaryConfig = SummaryApiConfig();
   SummaryApiConfig _coreMemorySummaryConfig = SummaryApiConfig();
+  SummaryApiConfig _chatRecallSummaryConfig = SummaryApiConfig();
 
   // 可配置系统提示词：全局覆盖（按角色覆盖存放在角色 metadata 中）
   Map<String, Map<String, String>> _promptOverrides = {};
@@ -347,7 +358,7 @@ class SettingsService extends ChangeNotifier {
     );
   }
 
-  /// 从服务端设置恢复两个记忆总结配置与全局提示词覆盖。
+  /// 从服务端设置恢复三个总结配置与全局提示词覆盖。
   Future<void> _restoreSummaryAndPromptSettings(
     Map<String, dynamic> server, {
     required bool includeSecrets,
@@ -360,6 +371,11 @@ class SettingsService extends ChangeNotifier {
     await _restoreSummaryConfig(
       SummaryFeature.coreMemory,
       server['core_memory_summary_config'],
+      includeSecrets: includeSecrets,
+    );
+    await _restoreSummaryConfig(
+      SummaryFeature.chatRecall,
+      server['chat_recall_summary_config'],
       includeSecrets: includeSecrets,
     );
 
@@ -412,10 +428,14 @@ class SettingsService extends ChangeNotifier {
 
   SummaryApiConfig get coreMemorySummaryConfig => _coreMemorySummaryConfig;
 
+  SummaryApiConfig get chatRecallSummaryConfig => _chatRecallSummaryConfig;
+
   SummaryApiConfig summaryConfigFor(SummaryFeature feature) =>
-      feature == SummaryFeature.context
-      ? _contextSummaryConfig
-      : _coreMemorySummaryConfig;
+      switch (feature) {
+        SummaryFeature.context => _contextSummaryConfig,
+        SummaryFeature.coreMemory => _coreMemorySummaryConfig,
+        SummaryFeature.chatRecall => _chatRecallSummaryConfig,
+      };
 
   Map<String, Map<String, String>> get promptOverrides =>
       Map.unmodifiable(_promptOverrides);
@@ -428,6 +448,9 @@ class SettingsService extends ChangeNotifier {
 
   Future<void> updateCoreMemorySummaryConfig(SummaryApiConfig config) =>
       updateSummaryConfig(SummaryFeature.coreMemory, config);
+
+  Future<void> updateChatRecallSummaryConfig(SummaryApiConfig config) =>
+      updateSummaryConfig(SummaryFeature.chatRecall, config);
 
   Future<void> updateSummaryConfig(
     SummaryFeature feature,
@@ -444,10 +467,13 @@ class SettingsService extends ChangeNotifier {
       'summary_config_${feature.storageValue}',
       config.toLocalJson(),
     );
-    if (feature == SummaryFeature.context) {
-      _contextSummaryConfig = config;
-    } else {
-      _coreMemorySummaryConfig = config;
+    switch (feature) {
+      case SummaryFeature.context:
+        _contextSummaryConfig = config;
+      case SummaryFeature.coreMemory:
+        _coreMemorySummaryConfig = config;
+      case SummaryFeature.chatRecall:
+        _chatRecallSummaryConfig = config;
     }
     notifyListeners();
   }
@@ -1036,6 +1062,9 @@ class SettingsService extends ChangeNotifier {
     _coreMemorySummaryConfig = await _readSummaryConfig(
       SummaryFeature.coreMemory,
     );
+    _chatRecallSummaryConfig = await _readSummaryConfig(
+      SummaryFeature.chatRecall,
+    );
   }
 
   Future<SummaryApiConfig> _readSummaryConfig(SummaryFeature feature) async {
@@ -1249,6 +1278,8 @@ class SettingsService extends ChangeNotifier {
     final bindings = values.remove('_local_summary_bindings') as Map? ?? {};
     _contextSummaryConfig.profileId = bindings['context'] as String?;
     _coreMemorySummaryConfig.profileId = bindings['core'] as String?;
+    // 旧版暂存快照没有 recall 键，缺失时视为未绑定。
+    _chatRecallSummaryConfig.profileId = bindings['recall'] as String?;
     _roleModelProfileSelections =
         (StorageService.getJson('role_model_profile_selections') ?? {}).map(
           (key, value) => MapEntry(key, value.toString()),
@@ -1271,6 +1302,7 @@ class SettingsService extends ChangeNotifier {
         '_local_summary_bindings': {
           'context': _contextSummaryConfig.profileId,
           'core': _coreMemorySummaryConfig.profileId,
+          'recall': _chatRecallSummaryConfig.profileId,
         },
       }),
       requireSuccess: true,
@@ -1291,6 +1323,9 @@ class SettingsService extends ChangeNotifier {
     'context_summary_config': summaryConfigPayload(_contextSummaryConfig),
     'core_memory_summary_config': summaryConfigPayload(
       _coreMemorySummaryConfig,
+    ),
+    'chat_recall_summary_config': summaryConfigPayload(
+      _chatRecallSummaryConfig,
     ),
     'prompt_overrides': _promptOverrides,
     'intent_enabled': _intentEnabled,
@@ -1338,9 +1373,7 @@ class SettingsService extends ChangeNotifier {
   }
 
   Future<bool> _syncSummaryConfigToBackend(SummaryFeature feature) async {
-    final configKey = feature == SummaryFeature.context
-        ? 'context_summary_config'
-        : 'core_memory_summary_config';
+    final configKey = _summaryConfigKey(feature);
     try {
       final response = await _syncSettingsPatch({
         configKey: summaryConfigPayload(summaryConfigFor(feature)),

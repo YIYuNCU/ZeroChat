@@ -158,6 +158,18 @@ class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
               ),
               const Divider(height: 1, indent: 56),
               _NavigationRow(
+                icon: Icons.manage_search,
+                title: SummaryFeature.chatRecall.title,
+                subtitle: _summarySummary(settings.chatRecallSummaryConfig),
+                onTap: () => _push(
+                  context,
+                  const SummaryModelSettingsPage(
+                    feature: SummaryFeature.chatRecall,
+                  ),
+                ),
+              ),
+              const Divider(height: 1, indent: 56),
+              _NavigationRow(
                 icon: Icons.article_outlined,
                 title: '系统提示词',
                 subtitle: _promptsSubtitle(),
@@ -836,9 +848,11 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
     final before = controllers.map((c) => c.text).join('\u0000');
     final flags = [_enabled, _format, _thinkingEnabled, _profileId].join('|');
     final ok = await SettingsService.instance.syncSettingsGroupsFromBackend([
-      widget.feature == SummaryFeature.context
-          ? 'context_summary'
-          : 'core_summary',
+      switch (widget.feature) {
+        SummaryFeature.context => 'context_summary',
+        SummaryFeature.coreMemory => 'core_summary',
+        SummaryFeature.chatRecall => 'recall_summary',
+      },
     ]);
     if (!mounted ||
         !ok ||
@@ -880,14 +894,15 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
     super.dispose();
   }
 
-  /// 当前功能在提示词注册表里的条目（事件总结 / 核心记忆总结各一条）。
+  /// 当前功能在提示词注册表里的条目（每个总结功能各一条，按提示词 id 精确匹配）。
   ConfigurablePrompt? get _promptDefinition {
+    final id = switch (widget.feature) {
+      SummaryFeature.context => 'summary.context_events',
+      SummaryFeature.coreMemory => 'summary.core_memory',
+      SummaryFeature.chatRecall => 'summary.chat_recall',
+    };
     for (final prompt in SettingsService.instance.promptRegistry.values) {
-      if (!prompt.isSummary) continue;
-      final matchesFeature = widget.feature == SummaryFeature.context
-          ? prompt.id.contains('context')
-          : prompt.id.contains('core_memory');
-      if (matchesFeature) return prompt;
+      if (prompt.isSummary && prompt.id == id) return prompt;
     }
     return null;
   }
@@ -981,7 +996,7 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
         children: [
           _PageHint(
             '${widget.feature.description}。未绑定模型档案时，留空的 API 配置将回退到默认聊天模型；'
-            '这两个总结功能独立于角色，不再需要配置总结助手角色。',
+            '总结功能独立于角色，不再需要配置总结助手角色。',
           ),
           _Section(
             children: [
@@ -1232,7 +1247,7 @@ class _PromptsPageState extends State<PromptsPage> {
   @override
   Widget build(BuildContext context) {
     final registry = _registry ?? SettingsService.instance.promptRegistry;
-    // 只列聊天系统提示词：两个记忆总结的提示词属于各自功能页，不在这里重复出现。
+    // 只列聊天系统提示词：各总结功能的提示词属于各自功能页，不在这里重复出现。
     final prompts =
         registry.values
             .where((prompt) => prompt.appliesTo.contains('chat'))
@@ -1274,7 +1289,7 @@ class _PromptsPageState extends State<PromptsPage> {
                   '这里直接编辑提示词（md）全文，作用于全部角色；修改会同步到服务端并在下一次请求生效。'
                   '某个角色需要不同的提示词时，到该角色的设置页「提示词（仅此角色）」里单独编辑。\n'
                   '此处只列聊天所用系统提示词；工具调用规则由程序内置（与实际可用工具'
-                  '和表情插件强绑定，不可修改），事件总结与核心记忆总结的提示词在'
+                  '和表情插件强绑定，不可修改），事件总结、核心记忆总结与聊天回顾总结的提示词在'
                   '各自的功能页配置。',
                 ),
                 ..._promptGroups(prompts),

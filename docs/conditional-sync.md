@@ -6,7 +6,7 @@
 
 可缓存的 WebSocket 读取携带 `_sync: {version: 1, hash, hashes}`。服务端基于同一份读取结果生成摘要：未变化时只返回 `_sync.not_modified`；变化时返回权威 `layout`、分块 hashes 与有变化的 `parts`。客户端按该次清单重建结果，清单中删除的块不再沿用。
 
-- 设置按字段分块，并支持 `settings_get.groups`：chat、thinking、intent、vision、embedding、context_summary、core_summary、prompts、quiet_rules、profile。启动读取常用公开组，总结页面后台读取自己的组。保存只发送脏字段，总结配置继续细分到子字段，未变化的密钥不重复上传。
+- 设置按字段分块，并支持 `settings_get.groups`：chat、thinking、intent、vision、embedding、context_summary、core_summary、recall_summary、prompts、quiet_rules、profile。启动读取常用公开组，总结页面后台读取自己的组。保存只发送脏字段，总结配置继续细分到子字段，未变化的密钥不重复上传。
 - `field_versions` 与 `settings_update.base_versions` 提供字段级乐观并发检查。冲突不写入，客户端保留草稿并允许选择服务器值或本地值。
 - 角色列表使用摘要，编辑时才读取详情；系统提示词、核心记忆、附件 JSON、API key 和 OneBot secret 不进入列表摘要。角色补丁的本地基线持久化，刷新保留未同步编辑。
 - 聊天快照按会话分组，每 200 条消息一块；传输缓存独立于合并后的本地档案。只有本地消息 hash 与服务端相等才跳过档案合并。

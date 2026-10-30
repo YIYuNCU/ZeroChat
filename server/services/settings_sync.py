@@ -7,6 +7,7 @@ GROUPS = {
     "embedding": {"embedding_enabled", "embedding_api_url", "embedding_api_key", "embedding_model"},
     "context_summary": {"context_summary_config"},
     "core_summary": {"core_memory_summary_config"},
+    "recall_summary": {"chat_recall_summary_config"},
     "prompts": {"prompt_overrides", "model_prompt_overrides"},
     "quiet_rules": {"quiet_rules"},
     "profile": {"user_nickname", "user_avatar_url", "user_avatar_hash"},

@@ -443,7 +443,7 @@ async def _handle_settings_get(payload: dict, backend_base_url: str) -> dict:
             if masked is not None:
                 settings_data[f"{key_name}_masked"] = masked
                 del settings_data[key_name]
-        for config_key in ("context_summary_config", "core_memory_summary_config"):
+        for config_key in summary_config_service.CONFIG_KEYS.values():
             entry = settings_data.get(config_key)
             if not isinstance(entry, dict):
                 continue
@@ -470,7 +470,7 @@ async def _handle_settings_prompts_get(payload: dict) -> dict:
 
 
 async def _handle_settings_summary_get(payload: dict) -> dict:
-    """Return the independent configuration of both memory summaries."""
+    """Return the independent configuration of every summary feature."""
     result = {}
     for kind in summary_config_service.SUMMARY_KINDS:
         stored = summary_config_service.load_summary_config(kind)
@@ -563,6 +563,12 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
         summary_config_saved = summary_config_service.update_summary_config(
             summary_config_service.CORE_MEMORY_SUMMARY,
             update.core_memory_summary_config.model_dump(exclude_unset=True),
+        ) and summary_config_saved
+    if update.chat_recall_summary_config is not None:
+        summary_config_changed = True
+        summary_config_saved = summary_config_service.update_summary_config(
+            summary_config_service.CHAT_RECALL_SUMMARY,
+            update.chat_recall_summary_config.model_dump(exclude_unset=True),
         ) and summary_config_saved
     # `model_prompt_overrides` is still accepted from older clients but is no longer applied.
     if update.prompt_overrides is not None:

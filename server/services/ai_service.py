@@ -1361,6 +1361,7 @@ from services.ai_tools import (
     _SEARCH_MEMORY_TOOL,
     _VIEW_MOMENTS_TOOL,
     _VIEW_MOMENT_COMMENTS_TOOL,
+    _RECALL_CHAT_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
     _SEND_VOICE_MESSAGE_TOOL,
     _WEB_SEARCH_TOOL,
@@ -1374,6 +1375,8 @@ from services.ai_tools import (
     execute_search_memory,
     execute_view_moments,
     execute_view_moment_comments,
+    execute_recall_chat_history,
+    is_recall_chat_available,
     execute_send_emotion_emoji,
     execute_send_voice_message,
     execute_web_search,
@@ -1471,6 +1474,9 @@ async def generate_with_role(
         # 朋友圈是主用户的私人数据：仅 App 与主用户 QQ 私聊可查看，第三方/群聊不开放
         active_tools.extend(_VIEW_MOMENTS_TOOL)
         active_tools.extend(_VIEW_MOMENT_COMMENTS_TOOL)
+        # 历史聊天同属主用户私人数据；聊天回顾总结被关闭或未配置时不开放
+        if is_recall_chat_available():
+            active_tools.extend(_RECALL_CHAT_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
     if enable_voice:
@@ -1707,6 +1713,20 @@ async def _handle_tool_calls(
                         tool_result = "参数不完整：post_id 为必填"
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: view_moment_comments -> {tool_result[:100]}")
+
+                elif func_name == "recall_chat_history":
+                    logger.info(
+                        "Tool call: recall_chat_history [start=%s, end=%s, event=%s]",
+                        args.get("start_time"), args.get("end_time"), str(args.get("event") or "")[:80],
+                    )
+                    tool_result = await execute_recall_chat_history(
+                        role_data,
+                        str(args.get("start_time") or ""),
+                        str(args.get("end_time") or ""),
+                        str(args.get("event") or ""),
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: recall_chat_history -> {tool_result[:100]}")
 
                 elif func_name == "send_voice_message":
                     voice_text = str(args.get("text", "")).strip()

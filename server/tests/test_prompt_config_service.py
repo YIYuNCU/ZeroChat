@@ -23,6 +23,7 @@ class PromptRegistryTests(unittest.TestCase):
             prompts.ONEBOT_SYSTEM_DIRECTIVE_ID,
             prompts.SUMMARY_CONTEXT_EVENTS_ID,
             prompts.SUMMARY_CORE_MEMORY_ID,
+            prompts.SUMMARY_CHAT_RECALL_ID,
         ]:
             with self.subTest(prompt_id=prompt_id):
                 self.assertEqual(

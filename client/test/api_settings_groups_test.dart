@@ -134,18 +134,35 @@ void main() {
   });
 
   group('SummaryModelSettingsPage', () {
-    Future<void> pumpSummary(WidgetTester tester) async {
+    Future<void> pumpSummary(
+      WidgetTester tester, {
+      SummaryFeature feature = SummaryFeature.context,
+    }) async {
       tester.view.physicalSize = const Size(600, 1600);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       await tester.pumpWidget(
-        const MaterialApp(
-          home: SummaryModelSettingsPage(feature: SummaryFeature.context),
-        ),
+        MaterialApp(home: SummaryModelSettingsPage(feature: feature)),
       );
       await tester.pumpAndSettle();
     }
+
+    testWidgets('chat recall page shows its title, hint and groups', (
+      tester,
+    ) async {
+      await pumpSummary(tester, feature: SummaryFeature.chatRecall);
+
+      expect(find.text('聊天回顾总结'), findsOneWidget);
+      expect(
+        find.textContaining('AI 按指定时间/事件查阅历史聊天时，用此模型总结相关内容'),
+        findsOneWidget,
+      );
+      for (final title in ['模型档案', '高级参数', '系统提示词']) {
+        expect(find.text(title), findsOneWidget, reason: title);
+      }
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets('shows core fields and collapsed groups', (tester) async {
       await pumpSummary(tester);
