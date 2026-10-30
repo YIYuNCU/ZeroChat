@@ -889,9 +889,17 @@ class ChatController extends ChangeNotifier {
 
     String contentToSend;
     var voiceMessages = const <VoiceMessage>[];
+    // 真实 AI 回复才携带 request_id / 工具调用 / 思考过程；失败时回退的固定提醒
+    // 文案没有对应的 AI 请求，不能关联工具调用历史。
+    String? replyRequestId;
+    var replyHasToolCalls = false;
+    String? replyReasoning;
     if (response.success && response.content != null) {
       contentToSend = response.content!;
       voiceMessages = VoiceMessage.listFromMetadata(response.metadata);
+      replyRequestId = response.metadata?['request_id']?.toString();
+      replyHasToolCalls = _extractHasToolCalls(response.metadata);
+      replyReasoning = _extractReasoning(response.metadata);
     } else if (response.ignored) {
       debugPrint('ChatController: AI chose not to send scheduled task message');
       return;
@@ -908,6 +916,9 @@ class ChatController extends ChangeNotifier {
       roleId,
       contentToSend,
       isGroup: false,
+      requestId: replyRequestId,
+      hasToolCalls: replyHasToolCalls,
+      reasoning: replyReasoning,
       voiceMessages: voiceMessages,
     );
 

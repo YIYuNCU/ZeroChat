@@ -66,6 +66,7 @@ def get_default_settings() -> Dict[str, Any]:
         "context_summary_config": default_summary_config(),
         "core_memory_summary_config": default_summary_config(),
         "chat_recall_summary_config": default_summary_config(),
+        "onebot_recall_summary_config": default_summary_config(),
         # 可配置系统提示词（详见 services/prompt_config_service.py）
         "prompt_overrides": {},
         "model_prompt_overrides": {},

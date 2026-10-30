@@ -296,7 +296,8 @@ class SummaryPromptScopingTests(unittest.TestCase):
             summary_ids,
             {summaries.PROMPT_IDS[summaries.CONTEXT_SUMMARY],
              summaries.PROMPT_IDS[summaries.CORE_MEMORY_SUMMARY],
-             summaries.PROMPT_IDS[summaries.CHAT_RECALL_SUMMARY]},
+             summaries.PROMPT_IDS[summaries.CHAT_RECALL_SUMMARY],
+             summaries.PROMPT_IDS[summaries.ONEBOT_RECALL_SUMMARY]},
         )
         for prompt_id in summary_ids:
             with self.subTest(prompt_id=prompt_id):

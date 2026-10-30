@@ -50,9 +50,13 @@ class ToolCallService {
           }
         }
       }
-      // 空结果也写入缓存：避免对「确实没有记录」的请求反复重试。
-      await StorageService.setJsonList(cacheKey, calls);
-      _rememberInMemory(cacheKey, calls);
+      // 只有 has_tool_calls 为真的消息才会展示入口，所以空结果意味着服务端暂时
+      // 没有这条记录（例如落库失败后又被修复）。空结果不能写入本地缓存，否则
+      // 之后即使服务端有了记录，这条消息的卡片也永远是空的。
+      if (calls.isNotEmpty) {
+        await StorageService.setJsonList(cacheKey, calls);
+        _rememberInMemory(cacheKey, calls);
+      }
       return calls;
     } catch (e) {
       debugPrint('ToolCallService: fetch failed for $requestId: $e');

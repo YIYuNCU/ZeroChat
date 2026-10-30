@@ -170,6 +170,18 @@ class _ApiSettingsOverviewState extends State<_ApiSettingsOverview> {
               ),
               const Divider(height: 1, indent: 56),
               _NavigationRow(
+                icon: Icons.forum_outlined,
+                title: SummaryFeature.onebotRecall.title,
+                subtitle: _summarySummary(settings.onebotRecallSummaryConfig),
+                onTap: () => _push(
+                  context,
+                  const SummaryModelSettingsPage(
+                    feature: SummaryFeature.onebotRecall,
+                  ),
+                ),
+              ),
+              const Divider(height: 1, indent: 56),
+              _NavigationRow(
                 icon: Icons.article_outlined,
                 title: '系统提示词',
                 subtitle: _promptsSubtitle(),
@@ -852,6 +864,7 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
         SummaryFeature.context => 'context_summary',
         SummaryFeature.coreMemory => 'core_summary',
         SummaryFeature.chatRecall => 'recall_summary',
+        SummaryFeature.onebotRecall => 'onebot_recall_summary',
       },
     ]);
     if (!mounted ||
@@ -900,6 +913,7 @@ class _SummaryModelSettingsPageState extends State<SummaryModelSettingsPage> {
       SummaryFeature.context => 'summary.context_events',
       SummaryFeature.coreMemory => 'summary.core_memory',
       SummaryFeature.chatRecall => 'summary.chat_recall',
+      SummaryFeature.onebotRecall => 'summary.onebot_recall',
     };
     for (final prompt in SettingsService.instance.promptRegistry.values) {
       if (prompt.isSummary && prompt.id == id) return prompt;

@@ -1585,44 +1585,53 @@ def append_short_term(
         return int(row[0]) if row else None
 
 
-def append_tool_calls(role_id: str, request_id: str, calls: List[Dict[str, Any]]) -> None:
+def append_tool_calls(role_id: str, request_id: str, calls: List[Dict[str, Any]]) -> bool:
     """把一次 AI 回复过程中的工具调用记录写入 tool_calls 表。
 
     按 request_id 关联到对应的助手回复；前端「工具调用历史」功能按需查询，
     不随聊天消息本体存储/传输。空列表直接跳过，不产生占位行。
+    同一 request_id 再次写入时整体替换旧记录（以最新一次生成为准）。
+    返回是否真正写入了记录。
     """
     if is_tool_role_id(role_id) or not calls:
-        return
+        return False
     normalized_request_id = str(request_id or "").strip()
     if not normalized_request_id:
-        return
+        return False
     created_at = datetime.now().isoformat()
+    rows: List[tuple] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        name = str(call.get("name") or "")
+        arguments = call.get("arguments")
+        try:
+            arguments_text = json.dumps(arguments or {}, ensure_ascii=False)
+        except (TypeError, ValueError):
+            arguments_text = "{}"
+        result_text = str(call.get("result") or "")
+        rows.append((normalized_request_id, len(rows), name, arguments_text, result_text, created_at))
+    if not rows:
+        return False
     with _get_connection(role_id) as conn:
-        # 幂等：同一 request_id 的日志只写一次，避免推送重放/客户端重试
-        # 导致同一轮回复的工具调用记录重复入库。
-        existing = conn.execute(
-            "SELECT 1 FROM tool_calls WHERE request_id = ? LIMIT 1",
+        # 客户端用稳定的 request_id（msg_<消息 id>）重发同一条消息时，服务端会重新
+        # 生成回复，界面展示的是最新这次回复，所以同一 request_id 以最后一次写入为准：
+        # 先删旧记录再写新记录（同一事务内）。相同日志重复写入的结果不变，仍然幂等；
+        # 以前"已有记录就跳过"会让重发后的真实调用记录被首次记录顶替掉。
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM tool_calls WHERE request_id = ?",
             (normalized_request_id,),
-        ).fetchone()
-        if existing is not None:
-            return
-        for seq, call in enumerate(calls):
-            if not isinstance(call, dict):
-                continue
-            name = str(call.get("name") or "")
-            arguments = call.get("arguments")
-            try:
-                arguments_text = json.dumps(arguments or {}, ensure_ascii=False)
-            except (TypeError, ValueError):
-                arguments_text = "{}"
-            result_text = str(call.get("result") or "")
-            conn.execute(
-                """
-                INSERT INTO tool_calls (request_id, seq, name, arguments, result, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (normalized_request_id, seq, name, arguments_text, result_text, created_at),
-            )
+        )
+        conn.executemany(
+            """
+            INSERT INTO tool_calls (request_id, seq, name, arguments, result, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    return True
 
 
 def get_tool_calls(role_id: str, request_id: str) -> List[Dict[str, Any]]:

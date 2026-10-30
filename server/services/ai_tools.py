@@ -676,8 +676,11 @@ def _recall_keywords(event: str) -> set:
     return keywords
 
 
-def _select_recall_lines(lines: List[dict], event: str):
-    """在字符预算内选取送去总结的消息，返回 (消息列表, 说明)。"""
+def _select_recall_lines(lines: List[dict], event: str, keep_latest: bool = False):
+    """在字符预算内选取送去总结的消息，返回 (消息列表, 说明)。
+
+    超出预算时默认保留最早的消息；keep_latest=True（回看「最近 N 条」）则保留最新的。
+    """
     def cost(item: dict) -> int:
         return len(item["message"]) + _RECALL_LINE_OVERHEAD
 
@@ -699,16 +702,24 @@ def _select_recall_lines(lines: List[dict], event: str):
             chosen = [lines[index] for index in sorted(keep)]
             notes.append("该范围内聊天记录过多，已按事件关键词筛选出相关片段（含前后文）")
     selected, used = [], 0
-    for item in chosen:
+    for item in (reversed(chosen) if keep_latest else chosen):
         if used + cost(item) > _RECALL_MAX_CHARS:
             break
         used += cost(item)
         selected.append(item)
+    if keep_latest:
+        selected.reverse()
     if len(selected) < len(chosen):
-        notes.append(
-            f"篇幅所限只提供了其中最早的 {len(selected)} 条（共 {len(chosen)} 条），"
-            "之后的内容未被分析，建议缩小时间范围"
-        )
+        if keep_latest:
+            notes.append(
+                f"篇幅所限只提供了其中最近的 {len(selected)} 条（共 {len(chosen)} 条），"
+                "更早的内容未被分析"
+            )
+        else:
+            notes.append(
+                f"篇幅所限只提供了其中最早的 {len(selected)} 条（共 {len(chosen)} 条），"
+                "之后的内容未被分析，建议缩小时间范围"
+            )
     return selected, "；".join(notes)
 
 
@@ -812,6 +823,243 @@ async def execute_recall_chat_history(
     output = [
         f"聊天回顾（{scope_label}，共分析 {len(selected)} 条消息）：",
         _clip(summary, _RECALL_RESULT_MAX_CHARS),
+    ]
+    if note:
+        output.append(f"（说明：{note}）")
+    return "\n".join(output)
+
+
+# ========== 工具：QQ 消息回顾（回看当前 QQ 会话最近 N 条中与某事件相关的内容） ==========
+
+"""
+QQ 消息回顾工具：让 AI 在 OneBot 会话（群聊 / 私聊）里回看「当前会话」的历史消息：
+按最近 count 条、按 start_time ~ end_time 时间段，或两者结合（时间段内最新的 count 条），
+再用 event 只取其中相关的内容。原始记录不会直接交给聊天模型，而是先由「QQ 消息回顾总结」
+配置的模型（前端可选模型档案，见 services/summary_config_service.py）阅读并归纳。
+查阅范围严格限定在当前会话（当前群，或当前私聊对象），不会跨群、跨人读取；
+会话范围由 generate_with_role 通过 current_onebot_scope 在入口设置。
+"""
+_RECALL_ONEBOT_TOOL = build_tool("recall_onebot_messages", {
+    "count": {"type": "integer"},
+    "start_time": {"type": "string"},
+    "end_time": {"type": "string"},
+    "event": {"type": "string"},
+})
+
+#: 单次最多回看的消息条数。
+_ONEBOT_RECALL_MAX_COUNT = 200
+_ONEBOT_RECALL_SUMMARY_MAX_TOKENS = 1200
+_ONEBOT_RECALL_RESULT_MAX_CHARS = 2400
+
+#: 本轮 OneBot 会话范围：{"group_id": str, "sender_id": str}；非 OneBot 会话为 None。
+#: 群聊用 group_id 定位，私聊用 sender_id（对方 QQ 号）定位。
+current_onebot_scope: ContextVar[Optional[Dict[str, str]]] = ContextVar(
+    "zerochat_onebot_scope", default=None
+)
+
+
+def _onebot_scope_filter(scope: Optional[Dict[str, str]]):
+    """把会话范围转成 (SQL 条件, 参数, 会话类型标签)；范围不明确时返回 None。"""
+    if not isinstance(scope, dict):
+        return None
+    group_id = str(scope.get("group_id") or "").strip()
+    sender_id = str(scope.get("sender_id") or "").strip()
+    if group_id:
+        return "(origin = 'onebot_group' AND group_id = ?)", [group_id], "群聊"
+    if sender_id:
+        return "(origin = 'onebot_private' AND sender_id = ?)", [sender_id], "私聊"
+    return None
+
+
+def is_recall_onebot_available() -> bool:
+    """QQ 消息回顾总结已启用且 API 可解析时才向模型开放 recall_onebot_messages。"""
+    try:
+        from services import summary_config_service
+
+        config = summary_config_service.resolve_summary_config(
+            summary_config_service.ONEBOT_RECALL_SUMMARY
+        )
+        return bool(config.get("enabled") and config.get("configured"))
+    except Exception:
+        logger.warning("读取 QQ 消息回顾总结配置失败", exc_info=True)
+        return False
+
+
+def _fetch_onebot_rows(
+    role_id: str,
+    where_sql: str,
+    params: list,
+    start: Optional[datetime],
+    end: Optional[datetime],
+    count: int,
+):
+    """读取当前会话的消息行，按时间升序返回。
+
+    count > 0：取范围内最新的 count 条；count == 0：取范围内最早的至多
+    _RECALL_FETCH_LIMIT + 1 行（多出的一行用来判断是否被截断）。
+    """
+    from services.memory_service import _get_connection
+
+    clauses = ["COALESCE(sender, '') NOT IN ('system', 'memory_summary')", where_sql]
+    query_params = list(params)
+    if start:
+        clauses.append("timestamp >= ?")
+        query_params.append(start.isoformat())
+    if end:
+        clauses.append("timestamp <= ?")
+        query_params.append(end.isoformat())
+    order = "DESC" if count > 0 else "ASC"
+    limit = count if count > 0 else _RECALL_FETCH_LIMIT + 1
+    sql = (
+        "SELECT role, content, timestamp, sender FROM short_term "
+        f"WHERE {' AND '.join(clauses)} ORDER BY id {order} LIMIT ?"
+    )
+    with _get_connection(role_id) as conn:
+        rows = conn.execute(sql, query_params + [limit]).fetchall()
+    if count > 0:
+        rows.reverse()
+    return rows
+
+
+def _onebot_conversation_lines(rows, role_name: str) -> List[dict]:
+    """把数据库行整理成交给总结模型的发言列表（群聊保留每个发言人）。"""
+    from services.memory_service import _summary_message_text
+
+    lines = []
+    for role, content, timestamp, sender in rows:
+        text = _clip(_summary_message_text(content), _RECALL_MESSAGE_CLIP)
+        if not text:
+            continue
+        sender_text = str(sender or "").strip()
+        if role == "user":
+            speaker = "用户" if sender_text == "user" else (sender_text or "群成员")
+        else:
+            speaker = role_name or sender_text or "助手"
+        lines.append({
+            "time": str(timestamp or "")[:16].replace("T", " "),
+            "speaker": speaker,
+            "message": text,
+        })
+    return lines
+
+
+async def execute_recall_onebot_messages(
+    role_data: Dict, count=0, start_time: str = "", end_time: str = "", event: str = "",
+) -> str:
+    """回看当前 QQ 会话的历史消息中与 event 相关的内容，由总结模型归纳后返回。永不抛出。
+
+    count（最近条数）与 start_time / end_time（时间段）至少给一项，也可同时给：
+    同时给时取该时间段内最新的 count 条。
+    """
+    role_id = str(role_data.get("id", ""))
+    role_name = str(role_data.get("name") or "").strip()
+    event = str(event or "").strip()[:200]
+    try:
+        count = int(count or 0)
+    except (TypeError, ValueError):
+        return "查询失败：count 必须是非负整数（0 表示不按条数限制）"
+    if count < 0:
+        return "查询失败：count 必须是非负整数（0 表示不按条数限制）"
+    count = min(count, _ONEBOT_RECALL_MAX_COUNT)
+    try:
+        start, start_is_day = _parse_recall_time(start_time, end=False)
+        end, _ = _parse_recall_time(end_time, end=True)
+    except ValueError:
+        return (
+            "查询失败：时间格式无效，请使用 YYYY-MM-DD、YYYY-MM-DD HH:MM，"
+            "或「今天」「昨天」「前天」"
+        )
+    if start and start_is_day and not end:
+        end = datetime.combine(start.date(), _dtime.max)
+    if start and end and start > end:
+        return "查询失败：start_time 晚于 end_time"
+    if count == 0 and not start and not end:
+        return "查询失败：请至少提供 count（最近条数）或 start_time / end_time（时间段）之一"
+
+    scope = _onebot_scope_filter(current_onebot_scope.get())
+    if scope is None:
+        return "查询失败：当前不在 QQ 会话中，无法回看 QQ 消息"
+    where_sql, params, scope_type = scope
+
+    from services import summary_config_service
+    from services.ai_service import call_ai_direct
+    from services.memory_service import _run_db
+
+    try:
+        config = summary_config_service.resolve_summary_config(
+            summary_config_service.ONEBOT_RECALL_SUMMARY
+        )
+        if not config.get("enabled"):
+            return "QQ 消息回顾功能已在设置中关闭"
+        if not config.get("configured"):
+            return "QQ 消息回顾失败：总结模型 API 未配置，请在设置中配置「QQ 消息回顾总结」"
+        rows = await _run_db(
+            role_id, _fetch_onebot_rows, role_id, where_sql, params, start, end, count,
+        )
+    except Exception as e:
+        logger.error(f"QQ 消息回顾读取失败 role={role_id}: {e}")
+        return f"QQ 消息回顾失败：{e}"
+
+    note = ""
+    if count == 0 and len(rows) > _RECALL_FETCH_LIMIT:
+        rows = rows[:_RECALL_FETCH_LIMIT]
+        note = f"该时间段内消息超过 {_RECALL_FETCH_LIMIT} 条，只读取了最早的部分，请缩小时间范围"
+    lines = _onebot_conversation_lines(rows, role_name)
+    range_label = _recall_range_label(start, end) if (start or end) else ""
+    if not lines:
+        where = f"（{range_label}）" if range_label else ""
+        return f"没有找到当前{scope_type}的历史消息{where}。"
+
+    # 只按条数回看「最近 N 条」时，超出字符预算应保留最新的；按时间段回看则保留最早的。
+    keep_latest = count > 0
+    selected, select_note = _select_recall_lines(lines, event, keep_latest=keep_latest)
+    if select_note:
+        note = f"{note}；{select_note}" if note else select_note
+
+    payload = {
+        "scope": scope_type,
+        "message_count": len(selected),
+        "event": event,
+        "conversation": selected,
+        "note": note,
+    }
+    if range_label:
+        payload["requested_range"] = range_label
+    try:
+        result = await call_ai_direct(
+            messages=[
+                {"role": "system", "content": config["system_prompt"]},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            model=config["model"],
+            api_url=config["api_url"],
+            api_key=config["api_key"],
+            temperature=config["temperature"],
+            max_tokens=_ONEBOT_RECALL_SUMMARY_MAX_TOKENS,
+            api_format=config["api_format"],
+            timeout_seconds=config["timeout_seconds"],
+            thinking_enabled=config["thinking_enabled"],
+            thinking_budget=config["thinking_budget"],
+            reasoning_effort=config["reasoning_effort"],
+        )
+    except Exception as e:
+        logger.error(f"QQ 消息回顾总结调用失败 role={role_id}: {e}")
+        return f"QQ 消息回顾失败：总结模型调用出错（{e}）"
+    summary = str(result.get("content") or "").strip() if result.get("success") else ""
+    if not summary:
+        logger.warning("QQ 消息回顾总结为空 role=%s: %s", role_id, result.get("error"))
+        return "QQ 消息回顾失败：总结模型没有返回有效内容，请稍后再试"
+
+    scope_parts = [f"当前{scope_type}"]
+    if range_label:
+        scope_parts.append(range_label)
+    if count > 0:
+        scope_parts.append(f"最近 {count} 条")
+    if event:
+        scope_parts.append(f"事件「{event}」")
+    output = [
+        f"QQ 消息回顾（{'，'.join(scope_parts)}，共分析 {len(selected)} 条消息）：",
+        _clip(summary, _ONEBOT_RECALL_RESULT_MAX_CHARS),
     ]
     if note:
         output.append(f"（说明：{note}）")

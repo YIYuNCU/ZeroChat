@@ -85,6 +85,7 @@ async def _consume_inline_emoji_tool_markup(
 
     result["content"] = _INLINE_EMOJI_TOOL_RE.sub("", content).strip()
     emojis_called = list(result.get("_emojis_called") or [])
+    tool_calls_log = list(result.get("_tool_calls_log") or [])
     for match in matches:
         emotion_match = _INLINE_EMOJI_EMOTION_RE.search(match.group("attrs"))
         emotion = (emotion_match.group("emotion") if emotion_match else "").strip().lower()
@@ -96,9 +97,15 @@ async def _consume_inline_emoji_tool_markup(
             emojis_called.append(emotion)
         else:
             logger.warning("Inline emoji tool call failed: %s", tool_result)
+        # 与 provider 走 tool_calls 的路径一致，把这次调用记入工具调用历史。
+        tool_calls_log.append({
+            "name": "send_emotion_emoji",
+            "arguments": {"emotion": emotion},
+            "result": str(tool_result or ""),
+        })
 
     result["_emojis_called"] = _prefer_precise_emoji_deliveries(emojis_called)
-    result.setdefault("_tool_calls_log", [])
+    result["_tool_calls_log"] = tool_calls_log
     return result
 
 
@@ -1362,6 +1369,7 @@ from services.ai_tools import (
     _VIEW_MOMENTS_TOOL,
     _VIEW_MOMENT_COMMENTS_TOOL,
     _RECALL_CHAT_TOOL,
+    _RECALL_ONEBOT_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
     _SEND_VOICE_MESSAGE_TOOL,
     _WEB_SEARCH_TOOL,
@@ -1377,6 +1385,9 @@ from services.ai_tools import (
     execute_view_moment_comments,
     execute_recall_chat_history,
     is_recall_chat_available,
+    execute_recall_onebot_messages,
+    is_recall_onebot_available,
+    current_onebot_scope,
     execute_send_emotion_emoji,
     execute_send_voice_message,
     execute_web_search,
@@ -1419,6 +1430,16 @@ async def generate_with_role(
     is_third_party = is_onebot and sender != "user"
     owner_dm = stats_allowed(origin, sender)
     current_platform.set("qq" if (is_onebot and owner_dm) else "app")
+    # QQ 消息回顾工具只能查看「当前」会话：记录本轮会话范围（群聊按群号，私聊按对方 QQ 号）。
+    onebot_scope: Optional[Dict[str, str]] = None
+    if is_onebot:
+        onebot_scope = {
+            "group_id": envelope.group_id if envelope else "",
+            "sender_id": envelope.sender_id if envelope else "",
+        }
+        if not (onebot_scope["group_id"] or onebot_scope["sender_id"]):
+            onebot_scope = None
+    current_onebot_scope.set(onebot_scope)
     resolved_model, _, _, _, _, _, _, _ = _get_role_ai_config(role_data)
     system_content = _build_system_prompt(
         role_data,
@@ -1477,6 +1498,10 @@ async def generate_with_role(
         # 历史聊天同属主用户私人数据；聊天回顾总结被关闭或未配置时不开放
         if is_recall_chat_available():
             active_tools.extend(_RECALL_CHAT_TOOL)
+    # QQ 消息回顾：所有 QQ 会话（群聊、主用户私聊、第三方私聊）都可回看「当前会话」最近的消息；
+    # 总结模型被关闭或未配置时不开放。
+    if onebot_scope is not None and is_recall_onebot_available():
+        active_tools.extend(_RECALL_ONEBOT_TOOL)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
     if enable_voice:
@@ -1728,6 +1753,22 @@ async def _handle_tool_calls(
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: recall_chat_history -> {tool_result[:100]}")
 
+                elif func_name == "recall_onebot_messages":
+                    logger.info(
+                        "Tool call: recall_onebot_messages [count=%s, start=%s, end=%s, event=%s]",
+                        args.get("count"), args.get("start_time"), args.get("end_time"),
+                        str(args.get("event") or "")[:80],
+                    )
+                    tool_result = await execute_recall_onebot_messages(
+                        role_data,
+                        args.get("count"),
+                        str(args.get("start_time") or ""),
+                        str(args.get("end_time") or ""),
+                        str(args.get("event") or ""),
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: recall_onebot_messages -> {tool_result[:100]}")
+
                 elif func_name == "send_voice_message":
                     voice_text = str(args.get("text", "")).strip()
                     voice_style = str(args.get("style", "")).strip()
@@ -1827,6 +1868,14 @@ async def _handle_tool_calls(
                     tool_result = await execute_recognize_image(urls, prompt, image_index)
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: review_previous_images -> {tool_result[:100]}")
+
+                else:
+                    # 模型调用了未注册的工具（幻觉/名称拼错）。仍须回一条 role=tool 消息，
+                    # 否则 provider 会因缺少 tool_call_id 对应的响应而拒绝下一轮请求，
+                    # 同时在工具调用历史里留下这次失败的记录。
+                    err = f"未知工具：{func_name or '(空)'}"
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": err})
+                    logger.warning(f"Tool error: {func_name} -> {err}")
 
                 # 每个分支都恰好向 messages 追加了一条 role=tool 消息；将其内容
                 # 记为这次调用的结果，供前端「工具调用历史」展示。

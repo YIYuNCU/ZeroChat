@@ -164,6 +164,22 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('onebot recall page shows its title, hint and groups', (
+      tester,
+    ) async {
+      await pumpSummary(tester, feature: SummaryFeature.onebotRecall);
+
+      expect(find.text('QQ 消息回顾总结'), findsOneWidget);
+      expect(
+        find.textContaining('AI 回看当前 QQ 群/私聊最近若干条或某时间段的消息时，用此模型总结相关内容'),
+        findsOneWidget,
+      );
+      for (final title in ['模型档案', '高级参数', '系统提示词']) {
+        expect(find.text(title), findsOneWidget, reason: title);
+      }
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('shows core fields and collapsed groups', (tester) async {
       await pumpSummary(tester);
 

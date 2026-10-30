@@ -1270,6 +1270,37 @@ class SettingsAndEmojiTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized["content"], "收到啦")
         self.assertEqual(normalized["_emojis_called"], ["love"])
         execute.assert_awaited_once_with({"id": "role-1"}, "love")
+        # 内联标签路径执行的工具调用也要进入工具调用历史。
+        self.assertEqual(
+            normalized["_tool_calls_log"],
+            [{"name": "send_emotion_emoji", "arguments": {"emotion": "love"}, "result": "[love]"}],
+        )
+
+    async def test_unknown_tool_call_gets_tool_message_and_history_entry(self):
+        # 模型调用了未注册的工具：必须回一条 role=tool 消息（否则下一轮请求会被
+        # provider 拒绝），并在工具调用历史里留下失败记录，而不是整条调用凭空消失。
+        result = {
+            "tool_calls": [{
+                "id": "call_ghost",
+                "type": "function",
+                "function": {"name": "not_a_real_tool", "arguments": {"x": 1}},
+            }],
+        }
+        messages = []
+        with patch(
+            "services.ai_service._call_with_role_config",
+            return_value={"success": True, "content": "好的"},
+        ):
+            normalized = await _handle_tool_calls(result, messages, {"id": "role-1"}, [])
+
+        tool_messages = [m for m in messages if m["role"] == "tool"]
+        self.assertEqual(len(tool_messages), 1)
+        self.assertEqual(tool_messages[0]["tool_call_id"], "call_ghost")
+        self.assertEqual(len(normalized["_tool_calls_log"]), 1)
+        logged = normalized["_tool_calls_log"][0]
+        self.assertEqual(logged["name"], "not_a_real_tool")
+        self.assertEqual(logged["arguments"], {"x": 1})
+        self.assertIn("未知工具", logged["result"])
 
     async def test_empty_inline_emoji_tool_markup_is_removed(self):
         result = {"content": '<send_emotion_emoji emotion="" />'}

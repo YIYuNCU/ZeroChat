@@ -54,6 +54,32 @@ class ToolCallsStorageTests(unittest.TestCase):
         append_tool_calls("role_a", "req_dup", calls)
         self.assertEqual(len(get_tool_calls("role_a", "req_dup")), 1)
 
+    def test_append_tool_calls_replaces_previous_log_for_same_request_id(self):
+        # 客户端用稳定 request_id 重发同一条消息时，界面展示的是最新一次回复，
+        # 工具调用历史也必须是最新这次的，而不是被首次记录顶替。
+        append_tool_calls("role_a", "req_retry", [
+            {"name": "old", "arguments": {}, "result": "first attempt"},
+        ])
+        append_tool_calls("role_a", "req_retry", [
+            {"name": "new_a", "arguments": {"k": 1}, "result": "second a"},
+            {"name": "new_b", "arguments": {}, "result": "second b"},
+        ])
+        fetched = get_tool_calls("role_a", "req_retry")
+        self.assertEqual([c["name"] for c in fetched], ["new_a", "new_b"])
+        self.assertEqual(fetched[0]["arguments"], {"k": 1})
+
+    def test_append_tool_calls_returns_whether_rows_were_written(self):
+        self.assertTrue(append_tool_calls("role_a", "req_ok", [
+            {"name": "x", "arguments": {}, "result": "ok"},
+        ]))
+        self.assertFalse(append_tool_calls("role_a", "req_none", []))
+        self.assertFalse(append_tool_calls("role_a", "", [
+            {"name": "x", "arguments": {}, "result": "ok"},
+        ]))
+        # 全是非 dict 条目时不能清掉已有记录，也不算写入成功。
+        self.assertFalse(append_tool_calls("role_a", "req_ok", ["bad"]))
+        self.assertEqual(len(get_tool_calls("role_a", "req_ok")), 1)
+
     def test_append_tool_calls_skips_empty_list(self):
         append_tool_calls("role_a", "req_empty", [])
         self.assertEqual(get_tool_calls("role_a", "req_empty"), [])

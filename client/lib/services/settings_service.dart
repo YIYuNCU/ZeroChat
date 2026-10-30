@@ -120,17 +120,19 @@ class SettingsService extends ChangeNotifier {
     );
   }
 
-  /// 三个总结功能在服务端设置里的配置键。
+  /// 各总结功能在服务端设置里的配置键。
   static const List<String> _summaryConfigKeys = [
     'context_summary_config',
     'core_memory_summary_config',
     'chat_recall_summary_config',
+    'onebot_recall_summary_config',
   ];
 
   static String _summaryConfigKey(SummaryFeature feature) => switch (feature) {
     SummaryFeature.context => 'context_summary_config',
     SummaryFeature.coreMemory => 'core_memory_summary_config',
     SummaryFeature.chatRecall => 'chat_recall_summary_config',
+    SummaryFeature.onebotRecall => 'onebot_recall_summary_config',
   };
 
   String get _baselineKey =>
@@ -267,6 +269,7 @@ class SettingsService extends ChangeNotifier {
   SummaryApiConfig _contextSummaryConfig = SummaryApiConfig();
   SummaryApiConfig _coreMemorySummaryConfig = SummaryApiConfig();
   SummaryApiConfig _chatRecallSummaryConfig = SummaryApiConfig();
+  SummaryApiConfig _onebotRecallSummaryConfig = SummaryApiConfig();
 
   // 可配置系统提示词：全局覆盖（按角色覆盖存放在角色 metadata 中）
   Map<String, Map<String, String>> _promptOverrides = {};
@@ -378,6 +381,11 @@ class SettingsService extends ChangeNotifier {
       server['chat_recall_summary_config'],
       includeSecrets: includeSecrets,
     );
+    await _restoreSummaryConfig(
+      SummaryFeature.onebotRecall,
+      server['onebot_recall_summary_config'],
+      includeSecrets: includeSecrets,
+    );
 
     final rawOverrides = server['prompt_overrides'];
     if (rawOverrides is Map) {
@@ -430,11 +438,14 @@ class SettingsService extends ChangeNotifier {
 
   SummaryApiConfig get chatRecallSummaryConfig => _chatRecallSummaryConfig;
 
+  SummaryApiConfig get onebotRecallSummaryConfig => _onebotRecallSummaryConfig;
+
   SummaryApiConfig summaryConfigFor(SummaryFeature feature) =>
       switch (feature) {
         SummaryFeature.context => _contextSummaryConfig,
         SummaryFeature.coreMemory => _coreMemorySummaryConfig,
         SummaryFeature.chatRecall => _chatRecallSummaryConfig,
+        SummaryFeature.onebotRecall => _onebotRecallSummaryConfig,
       };
 
   Map<String, Map<String, String>> get promptOverrides =>
@@ -451,6 +462,9 @@ class SettingsService extends ChangeNotifier {
 
   Future<void> updateChatRecallSummaryConfig(SummaryApiConfig config) =>
       updateSummaryConfig(SummaryFeature.chatRecall, config);
+
+  Future<void> updateOnebotRecallSummaryConfig(SummaryApiConfig config) =>
+      updateSummaryConfig(SummaryFeature.onebotRecall, config);
 
   Future<void> updateSummaryConfig(
     SummaryFeature feature,
@@ -474,6 +488,8 @@ class SettingsService extends ChangeNotifier {
         _coreMemorySummaryConfig = config;
       case SummaryFeature.chatRecall:
         _chatRecallSummaryConfig = config;
+      case SummaryFeature.onebotRecall:
+        _onebotRecallSummaryConfig = config;
     }
     notifyListeners();
   }
@@ -1065,6 +1081,9 @@ class SettingsService extends ChangeNotifier {
     _chatRecallSummaryConfig = await _readSummaryConfig(
       SummaryFeature.chatRecall,
     );
+    _onebotRecallSummaryConfig = await _readSummaryConfig(
+      SummaryFeature.onebotRecall,
+    );
   }
 
   Future<SummaryApiConfig> _readSummaryConfig(SummaryFeature feature) async {
@@ -1280,6 +1299,7 @@ class SettingsService extends ChangeNotifier {
     _coreMemorySummaryConfig.profileId = bindings['core'] as String?;
     // 旧版暂存快照没有 recall 键，缺失时视为未绑定。
     _chatRecallSummaryConfig.profileId = bindings['recall'] as String?;
+    _onebotRecallSummaryConfig.profileId = bindings['onebot_recall'] as String?;
     _roleModelProfileSelections =
         (StorageService.getJson('role_model_profile_selections') ?? {}).map(
           (key, value) => MapEntry(key, value.toString()),
@@ -1303,6 +1323,7 @@ class SettingsService extends ChangeNotifier {
           'context': _contextSummaryConfig.profileId,
           'core': _coreMemorySummaryConfig.profileId,
           'recall': _chatRecallSummaryConfig.profileId,
+          'onebot_recall': _onebotRecallSummaryConfig.profileId,
         },
       }),
       requireSuccess: true,
@@ -1326,6 +1347,9 @@ class SettingsService extends ChangeNotifier {
     ),
     'chat_recall_summary_config': summaryConfigPayload(
       _chatRecallSummaryConfig,
+    ),
+    'onebot_recall_summary_config': summaryConfigPayload(
+      _onebotRecallSummaryConfig,
     ),
     'prompt_overrides': _promptOverrides,
     'intent_enabled': _intentEnabled,

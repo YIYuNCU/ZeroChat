@@ -1,15 +1,17 @@
-/// 总结功能（事件总结 / 核心记忆总结 / 聊天回顾总结）的独立配置与可配置系统提示词模型。
+/// 总结功能（事件总结 / 核心记忆总结 / 聊天回顾总结 / QQ 消息回顾总结）的独立配置与可配置系统提示词模型。
 ///
-/// 这三个功能不再挂靠在任何角色上，服务端以 `context_summary_config` /
-/// `core_memory_summary_config` / `chat_recall_summary_config` 单独存储；提示词来自
+/// 这些功能不再挂靠在任何角色上，服务端以 `context_summary_config` /
+/// `core_memory_summary_config` / `chat_recall_summary_config` /
+/// `onebot_recall_summary_config` 单独存储；提示词来自
 /// 服务端提示词注册表，可全局覆盖，聊天类提示词还可按角色覆盖；覆盖直接编辑 md 全文。
 library;
 
-/// 目的一致的三个总结功能标识，与服务端 `summary_config_service` 保持一致。
+/// 目的一致的总结功能标识，与服务端 `summary_config_service` 保持一致。
 enum SummaryFeature {
   context('context_summary', '事件总结', '把历史对话压缩成上下文摘要与事件记忆'),
   coreMemory('core_memory_summary', '核心记忆总结', '把长期事实归纳进核心记忆'),
-  chatRecall('chat_recall_summary', '聊天回顾总结', 'AI 按指定时间/事件查阅历史聊天时，用此模型总结相关内容');
+  chatRecall('chat_recall_summary', '聊天回顾总结', 'AI 按指定时间/事件查阅历史聊天时，用此模型总结相关内容'),
+  onebotRecall('onebot_recall_summary', 'QQ 消息回顾总结', 'AI 回看当前 QQ 群/私聊最近若干条或某时间段的消息时，用此模型总结相关内容');
 
   const SummaryFeature(this.storageValue, this.title, this.description);
 

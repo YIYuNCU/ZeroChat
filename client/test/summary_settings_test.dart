@@ -19,6 +19,8 @@ void main() {
   const secretKey = 'summary_api_key_context_summary';
   const recallLocalKey = 'summary_config_chat_recall_summary';
   const recallSecretKey = 'summary_api_key_chat_recall_summary';
+  const onebotRecallLocalKey = 'summary_config_onebot_recall_summary';
+  const onebotRecallSecretKey = 'summary_api_key_onebot_recall_summary';
   const profile = ModelApiProfile(
     id: 'summary-profile',
     name: 'Shared profile',
@@ -103,6 +105,39 @@ void main() {
       settings.summaryConfigFor(SummaryFeature.chatRecall),
       same(settings.chatRecallSummaryConfig),
     );
+  });
+
+  test('onebot recall feature has its own storage keys and settings', () {
+    expect(SummaryFeature.onebotRecall.storageValue, 'onebot_recall_summary');
+    expect(SummaryFeature.onebotRecall.title, 'QQ 消息回顾总结');
+    expect(
+      settings.summaryConfigFor(SummaryFeature.onebotRecall),
+      same(settings.onebotRecallSummaryConfig),
+    );
+    expect(
+      settings.summaryConfigFor(SummaryFeature.onebotRecall),
+      isNot(same(settings.chatRecallSummaryConfig)),
+    );
+  });
+
+  test('onebot recall secret and profile binding are isolated', () async {
+    await settings.updateChatRecallSummaryConfig(
+      SummaryApiConfig(apiKey: 'recall-secret', model: 'recall-model'),
+    );
+    await settings.updateOnebotRecallSummaryConfig(
+      SummaryApiConfig(apiKey: 'onebot-secret', model: 'onebot-model'),
+    );
+    expect(
+      StorageService.getJson(onebotRecallLocalKey)!.containsKey('api_key'),
+      isFalse,
+    );
+    expect(secrets[onebotRecallSecretKey], 'onebot-secret');
+    expect(secrets[recallSecretKey], 'recall-secret');
+    await SecureStorageService.init();
+    await SettingsService.init();
+    expect(settings.onebotRecallSummaryConfig.apiKey, 'onebot-secret');
+    expect(settings.onebotRecallSummaryConfig.model, 'onebot-model');
+    expect(settings.chatRecallSummaryConfig.model, 'recall-model');
   });
 
   test(

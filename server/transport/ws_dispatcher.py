@@ -570,6 +570,12 @@ async def _handle_settings_update(payload: dict, backend_base_url: str) -> dict:
             summary_config_service.CHAT_RECALL_SUMMARY,
             update.chat_recall_summary_config.model_dump(exclude_unset=True),
         ) and summary_config_saved
+    if update.onebot_recall_summary_config is not None:
+        summary_config_changed = True
+        summary_config_saved = summary_config_service.update_summary_config(
+            summary_config_service.ONEBOT_RECALL_SUMMARY,
+            update.onebot_recall_summary_config.model_dump(exclude_unset=True),
+        ) and summary_config_saved
     # `model_prompt_overrides` is still accepted from older clients but is no longer applied.
     if update.prompt_overrides is not None:
         stored_settings = settings_service.load_settings()

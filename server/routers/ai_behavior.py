@@ -716,12 +716,18 @@ async def _run_memory_ai_pipeline(
     # 工具调用历史落库：与是否写入短期记忆无关，只要发生了工具调用就记录，
     # 按 request_id 关联，前端按需查询，不随消息本体存储/传输。
     tool_calls_log = result.get("_tool_calls_log") or []
+    tool_calls_saved = False
     if tool_calls_log:
         from services.memory_service import append_tool_calls
-        await _run_db(
-            role_id,
-            functools.partial(append_tool_calls, role_id, normalized_request_id, tool_calls_log),
-        )
+        try:
+            tool_calls_saved = bool(await _run_db(
+                role_id,
+                functools.partial(append_tool_calls, role_id, normalized_request_id, tool_calls_log),
+            ))
+        except Exception as e:
+            # 工具调用历史只是辅助展示数据，落库失败不能让整轮回复一起丢失；
+            # 同时不再声明 has_tool_calls，避免客户端展示一个查不到明细的入口。
+            logger.warning("工具调用历史落库失败：request_id=%s error=%s", normalized_request_id, e)
 
     new_core = None
     if trigger_summary_after_reply:
@@ -741,7 +747,7 @@ async def _run_memory_ai_pipeline(
         "voice_messages": voice_messages,
         # 工具调用明细已按 request_id 落库，不再随管道结果一并返回；
         # 客户端展开卡片时按需通过独立接口查询。
-        "has_tool_calls": bool(result.get("_tool_calls_log")),
+        "has_tool_calls": tool_calls_saved,
         # 思考链（thinking）内容，供客户端按角色 show_reasoning 展示。
         "reasoning_content": result.get("reasoning_content"),
     }
