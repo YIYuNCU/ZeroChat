@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from services.onebot import commands, config as cfg_mod, media, mirror, policy
+from services.onebot import commands, config as cfg_mod, media, message_log, mirror, policy
 from services.onebot.aggregator import MessageAggregator, MessageDeduper
 from services.onebot.models import Inbound, OneBotEvent
 from services.onebot.parser import transform_event
@@ -60,6 +60,9 @@ class OneBotPipeline:
             return IngestResult("ignored", "非消息事件或内容为空")
         if self.deduper.seen(role_id, inbound.message_id):
             return IngestResult("ignored", "重复消息")
+
+        # 先记入额外消息库（只保留 3 天），再走放行：群里没 @ 机器人的发言也要留给 QQ 消息回顾。
+        await message_log.arun(message_log.record_inbound, inbound, config, event.time)
 
         reject = policy.gate(inbound, config)
         if reject:
@@ -136,6 +139,8 @@ class OneBotPipeline:
             return plan
         if conn is None:
             # HTTP 无反向 WS：只返回文本，不做延迟发送；主用户私聊仍把回复同步进 App 历史
+            for item in plan.items:
+                await message_log.arun(message_log.record_outgoing, role_id, last.target, item)
             if mirrored:
                 for item in plan.items:
                     if item.kind == "text":
@@ -143,6 +148,7 @@ class OneBotPipeline:
             return plan
 
         async def _on_delivered(item, path):
+            await message_log.arun(message_log.record_outgoing, role_id, last.target, item)
             if mirrored:
                 await mirror.mirror_item(role_id, item, path, metadata)
 

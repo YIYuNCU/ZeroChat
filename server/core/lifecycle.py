@@ -196,6 +196,15 @@ def create_lifespan(data_dir: Path, config_dir: Path, runtime_dir: Path, logger)
 
         (data_dir / "roles").mkdir(parents=True, exist_ok=True)
 
+        try:
+            from services.onebot import message_log
+
+            removed = message_log.purge()
+            if removed:
+                logger.info(f"OneBot 消息库：清理 {removed} 条超过 3 天的记录")
+        except Exception:  # noqa: BLE001 - 清理失败不阻塞启动
+            logger.warning("OneBot 消息库清理失败", exc_info=True)
+
         from services import prompt_config_service
         if prompt_config_service.migrate_stored_overrides():
             logger.info("已将 settings.json 中的提示词覆盖迁移到 v2 结构（备份: settings.json.bak-prompts）")
@@ -218,6 +227,12 @@ def create_lifespan(data_dir: Path, config_dir: Path, runtime_dir: Path, logger)
         await close_file_workers()
         await aclose_http_client()
         close_db_connections()
+        try:
+            from services.onebot import message_log
+
+            message_log.close_all()
+        except Exception:  # noqa: BLE001
+            logger.warning("OneBot 消息库连接关闭失败", exc_info=True)
         logger.info("ZeroChat Server 已关闭")
 
     return lifespan

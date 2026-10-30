@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from services.onebot import config as cfg_mod
+from services.onebot import config as cfg_mod, message_log
 from services.onebot.mirror import mirror_item
 from services.onebot.models import Target
 from services.onebot.reply_plan import build_plan
@@ -103,11 +103,14 @@ async def deliver_to_qq(role_id: str, content: str, metadata: Optional[Dict[str,
     if plan.empty:
         return True
 
+    owner_target = Target(main_id)
+
     async def _mirror(item, path):
+        await message_log.arun(message_log.record_outgoing, role_id, owner_target, item)
         await mirror_item(role_id, item, path, meta)
 
     delivered = await deliver_plan(
-        conn, role_id, Target(main_id), plan,
+        conn, role_id, owner_target, plan,
         server_url=str(config.get("server_url") or ""),
         on_delivered=_mirror,
     )

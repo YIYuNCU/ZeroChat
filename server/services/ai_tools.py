@@ -871,6 +871,15 @@ def _onebot_scope_filter(scope: Optional[Dict[str, str]]):
     return None
 
 
+def _onebot_log_chat(scope: Optional[Dict[str, str]]):
+    """当前会话在额外消息库里的 (chat_type, chat_id)。"""
+    scope = scope or {}
+    group_id = str(scope.get("group_id") or "").strip()
+    if group_id:
+        return "group", group_id
+    return "private", str(scope.get("sender_id") or "").strip()
+
+
 def is_recall_onebot_available() -> bool:
     """QQ 消息回顾总结已启用且 API 可解析时才向模型开放 recall_onebot_messages。"""
     try:
@@ -984,7 +993,9 @@ async def execute_recall_onebot_messages(
     from services import summary_config_service
     from services.ai_service import call_ai_direct
     from services.memory_service import _run_db
+    from services.onebot import message_log
 
+    note = ""
     try:
         config = summary_config_service.resolve_summary_config(
             summary_config_service.ONEBOT_RECALL_SUMMARY
@@ -993,18 +1004,46 @@ async def execute_recall_onebot_messages(
             return "QQ 消息回顾功能已在设置中关闭"
         if not config.get("configured"):
             return "QQ 消息回顾失败：总结模型 API 未配置，请在设置中配置「QQ 消息回顾总结」"
-        rows = await _run_db(
-            role_id, _fetch_onebot_rows, role_id, where_sql, params, start, end, count,
-        )
+
+        # 额外消息库（services/onebot/message_log.py）完整覆盖「已开始记录且不超过 3 天」的
+        # 会话消息，包括没 @ 机器人的群发言；覆盖起点之前的时间段仍读取 short_term，两边不重叠。
+        coverage = None
+        try:
+            coverage = await _run_db(role_id, message_log.coverage_start, role_id)
+        except Exception as e:
+            logger.warning(f"QQ 消息库覆盖范围读取失败 role={role_id}: {e}")
+        older_end = end
+        if coverage is not None:
+            boundary = coverage - timedelta(microseconds=1)
+            older_end = boundary if end is None else min(end, boundary)
+        rows = []
+        if not (start is not None and older_end is not None and start > older_end):
+            rows = await _run_db(
+                role_id, _fetch_onebot_rows, role_id, where_sql, params, start, older_end, count,
+            )
+        log_lines: List[dict] = []
+        if coverage is not None and not (end is not None and end < coverage):
+            chat_type, chat_id = _onebot_log_chat(current_onebot_scope.get())
+            log_start = coverage if start is None else max(start, coverage)
+            try:
+                log_lines = await _run_db(
+                    role_id, message_log.query_lines, role_id, chat_type, chat_id,
+                    log_start, end, count, _RECALL_FETCH_LIMIT + 1, role_name,
+                )
+            except Exception as e:
+                logger.warning(f"QQ 消息库读取失败 role={role_id}: {e}")
+                note = "近 3 天的完整消息记录读取失败，以下可能缺少没有 @ 机器人的群消息"
     except Exception as e:
         logger.error(f"QQ 消息回顾读取失败 role={role_id}: {e}")
         return f"QQ 消息回顾失败：{e}"
 
-    note = ""
-    if count == 0 and len(rows) > _RECALL_FETCH_LIMIT:
-        rows = rows[:_RECALL_FETCH_LIMIT]
-        note = f"该时间段内消息超过 {_RECALL_FETCH_LIMIT} 条，只读取了最早的部分，请缩小时间范围"
-    lines = _onebot_conversation_lines(rows, role_name)
+    lines = _onebot_conversation_lines(rows, role_name) + log_lines
+    if count > 0:
+        lines = lines[-count:]
+    elif len(rows) + len(log_lines) > _RECALL_FETCH_LIMIT:
+        lines = lines[:_RECALL_FETCH_LIMIT]
+        truncated = f"该时间段内消息超过 {_RECALL_FETCH_LIMIT} 条，只读取了最早的部分，请缩小时间范围"
+        note = f"{note}；{truncated}" if note else truncated
     range_label = _recall_range_label(start, end) if (start or end) else ""
     if not lines:
         where = f"（{range_label}）" if range_label else ""
