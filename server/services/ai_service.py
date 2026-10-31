@@ -1360,14 +1360,13 @@ def _append_grok_reasoning_followup_context(
     messages.append(assistant_msg)
 
 
+from services import tool_groups
 from services.ai_tools import (
     _SCHEDULE_TASK_TOOL,
     _SET_ALARM_TOOL,
     _CONTINUE_IF_NO_REPLY_TOOL,
     _BLOCK_USER_TOOL,
     _SEARCH_MEMORY_TOOL,
-    _VIEW_MOMENTS_TOOL,
-    _VIEW_MOMENT_COMMENTS_TOOL,
     _RECALL_CHAT_TOOL,
     _RECALL_ONEBOT_TOOL,
     _SEND_EMOTION_EMOJI_TOOL,
@@ -1383,6 +1382,9 @@ from services.ai_tools import (
     execute_search_memory,
     execute_view_moments,
     execute_view_moment_comments,
+    execute_post_moment,
+    execute_comment_moment,
+    execute_like_moment,
     execute_recall_chat_history,
     is_recall_chat_available,
     execute_recall_onebot_messages,
@@ -1488,20 +1490,29 @@ async def generate_with_role(
     active_tools.extend(_WRITE_MEMORY_TOOL)
     # set_alarm 作用于用户设备的系统闹钟/日历，仅对 App 场景开放
     # continue_if_no_reply（无回复续写）对 App 与「主用户 QQ 私聊」开放（续写会按来源平台投递）
+    # 低频且体积大的工具折叠成「工具组」按需暴露（见 services/tool_groups.py）：
+    # 用户消息命中关键词时整组直接开放，否则只下发 load_tools，由模型按需加载。
+    tool_group_candidates: List[Any] = []
+    recall_tools: List[Dict[str, Any]] = []
     if not is_onebot:
         active_tools.extend(_SET_ALARM_TOOL)
+        # 朋友圈是 App 内的功能，OneBot V11 协议没有朋友圈接口，所有 QQ 会话都不提供朋友圈工具；
+        # 朋友圈自动发帖/评论（origin="moments"）由调度器落库，不能再让模型自己调用发帖工具而重复发布。
+        if origin != "moments":
+            tool_group_candidates.append(tool_groups.moments_group())
     if owner_dm:
         active_tools.extend(_CONTINUE_IF_NO_REPLY_TOOL)
-        # 朋友圈是主用户的私人数据：仅 App 与主用户 QQ 私聊可查看，第三方/群聊不开放
-        active_tools.extend(_VIEW_MOMENTS_TOOL)
-        active_tools.extend(_VIEW_MOMENT_COMMENTS_TOOL)
         # 历史聊天同属主用户私人数据；聊天回顾总结被关闭或未配置时不开放
         if is_recall_chat_available():
-            active_tools.extend(_RECALL_CHAT_TOOL)
+            recall_tools.extend(_RECALL_CHAT_TOOL)
     # QQ 消息回顾：所有 QQ 会话（群聊、主用户私聊、第三方私聊）都可回看「当前会话」最近的消息；
     # 总结模型被关闭或未配置时不开放。
     if onebot_scope is not None and is_recall_onebot_available():
-        active_tools.extend(_RECALL_ONEBOT_TOOL)
+        recall_tools.extend(_RECALL_ONEBOT_TOOL)
+    recall_group = tool_groups.recall_group(recall_tools)
+    if recall_group is not None:
+        tool_group_candidates.append(recall_group)
+    tool_groups.offer_groups(active_tools, tool_group_candidates, user_message)
     if is_third_party:
         active_tools.extend(_BLOCK_USER_TOOL)
     if enable_voice:
@@ -1738,6 +1749,39 @@ async def _handle_tool_calls(
                         tool_result = "参数不完整：post_id 为必填"
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
                     logger.info(f"Tool result: view_moment_comments -> {tool_result[:100]}")
+
+                elif func_name == tool_groups.LOAD_TOOLS_NAME:
+                    group_name = str(args.get("group") or "").strip()
+                    logger.info(f"Tool call: load_tools [group={group_name}]")
+                    tool_result = tool_groups.execute_load_tools(tools, group_name)
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: load_tools -> {tool_result[:100]}")
+
+                elif func_name == "post_moment":
+                    logger.info(f"Tool call: post_moment [content={str(args.get('content') or '')[:80]}]")
+                    tool_result = await execute_post_moment(role_data, str(args.get("content") or ""))
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: post_moment -> {tool_result[:100]}")
+
+                elif func_name == "comment_moment":
+                    logger.info(
+                        "Tool call: comment_moment [post_id=%s, reply_to=%s, content=%s]",
+                        args.get("post_id"), args.get("reply_to"), str(args.get("content") or "")[:80],
+                    )
+                    tool_result = await execute_comment_moment(
+                        role_data,
+                        str(args.get("post_id") or ""),
+                        str(args.get("content") or ""),
+                        str(args.get("reply_to") or ""),
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: comment_moment -> {tool_result[:100]}")
+
+                elif func_name == "like_moment":
+                    logger.info(f"Tool call: like_moment [post_id={args.get('post_id')}]")
+                    tool_result = await execute_like_moment(role_data, str(args.get("post_id") or ""))
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result})
+                    logger.info(f"Tool result: like_moment -> {tool_result[:100]}")
 
                 elif func_name == "recall_chat_history":
                     logger.info(

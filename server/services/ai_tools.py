@@ -356,7 +356,7 @@ async def execute_search_memory(role_data: Dict, query: str) -> str:
 
 """
 朋友圈查看工具：让 AI 主动翻看朋友圈（可按日期、发布人筛选）以及某条帖子的评论/点赞。
-朋友圈内容属于主用户的私人数据，仅在 App 与主用户 QQ 私聊场景开放（见 generate_with_role）。
+朋友圈是 App 内的功能，OneBot V11 协议没有朋友圈接口，仅在 App 场景开放（见 generate_with_role）。
 """
 _VIEW_MOMENTS_TOOL = build_tool("view_moments", {
     "date": {"type": "string"},
@@ -411,6 +411,17 @@ def _moment_author_label(author_id: str, author_name: str, role_id: str) -> str:
 def _clip(text, limit: int) -> str:
     text = str(text or "").strip()
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _match_moment_post(posts: List[dict], key: str):
+    """按完整 ID 或唯一前缀在 posts 中定位帖子，返回 (帖子, 错误文本)，二者恰有一个为 None。"""
+    exact = [p for p in posts if str(p.get("id", "")) == key]
+    matched = exact or [p for p in posts if str(p.get("id", "")).startswith(key)]
+    if not matched:
+        return None, f"没有找到 ID 为「{key}」的朋友圈，可能已被删除。请先用 view_moments 查看列表获取 post_id"
+    if len(matched) > 1:
+        return None, f"「{key}」匹配到多条朋友圈，请提供更长的 post_id"
+    return matched[0], ""
 
 
 def _parse_moment_date(value: str) -> Optional[str]:
@@ -515,13 +526,9 @@ async def execute_view_moment_comments(role_data: Dict, post_id: str) -> str:
         logger.error(f"朋友圈读取失败 role={role_id}: {e}")
         return f"查看失败：{e}"
 
-    exact = [p for p in posts if str(p.get("id", "")) == key]
-    matched = exact or [p for p in posts if str(p.get("id", "")).startswith(key)]
-    if not matched:
-        return f"没有找到 ID 为「{key}」的朋友圈，可能已被删除。请先用 view_moments 查看列表获取 post_id"
-    if len(matched) > 1:
-        return f"「{key}」匹配到多条朋友圈，请提供更长的 post_id"
-    post = matched[0]
+    post, error = _match_moment_post(posts, key)
+    if post is None:
+        return error
 
     author_id = str(post.get("author_id", ""))
     lines = [
@@ -556,6 +563,209 @@ async def execute_view_moment_comments(role_data: Dict, post_id: str) -> str:
             f"{_clip(c.get('content'), _MOMENTS_COMMENT_CHARS)}"
         )
     return "\n".join(lines)
+
+
+# ========== 工具：朋友圈互动（发动态 / 评论 / 点赞） ==========
+
+"""
+朋友圈互动工具：让 AI 以自己的身份发布朋友圈、评论（或回复某条评论）、点赞。
+与查看工具同一开放范围：仅 App 场景（见 generate_with_role），所有 OneBot 会话都不开放。
+成功后会推送给在线客户端刷新朋友圈。
+"""
+_POST_MOMENT_TOOL = build_tool("post_moment", {
+    "content": {"type": "string"},
+})
+
+_COMMENT_MOMENT_TOOL = build_tool("comment_moment", {
+    "post_id": {"type": "string"},
+    "content": {"type": "string"},
+    "reply_to": {"type": "string"},
+})
+
+_LIKE_MOMENT_TOOL = build_tool("like_moment", {
+    "post_id": {"type": "string"},
+})
+
+#: 按需加载工具组（见 services/tool_groups.py）；描述末尾的可加载组清单由 tool_groups 按请求拼接，
+#: group 的 enum 同样按请求填入。
+_LOAD_TOOLS_TOOL = build_tool("load_tools", {
+    "group": {"type": "string"},
+})
+
+_MOMENT_POST_MAX_CHARS = 500
+_MOMENT_COMMENT_MAX_CHARS = 200
+#: 同一角色两次工具发帖的最小间隔，防止模型在一轮工具循环里连续刷屏。
+_MOMENT_POST_COOLDOWN = timedelta(minutes=10)
+
+
+def _moment_actor(role_data: Dict) -> tuple:
+    role_id = str(role_data.get("id", "")).strip()
+    role_name = str(role_data.get("name") or role_id).strip() or role_id
+    return role_id, role_name
+
+
+def _clean_moment_text(text) -> str:
+    """去掉对话/动作等聊天格式标签，只留纯文本正文。"""
+    from services.message_format import strip_to_plain
+
+    return strip_to_plain(str(text or "")).strip()
+
+
+async def _push_moment_event(event: str, payload: dict) -> None:
+    try:
+        from transport.push_hub import publish_server_push
+
+        await publish_server_push(event, payload)
+    except Exception as e:
+        logger.debug(f"{event} 推送失败（不影响朋友圈写入）: {e}")
+
+
+async def _find_moment_post(role_id: str, post_id: str):
+    """返回 (帖子, 错误文本)。永不抛出。"""
+    key = (post_id or "").strip().strip("[]#")
+    if not key:
+        return None, "post_id 不能为空"
+    try:
+        posts = await asyncio.to_thread(_load_visible_moments)
+    except Exception as e:
+        logger.error(f"朋友圈读取失败 role={role_id}: {e}")
+        return None, str(e)
+    return _match_moment_post(posts, key)
+
+
+async def execute_post_moment(role_data: Dict, content: str) -> str:
+    """以角色身份发布一条纯文字朋友圈，返回结果描述。永不抛出。"""
+    from routers import moments as moments_router
+
+    role_id, role_name = _moment_actor(role_data)
+    text = _clean_moment_text(content)
+    if not text:
+        return "发布失败：朋友圈内容不能为空"
+    if len(text) > _MOMENT_POST_MAX_CHARS:
+        return f"发布失败：内容超过 {_MOMENT_POST_MAX_CHARS} 字（当前 {len(text)} 字），请精简后重试"
+
+    try:
+        posts = await asyncio.to_thread(moments_router.load_moments)
+        now = datetime.now()
+        for post in posts:
+            if not isinstance(post, dict) or str(post.get("author_id", "")) != role_id:
+                continue
+            created = moments_router._parse_iso_time(post.get("created_at"))
+            if created is not None and timedelta(0) <= now - created < _MOMENT_POST_COOLDOWN:
+                minutes = int(_MOMENT_POST_COOLDOWN.total_seconds() // 60)
+                return f"发布失败：你刚刚已经发过一条朋友圈，请至少间隔 {minutes} 分钟再发"
+        created_post = await moments_router.create_moment(
+            moments_router.MomentCreate(
+                author_id=role_id, author_name=role_name, content=text, image_urls=[],
+            )
+        )
+    except Exception as e:
+        logger.error(f"AI发朋友圈失败 role={role_id}: {e}")
+        return f"发布失败：{getattr(e, 'detail', None) or e}"
+
+    post_id = str(created_post.get("id", "")) if isinstance(created_post, dict) else ""
+    await _push_moment_event(
+        "moment_post", {"role_id": role_id, "post_id": post_id, "author_name": role_name},
+    )
+    logger.info(f"AI发朋友圈: role={role_name}({role_id}), post={post_id[:8]}, text={text[:60]}")
+    return f"朋友圈已发布[{post_id[:8]}]：{_clip(text, 80)}"
+
+
+def _find_reply_target(post: dict, reply_to: str, role_id: str):
+    """在帖子评论里找到要回复的那条，返回 (评论, 错误文本)。"""
+    key = reply_to.strip().lower()
+    comments = [c for c in (post.get("comments") or []) if isinstance(c, dict)]
+    comments.sort(key=lambda c: str(c.get("created_at", "")))
+    if key in _MOMENTS_USER_ALIASES:
+        wanted = lambda c: str(c.get("author_id", "")) == _MOMENTS_USER_ID  # noqa: E731
+    else:
+        wanted = lambda c: (  # noqa: E731
+            str(c.get("author_id", "")).lower() == key
+            or str(c.get("author_name", "")).strip().lower() == key
+        )
+    hits = [c for c in comments if wanted(c) and str(c.get("author_id", "")) != role_id]
+    if not hits:
+        return None, f"回复失败：这条朋友圈下没有「{reply_to}」的评论可回复；想直接评论动态请把 reply_to 留空"
+    return hits[-1], ""
+
+
+async def execute_comment_moment(
+    role_data: Dict, post_id: str, content: str, reply_to: str = "",
+) -> str:
+    """评论朋友圈，或回复其中某人的最新评论，返回结果描述。永不抛出。"""
+    from routers import moments as moments_router
+
+    role_id, role_name = _moment_actor(role_data)
+    text = _clean_moment_text(content)
+    if not text:
+        return "评论失败：评论内容不能为空"
+    if len(text) > _MOMENT_COMMENT_MAX_CHARS:
+        return f"评论失败：内容超过 {_MOMENT_COMMENT_MAX_CHARS} 字（当前 {len(text)} 字），请精简后重试"
+
+    post, error = await _find_moment_post(role_id, post_id)
+    if post is None:
+        return f"评论失败：{error}"
+    full_id = str(post.get("id", ""))
+
+    reply_id = reply_name = None
+    reply_to = str(reply_to or "").strip()
+    if reply_to:
+        target, error = _find_reply_target(post, reply_to, role_id)
+        if target is None:
+            return error
+        reply_id = str(target.get("author_id", "")) or None
+        reply_name = str(target.get("author_name", "")).strip() or reply_to
+
+    try:
+        created = await moments_router.add_comment(
+            full_id,
+            moments_router.CommentCreate(
+                author_id=role_id, author_name=role_name, content=text,
+                reply_to_id=reply_id, reply_to_name=reply_name,
+            ),
+        )
+    except Exception as e:
+        logger.error(f"AI评论朋友圈失败 role={role_id}: {e}")
+        return f"评论失败：{e}"
+    if not isinstance(created, dict) or created.get("error"):
+        return "评论失败：这条朋友圈已不存在"
+
+    await _push_moment_event(
+        "moment_comment",
+        {"role_id": role_id, "post_id": full_id, "comment_id": created.get("id"), "author_name": role_name},
+    )
+    logger.info(f"AI评论朋友圈: role={role_name}({role_id}), post={full_id[:8]}, text={text[:60]}")
+    target_hint = f"（回复 {reply_name}）" if reply_name else ""
+    return f"已评论[{full_id[:8]}]{target_hint}：{_clip(text, 80)}"
+
+
+async def execute_like_moment(role_data: Dict, post_id: str) -> str:
+    """给指定朋友圈点赞，返回结果描述。永不抛出。"""
+    from routers import moments as moments_router
+
+    role_id, role_name = _moment_actor(role_data)
+    post, error = await _find_moment_post(role_id, post_id)
+    if post is None:
+        return f"点赞失败：{error}"
+    full_id = str(post.get("id", ""))
+
+    liked_ids = {str(l.get("id", "")) for l in (post.get("liked_by") or []) if isinstance(l, dict)}
+    if role_id in liked_ids:
+        return f"你已经给这条朋友圈[{full_id[:8]}]点过赞了，无需重复点赞"
+
+    try:
+        result = await moments_router.like_moment(full_id, role_id, role_name)
+    except Exception as e:
+        logger.error(f"AI点赞朋友圈失败 role={role_id}: {e}")
+        return f"点赞失败：{e}"
+    if not isinstance(result, dict) or result.get("error"):
+        return "点赞失败：这条朋友圈已不存在"
+
+    await _push_moment_event(
+        "moment_like", {"role_id": role_id, "post_id": full_id, "author_name": role_name},
+    )
+    logger.info(f"AI点赞朋友圈: role={role_name}({role_id}), post={full_id[:8]}")
+    return f"已给{_moment_author_label(str(post.get('author_id', '')), str(post.get('author_name', '')), role_id)}的朋友圈[{full_id[:8]}]点赞"
 
 
 # ========== 工具：聊天回顾（按时间/事件查阅历史聊天，由总结模型归纳后返回） ==========

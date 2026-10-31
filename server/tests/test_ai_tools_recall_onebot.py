@@ -252,7 +252,7 @@ class RecallOnebotMessagesTests(unittest.IsolatedAsyncioTestCase):
 class RecallOnebotToolGatingTests(unittest.IsolatedAsyncioTestCase):
     """generate_with_role 只在 QQ 会话中开放该工具，并记录当前会话范围。"""
 
-    async def _tool_names(self, *, origin, sender, context, available=True):
+    async def _tool_names(self, *, origin, sender, context, available=True, message="我们聊过什么"):
         from services.ai_service import generate_with_role
         from services.chat_envelope import build_envelope
 
@@ -269,7 +269,7 @@ class RecallOnebotToolGatingTests(unittest.IsolatedAsyncioTestCase):
         ), patch("services.ai_service.is_recall_chat_available", return_value=False):
             await generate_with_role(
                 {"id": "role-1", "name": "小暖"},
-                "你好",
+                message,
                 origin=origin,
                 sender=sender,
                 envelope=envelope,
