@@ -50,6 +50,12 @@ def _resolved(provider: str, **params) -> dict:
     }
 
 
+def _default_profile(saved: dict) -> dict:
+    """update_tts_config 保存出的 tts_config 里的默认档案。"""
+    store = saved["tts_config"]
+    return next(p for p in store["profiles"] if p["id"] == store["default_profile_id"])
+
+
 class ConfigTests(unittest.TestCase):
     def test_sanitize_falls_back_and_clamps(self):
         cfg = tts_service.sanitize_tts_config({
@@ -79,10 +85,10 @@ class ConfigTests(unittest.TestCase):
             for incoming in ("", "***", "sk-secre...6789"):
                 saved.clear()
                 tts_service.update_tts_config({"mimo": {"api_key": incoming, "voice": "冰糖"}})
-                self.assertEqual(saved["tts_config"]["mimo"]["api_key"], "sk-secret-0123456789")
-                self.assertEqual(saved["tts_config"]["mimo"]["voice"], "冰糖")
+                self.assertEqual(_default_profile(saved)["mimo"]["api_key"], "sk-secret-0123456789")
+                self.assertEqual(_default_profile(saved)["mimo"]["voice"], "冰糖")
             tts_service.update_tts_config({"mimo": {"api_key": "sk-new-key-0000000000"}})
-            self.assertEqual(saved["tts_config"]["mimo"]["api_key"], "sk-new-key-0000000000")
+            self.assertEqual(_default_profile(saved)["mimo"]["api_key"], "sk-new-key-0000000000")
 
     def test_public_config_never_contains_plaintext_key(self):
         cfg = tts_service.default_tts_config()
@@ -330,8 +336,8 @@ class CustomProviderConfigTests(unittest.TestCase):
                 tts_service.update_tts_config({"custom": {"api_url": "https://x.example", "body": "oops"}})
             self.assertEqual(saved, {})
             tts_service.update_tts_config({"custom": {"api_url": "https://x.example/tts", "api_key": ""}})
-            self.assertEqual(saved["tts_config"]["custom"]["api_key"], "sk-custom-0123456789")
-            self.assertEqual(saved["tts_config"]["custom"]["api_url"], "https://x.example/tts")
+            self.assertEqual(_default_profile(saved)["custom"]["api_key"], "sk-custom-0123456789")
+            self.assertEqual(_default_profile(saved)["custom"]["api_url"], "https://x.example/tts")
 
     def test_role_overrides_apply_to_custom(self):
         cfg = tts_service.default_tts_config()
@@ -639,6 +645,197 @@ class PipelineVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_with_voice_transcripts("好梦", voices, plain=True), "好梦\n[语音] 晚安")
         self.assertEqual(_with_voice_transcripts("", voices, plain=False), "<对话>[语音] 晚安</对话>")
         self.assertEqual(_with_voice_transcripts("hi", [], plain=True), "hi")
+
+
+class TtsProfileTests(unittest.TestCase):
+    """多档案：迁移、增删改、默认档案、角色选择。"""
+
+    def _store(self, **extra):
+        store = {
+            "enabled": True,
+            "default_profile_id": "a",
+            "profiles": [
+                {"id": "a", "name": "甲", "provider": "mimo",
+                 "mimo": {"api_key": "sk-a-0123456789", "voice": "冰糖"}},
+                {"id": "b", "name": "乙", "provider": "gpt_sovits",
+                 "gpt_sovits": {"ref_audio_path": "/b.wav"}},
+            ],
+        }
+        store.update(extra)
+        return store
+
+    def _patched(self, store):
+        saved = {}
+
+        def fake_save(values):
+            saved.update(values)
+            return True
+
+        return saved, patch(
+            "services.tts_service.settings_service.load_settings", return_value={"tts_config": store},
+        ), patch("services.tts_service.settings_service.save_settings", side_effect=fake_save)
+
+    def test_legacy_flat_config_migrates_to_default_profile(self):
+        legacy = tts_service.default_tts_config()
+        legacy.update(enabled=True, provider="qwen")
+        legacy["qwen"]["api_key"] = "sk-legacy-0123456789"
+        store = tts_service.sanitize_tts_store(legacy)
+        self.assertTrue(store["enabled"])
+        self.assertEqual(store["default_profile_id"], "default")
+        self.assertEqual([p["id"] for p in store["profiles"]], ["default"])
+        self.assertEqual(store["profiles"][0]["provider"], "qwen")
+        self.assertEqual(store["profiles"][0]["qwen"]["api_key"], "sk-legacy-0123456789")
+        self.assertNotIn("enabled", store["profiles"][0])
+
+    def test_sanitize_store_repairs_ids_and_default(self):
+        store = tts_service.sanitize_tts_store({
+            "enabled": 1, "default_profile_id": "ghost",
+            "profiles": [
+                {"id": "ok", "name": "  "}, {"id": "ok", "name": "dup"}, {"id": "bad id!"}, "junk",
+            ],
+        })
+        self.assertEqual([p["id"] for p in store["profiles"]], ["ok"])
+        self.assertEqual(store["profiles"][0]["name"], "未命名")
+        self.assertEqual(store["default_profile_id"], "ok")
+        empty = tts_service.sanitize_tts_store({"profiles": []})
+        self.assertEqual((empty["profiles"], empty["default_profile_id"]), ([], ""))
+
+    def test_public_config_lists_profiles_and_mirrors_default(self):
+        public = tts_service.public_tts_config(self._store())
+        self.assertEqual([p["id"] for p in public["profiles"]], ["a", "b"])
+        self.assertTrue(public["profiles"][0]["configured"])
+        self.assertTrue(public["profiles"][1]["configured"])
+        self.assertEqual(public["default_profile_id"], "a")
+        # 顶层镜像默认档案，旧客户端可继续读取
+        self.assertEqual(public["provider"], "mimo")
+        self.assertTrue(public["configured"])
+        self.assertIn("api_key_masked", public["mimo"])
+        self.assertNotIn("sk-a-0123456789", json.dumps(public))
+
+    def test_update_upserts_profiles_and_keeps_masked_secret(self):
+        saved, load, save = self._patched(self._store())
+        with load, save:
+            tts_service.update_tts_config({"profiles": [
+                {"id": "a", "name": "甲2", "mimo": {"api_key": "sk-a-0123...", "voice": "茉莉"}},
+                {"id": "c", "name": "丙", "provider": "qwen", "qwen": {"api_key": "sk-c-0123456789"}},
+            ]})
+        profiles = {p["id"]: p for p in saved["tts_config"]["profiles"]}
+        self.assertEqual(list(profiles), ["a", "b", "c"])
+        self.assertEqual(profiles["a"]["name"], "甲2")
+        self.assertEqual(profiles["a"]["mimo"]["api_key"], "sk-a-0123456789")
+        self.assertEqual(profiles["a"]["mimo"]["voice"], "茉莉")
+        self.assertEqual(profiles["b"]["gpt_sovits"]["ref_audio_path"], "/b.wav")
+        self.assertEqual(profiles["c"]["provider"], "qwen")
+        self.assertEqual(saved["tts_config"]["default_profile_id"], "a")
+
+    def test_new_profile_keeps_defaults_for_blank_fields(self):
+        saved, load, save = self._patched(self._store())
+        with load, save:
+            tts_service.update_tts_config({"profiles": [
+                {"id": "n", "name": "新", "mimo": {"api_url": "", "model": " ", "voice": "茉莉"}},
+                {"id": "a", "mimo": {"voice": ""}},
+            ]})
+        profiles = {p["id"]: p for p in saved["tts_config"]["profiles"]}
+        defaults = tts_service.default_tts_config()["mimo"]
+        self.assertEqual(profiles["n"]["mimo"]["api_url"], defaults["api_url"])
+        self.assertEqual(profiles["n"]["mimo"]["model"], defaults["model"])
+        self.assertEqual(profiles["n"]["mimo"]["voice"], "茉莉")
+        self.assertEqual(profiles["a"]["mimo"]["voice"], "")  # 已有档案允许清空
+
+    def test_update_generates_id_for_new_profile_without_valid_id(self):
+        saved, load, save = self._patched(self._store())
+        with load, save:
+            tts_service.update_tts_config({"profiles": [{"name": "新"}, {"id": "no good", "name": "新2"}]})
+        ids = [p["id"] for p in saved["tts_config"]["profiles"]]
+        self.assertEqual(len(ids), 4)
+        self.assertEqual(len(set(ids)), 4)
+
+    def test_update_delete_and_default(self):
+        saved, load, save = self._patched(self._store())
+        with load, save:
+            tts_service.update_tts_config({"default_profile_id": "b", "delete_profile_ids": ["a"]})
+        self.assertEqual([p["id"] for p in saved["tts_config"]["profiles"]], ["b"])
+        self.assertEqual(saved["tts_config"]["default_profile_id"], "b")
+        saved2, load2, save2 = self._patched(self._store())
+        with load2, save2:
+            tts_service.update_tts_config({"delete_profile_ids": ["a"]})
+        self.assertEqual(saved2["tts_config"]["default_profile_id"], "b")  # 默认档案被删后顺延
+
+    def test_update_rejects_unknown_default_and_too_many_profiles(self):
+        saved, load, save = self._patched(self._store())
+        with load, save:
+            with self.assertRaises(tts_service.TTSError):
+                tts_service.update_tts_config({"default_profile_id": "ghost"})
+            with self.assertRaises(tts_service.TTSError):
+                tts_service.update_tts_config({"profiles": [
+                    {"id": f"p{i}", "name": str(i)} for i in range(tts_service.MAX_PROFILES)
+                ]})
+        self.assertEqual(saved, {})
+
+    def test_legacy_update_targets_default_profile(self):
+        saved, load, save = self._patched(self._store())
+        with load, save:
+            tts_service.update_tts_config({"provider": "qwen", "qwen": {"voice": "Ethan"}})
+        profiles = {p["id"]: p for p in saved["tts_config"]["profiles"]}
+        self.assertEqual(profiles["a"]["provider"], "qwen")
+        self.assertEqual(profiles["a"]["qwen"]["voice"], "Ethan")
+        self.assertEqual(profiles["b"]["provider"], "gpt_sovits")
+
+    def test_role_picks_profile_with_fallbacks(self):
+        with patch(
+            "services.tts_service.settings_service.load_settings", return_value={"tts_config": self._store()},
+        ):
+            default = tts_service.resolve_tts_config({"id": "r"})
+            self.assertEqual((default["profile_id"], default["provider"]), ("a", "mimo"))
+            picked = tts_service.resolve_tts_config(
+                {"id": "r", "metadata": {"voice": {"profile_id": "b", "ref_audio_path": "/role.wav"}}},
+            )
+            self.assertEqual((picked["profile_id"], picked["profile_name"]), ("b", "乙"))
+            self.assertEqual(picked["params"]["ref_audio_path"], "/role.wav")
+            self.assertTrue(picked["configured"])
+            gone = tts_service.resolve_tts_config({"id": "r", "metadata": {"voice": {"profile_id": "zzz"}}})
+            self.assertEqual(gone["profile_id"], "a")
+            explicit = tts_service.resolve_tts_config(
+                {"id": "r", "metadata": {"voice": {"profile_id": "b"}}}, "a",
+            )
+            self.assertEqual(explicit["profile_id"], "a")
+
+    def test_no_profiles_means_unavailable(self):
+        store = self._store(profiles=[], default_profile_id="")
+        with patch("services.tts_service.settings_service.load_settings", return_value={"tts_config": store}):
+            resolved = tts_service.resolve_tts_config({"id": "r"})
+            self.assertFalse(resolved["configured"])
+            self.assertFalse(tts_service.is_voice_available({"id": "r"}))
+            self.assertIsNone(tts_service.get_profile())
+
+
+class TtsTestHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_test_action_uses_requested_profile(self):
+        from transport import ws_dispatcher
+
+        store = {
+            "enabled": False, "default_profile_id": "a",
+            "profiles": [
+                {"id": "a", "name": "甲", "provider": "mimo"},
+                {"id": "b", "name": "乙", "provider": "gpt_sovits",
+                 "gpt_sovits": {"ref_audio_path": "/b.wav"}},
+            ],
+        }
+        seen = {}
+
+        async def fake_synth(resolved, text, style=""):
+            seen["profile"] = resolved["profile_id"]
+            return tts_service.SynthesizedAudio(b"x" * 10, ".wav", "audio/wav", 100)
+
+        with patch("services.tts_service.settings_service.load_settings", return_value={"tts_config": store}), \
+                patch("services.tts_service.synthesize", side_effect=fake_synth):
+            ghost = await ws_dispatcher._handle_settings_tts_test({"profile_id": "ghost"})
+            self.assertFalse(ghost["success"])
+            unconfigured = await ws_dispatcher._handle_settings_tts_test({})
+            self.assertFalse(unconfigured["success"])  # 默认档案 mimo 缺 key
+            ok = await ws_dispatcher._handle_settings_tts_test({"profile_id": "b"})
+            self.assertTrue(ok["success"])
+            self.assertEqual(seen["profile"], "b")
 
 
 if __name__ == "__main__":

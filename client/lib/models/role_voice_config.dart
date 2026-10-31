@@ -1,13 +1,15 @@
 /// 角色 `metadata` 中存放按角色语音（TTS）配置的 key。
 ///
-/// 结构：`{enabled: bool, voice, style, ref_audio_path, prompt_text,
+/// 结构：`{enabled: bool, profile_id, voice, style, ref_audio_path, prompt_text,
 /// prompt_lang, text_lang}`；`enabled == false` 表示此角色不发语音，
-/// 其余字符串留空表示沿用全局配置。
+/// `profile_id` 为所选 TTS 档案（留空跟随默认档案），
+/// 其余字符串留空表示沿用所选档案的配置。
 /// 服务端 `RoleUpdate.metadata` 是整体替换，所以写入时必须保留其他 key。
 const String roleVoiceMetadataKey = 'voice';
 
 /// 角色语音配置里的字符串字段 key（与服务端约定一致）。
 const List<String> _voiceStringKeys = [
+  'profile_id',
   'voice',
   'style',
   'ref_audio_path',
@@ -21,10 +23,13 @@ class RoleVoiceConfig {
   /// 是否允许此角色发送语音；false 时服务端不会为该角色合成语音。
   final bool enabled;
 
-  /// 音色（留空沿用全局默认）。
+  /// 使用的 TTS 档案 id（留空跟随默认档案）。
+  final String profileId;
+
+  /// 音色（留空沿用档案默认）。
   final String voice;
 
-  /// 语气 / 风格（留空沿用全局默认）。
+  /// 语气 / 风格（留空沿用档案默认）。
   final String style;
 
   /// GPT-SoVITS：参考音频路径。
@@ -41,6 +46,7 @@ class RoleVoiceConfig {
 
   const RoleVoiceConfig({
     this.enabled = true,
+    this.profileId = '',
     this.voice = '',
     this.style = '',
     this.refAudioPath = '',
@@ -52,6 +58,7 @@ class RoleVoiceConfig {
   /// 全部为默认值（启用且没有任何覆盖）。
   bool get isDefault =>
       enabled &&
+      profileId.isEmpty &&
       voice.isEmpty &&
       style.isEmpty &&
       refAudioPath.isEmpty &&
@@ -61,6 +68,7 @@ class RoleVoiceConfig {
 
   RoleVoiceConfig copyWith({
     bool? enabled,
+    String? profileId,
     String? voice,
     String? style,
     String? refAudioPath,
@@ -70,6 +78,7 @@ class RoleVoiceConfig {
   }) {
     return RoleVoiceConfig(
       enabled: enabled ?? this.enabled,
+      profileId: profileId ?? this.profileId,
       voice: voice ?? this.voice,
       style: style ?? this.style,
       refAudioPath: refAudioPath ?? this.refAudioPath,
@@ -83,6 +92,7 @@ class RoleVoiceConfig {
   bool operator ==(Object other) =>
       other is RoleVoiceConfig &&
       other.enabled == enabled &&
+      other.profileId == profileId &&
       other.voice == voice &&
       other.style == style &&
       other.refAudioPath == refAudioPath &&
@@ -93,6 +103,7 @@ class RoleVoiceConfig {
   @override
   int get hashCode => Object.hash(
     enabled,
+    profileId,
     voice,
     style,
     refAudioPath,
@@ -110,6 +121,7 @@ RoleVoiceConfig readRoleVoiceConfig(Map<String, dynamic> metadata) {
   return RoleVoiceConfig(
     // 只有显式 false 才算关闭，缺失按启用处理。
     enabled: raw['enabled'] != false,
+    profileId: text('profile_id'),
     voice: text('voice'),
     style: text('style'),
     refAudioPath: text('ref_audio_path'),
@@ -143,6 +155,7 @@ Map<String, dynamic> writeRoleVoiceConfig(
   }
 
   final values = <String, String>{
+    'profile_id': config.profileId.trim(),
     'voice': config.voice.trim(),
     'style': config.style.trim(),
     'ref_audio_path': config.refAudioPath.trim(),

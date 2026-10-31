@@ -141,34 +141,43 @@ const Map<String, String> ttsOptionLabels = {
   'url': 'url（JSON 内的音频链接）',
 };
 
-/// 后端返回的 TTS 全局设置（`settings_tts_get`）。
-class TtsSettings {
-  final bool enabled;
+int _readTtsInt(dynamic value, int fallback) {
+  if (value is num) return value.round();
+  return int.tryParse(value?.toString().trim() ?? '') ?? fallback;
+}
+
+/// 一个 TTS 档案（`settings_tts_get` 里 `profiles` 的一项）：
+/// 名称 + 当前供应商 + 超时 / 字数上限 + 各供应商的字段值。
+class TtsProfile {
+  final String id;
+  final String name;
 
   /// 当前使用的供应商 id：`mimo` / `qwen` / `gpt_sovits` / `custom`。
   final String provider;
   final int timeoutSeconds;
   final int maxChars;
 
-  /// 后端判断当前供应商配置是否完整可用。
+  /// 后端判断该档案当前供应商的配置是否完整可用。
   final bool configured;
 
   /// 各供应商的字段值（均为字符串）；密钥字段以 `<key>_masked` 存放脱敏值。
   final Map<String, Map<String, String>> providers;
 
-  const TtsSettings({
-    this.enabled = false,
+  const TtsProfile({
+    required this.id,
+    this.name = '',
     this.provider = 'mimo',
-    this.timeoutSeconds = 30,
-    this.maxChars = 200,
+    this.timeoutSeconds = 60,
+    this.maxChars = 300,
     this.configured = false,
     this.providers = const {},
   });
 
-  /// 解析 `settings_tts_get` 的响应（`{tts: {...}}`；也兼容直接传入 tts 对象）。
-  factory TtsSettings.fromResponse(Map<String, dynamic> response) {
-    final raw = response['tts'];
-    final json = raw is Map ? Map<String, dynamic>.from(raw) : response;
+  /// 尚未保存的新档案：所有字段为空，由用户填写。
+  factory TtsProfile.blank({required String id, String name = ''}) =>
+      TtsProfile(id: id, name: name);
+
+  factory TtsProfile.fromJson(Map<String, dynamic> json) {
     final providers = <String, Map<String, String>>{};
     for (final spec in ttsProviderSpecs) {
       final section = json[spec.id];
@@ -182,26 +191,81 @@ class TtsSettings {
       providers[spec.id] = values;
     }
     final provider = (json['provider'] ?? '').toString();
-    return TtsSettings(
-      enabled: json['enabled'] == true,
+    return TtsProfile(
+      id: (json['id'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
       provider: ttsProviderSpecs.any((spec) => spec.id == provider)
           ? provider
           : ttsProviderSpecs.first.id,
-      timeoutSeconds: _readInt(json['timeout_seconds'], 30),
-      maxChars: _readInt(json['max_chars'], 200),
+      timeoutSeconds: _readTtsInt(json['timeout_seconds'], 60),
+      maxChars: _readTtsInt(json['max_chars'], 300),
       configured: json['configured'] == true,
       providers: providers,
     );
   }
 
+  /// 当前供应商的展示名。
+  String get providerLabel => ttsProviderSpecs
+      .firstWhere(
+        (spec) => spec.id == provider,
+        orElse: () => ttsProviderSpecs.first,
+      )
+      .label;
+
   /// 指定供应商某字段的当前值（密钥字段取脱敏值）。
   String valueOf(String provider, String key) =>
       providers[provider]?[key] ?? '';
+}
 
-  static int _readInt(dynamic value, int fallback) {
-    if (value is num) return value.round();
-    return int.tryParse(value?.toString().trim() ?? '') ?? fallback;
+/// 后端返回的 TTS 设置（`settings_tts_get`）：全局开关 + 档案列表。
+///
+/// 服务端响应里镜像默认档案的旧版顶层字段（provider、mimo 等）会被忽略。
+class TtsSettings {
+  /// 全局总开关。
+  final bool enabled;
+
+  /// 未单独指定档案的角色使用的档案 id；没有任何档案时可能为空。
+  final String defaultProfileId;
+  final List<TtsProfile> profiles;
+
+  const TtsSettings({
+    this.enabled = false,
+    this.defaultProfileId = '',
+    this.profiles = const [],
+  });
+
+  /// 解析 `settings_tts_get` 的响应（`{tts: {...}}`；也兼容直接传入 tts 对象）。
+  factory TtsSettings.fromResponse(Map<String, dynamic> response) {
+    final raw = response['tts'];
+    final json = raw is Map ? Map<String, dynamic>.from(raw) : response;
+    final rawProfiles = json['profiles'];
+    final profiles = <TtsProfile>[];
+    if (rawProfiles is List) {
+      for (final item in rawProfiles) {
+        if (item is! Map) continue;
+        final profile = TtsProfile.fromJson(Map<String, dynamic>.from(item));
+        if (profile.id.isNotEmpty) profiles.add(profile);
+      }
+    }
+    return TtsSettings(
+      enabled: json['enabled'] == true,
+      defaultProfileId: (json['default_profile_id'] ?? '').toString(),
+      profiles: profiles,
+    );
   }
+
+  /// 按 id 查找档案；找不到返回 null。
+  TtsProfile? profileById(String id) {
+    for (final profile in profiles) {
+      if (profile.id == id) return profile;
+    }
+    return null;
+  }
+
+  /// 默认档案；默认 id 无效时退回第一个档案，没有档案则为 null。
+  TtsProfile? get defaultProfile =>
+      profileById(defaultProfileId) ??
+      (profiles.isEmpty ? null : profiles.first);
 }
 
 /// `settings_tts_test` 的结果。
@@ -274,20 +338,28 @@ class TtsSettingsService {
     return TtsSettings.fromResponse(response);
   }
 
-  /// 组装 `settings_tts_update` 的 `updates`。
+  /// 服务端允许的档案数量上限。
+  static const int maxProfiles = 20;
+
+  /// 生成新档案 id：1-40 位 `[A-Za-z0-9_-]`。
+  static String newProfileId() =>
+      'p${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+
+  /// 组装一个档案的 upsert 项（`updates.profiles` 的元素）。
   ///
   /// [providers] 为各供应商表单当前值（字符串）。密钥字段只在用户输入了新值
   /// （非空）时才提交，缺省即保留服务端原值；数值字段无法解析时不提交。
-  @visibleForTesting
-  static Map<String, dynamic> buildUpdates({
-    required bool enabled,
+  static Map<String, dynamic> buildProfileUpdate({
+    required String id,
+    required String name,
     required String provider,
     required int timeoutSeconds,
     required int maxChars,
     required Map<String, Map<String, String>> providers,
   }) {
-    final updates = <String, dynamic>{
-      'enabled': enabled,
+    final profile = <String, dynamic>{
+      'id': id,
+      'name': name.trim(),
       'provider': provider,
       'timeout_seconds': timeoutSeconds,
       'max_chars': maxChars,
@@ -306,39 +378,56 @@ class TtsSettingsService {
           section[field.key] = raw;
         }
       }
-      updates[spec.id] = section;
+      profile[spec.id] = section;
     }
-    return updates;
+    return profile;
   }
 
-  /// 保存设置；失败时抛出异常。
-  Future<void> save({
-    required bool enabled,
-    required String provider,
-    required int timeoutSeconds,
-    required int maxChars,
-    required Map<String, Map<String, String>> providers,
+  /// 组装 `settings_tts_update` 的 `updates`；只包含传入的部分。
+  @visibleForTesting
+  static Map<String, dynamic> buildUpdates({
+    bool? enabled,
+    String? defaultProfileId,
+    List<Map<String, dynamic>> profiles = const [],
+    List<String> deleteProfileIds = const [],
+  }) {
+    return <String, dynamic>{
+      'enabled': ?enabled,
+      'default_profile_id': ?defaultProfileId,
+      if (profiles.isNotEmpty) 'profiles': profiles,
+      if (deleteProfileIds.isNotEmpty) 'delete_profile_ids': deleteProfileIds,
+    };
+  }
+
+  /// 提交更新；失败时抛出异常。成功后返回服务端给出的最新设置（响应不含时为 null）。
+  Future<TtsSettings?> update({
+    bool? enabled,
+    String? defaultProfileId,
+    List<Map<String, dynamic>> profiles = const [],
+    List<String> deleteProfileIds = const [],
   }) async {
     final response = await _request('settings_tts_update', {
       'updates': buildUpdates(
         enabled: enabled,
-        provider: provider,
-        timeoutSeconds: timeoutSeconds,
-        maxChars: maxChars,
-        providers: providers,
+        defaultProfileId: defaultProfileId,
+        profiles: profiles,
+        deleteProfileIds: deleteProfileIds,
       ),
     });
     if (response['success'] == false) {
       final error = (response['error'] ?? '').toString();
       throw StateError(error.isEmpty ? '保存失败' : error);
     }
+    return response['tts'] is Map ? TtsSettings.fromResponse(response) : null;
   }
 
-  /// 用已保存的配置合成一句测试语音（耗时较长，使用更长的请求超时）。
-  Future<TtsTestResult> test() async {
+  /// 用已保存的档案合成一句测试语音（耗时较长，使用更长的请求超时）。
+  /// [profileId] 为空时测试默认档案。
+  Future<TtsTestResult> test({String? profileId}) async {
+    final id = (profileId ?? '').trim();
     final response = await _request(
       'settings_tts_test',
-      const {},
+      id.isEmpty ? const <String, dynamic>{} : {'profile_id': id},
       timeout: const Duration(seconds: 90),
     );
     return TtsTestResult.fromResponse(response);

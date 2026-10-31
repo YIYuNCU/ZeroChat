@@ -508,7 +508,10 @@ async def _handle_settings_tts_test(payload: dict) -> dict:
     """用当前配置合成一句固定短语，仅报告结果，不返回音频。"""
     import time as _time
 
-    resolved = tts_service.resolve_tts_config(None)
+    profile_id = str(payload.get("profile_id") or "").strip()
+    if profile_id and tts_service.get_profile(profile_id) is None:
+        return {"success": False, "error": "语音档案不存在"}
+    resolved = tts_service.resolve_tts_config(None, profile_id or None)
     if not resolved["configured"]:
         return {"success": False, "error": "语音合成未配置完整"}
     started = _time.monotonic()

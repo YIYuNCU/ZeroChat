@@ -8,9 +8,12 @@
 * ``custom``      – 自定义请求格式：地址 / 请求头 / 请求体是带 ``{{占位符}}`` 的模板，
                     响应可以是音频二进制、JSON 里的 base64 或音频 URL
 
-全局配置存放在 ``settings.json`` 的 ``tts_config``（API Key 只存服务端，读取时掩码）；
-单个角色可通过 ``role.metadata["voice"]`` 覆盖音色 / 风格 / GPT-SoVITS 参考音频，
-或关闭语音。合成出的音频保存在 ``data/roles/<role_id>/voices/``，客户端通过
+配置存放在 ``settings.json`` 的 ``tts_config``（API Key 只存服务端，读取时掩码）：
+全局开关 + 默认档案 id + 多个「语音档案」（每个档案是一套完整的供应商配置）。
+单个角色可通过 ``role.metadata["voice"]["profile_id"]`` 选择档案（未选或档案已删除时用默认档案），
+并用 ``role.metadata["voice"]`` 覆盖音色 / 风格 / GPT-SoVITS 参考音频，或关闭语音。
+旧版单一全局配置读取时自动迁移为 id 为 ``default`` 的档案。
+合成出的音频保存在 ``data/roles/<role_id>/voices/``，客户端通过
 ``ws-emoji://voice/<role_id>/<filename>`` 分块下载，OneBot 直接读取本地文件。
 """
 from __future__ import annotations
@@ -194,8 +197,94 @@ def sanitize_tts_config(value: Any) -> Dict[str, Any]:
     return base
 
 
-def load_tts_config() -> Dict[str, Any]:
-    return sanitize_tts_config(settings_service.load_settings().get(_KEY_CONFIG))
+#: 语音档案：一份完整的 TTS 后端配置（供应商 + 各供应商参数 + 超时 / 字数上限）。
+#: ``tts_config`` 存放全局开关、默认档案 id 和档案列表；角色通过
+#: ``role.metadata["voice"]["profile_id"]`` 选择档案，未选或档案已删除时用默认档案。
+MAX_PROFILES = 20
+DEFAULT_PROFILE_ID = "default"
+DEFAULT_PROFILE_NAME = "默认"
+UNNAMED_PROFILE_NAME = "未命名"
+_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+#: 旧版（单一全局配置）里与档案内容对应的顶层键，用于迁移和兼容旧客户端的更新。
+_LEGACY_PROFILE_KEYS = ("provider", "timeout_seconds", "max_chars")
+
+
+def _clean_profile_id(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if _PROFILE_ID_RE.match(text) else ""
+
+
+def _sanitize_profile(value: Any, profile_id: str, name: str) -> Dict[str, Any]:
+    flat = sanitize_tts_config(value)
+    flat.pop("enabled", None)
+    return {"id": profile_id, "name": name, **flat}
+
+
+def _profile_name(value: Any, fallback: str) -> str:
+    return _text(value, 40) or fallback
+
+
+def default_tts_store() -> Dict[str, Any]:
+    return {
+        "enabled": False,
+        "default_profile_id": DEFAULT_PROFILE_ID,
+        "profiles": [_sanitize_profile({}, DEFAULT_PROFILE_ID, DEFAULT_PROFILE_NAME)],
+    }
+
+
+def sanitize_tts_store(value: Any) -> Dict[str, Any]:
+    """把存储值规整为 ``{enabled, default_profile_id, profiles}``。
+
+    旧版单一配置（没有 ``profiles`` 键）会迁移成一个 id 为 ``default`` 的档案。
+    """
+    if not isinstance(value, dict):
+        return default_tts_store()
+    if "profiles" not in value:
+        return {
+            "enabled": bool(value.get("enabled")),
+            "default_profile_id": DEFAULT_PROFILE_ID,
+            "profiles": [_sanitize_profile(value, DEFAULT_PROFILE_ID, DEFAULT_PROFILE_NAME)],
+        }
+    profiles: list = []
+    seen: set = set()
+    raw_profiles = value.get("profiles")
+    for raw in raw_profiles if isinstance(raw_profiles, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        profile_id = _clean_profile_id(raw.get("id"))
+        if not profile_id or profile_id in seen:
+            continue
+        profiles.append(
+            _sanitize_profile(raw, profile_id, _profile_name(raw.get("name"), UNNAMED_PROFILE_NAME))
+        )
+        seen.add(profile_id)
+        if len(profiles) >= MAX_PROFILES:
+            break
+    default_id = _clean_profile_id(value.get("default_profile_id"))
+    if default_id not in seen:
+        default_id = profiles[0]["id"] if profiles else ""
+    return {
+        "enabled": bool(value.get("enabled")),
+        "default_profile_id": default_id,
+        "profiles": profiles,
+    }
+
+
+def load_tts_store() -> Dict[str, Any]:
+    return sanitize_tts_store(settings_service.load_settings().get(_KEY_CONFIG))
+
+
+def find_profile(store: Dict[str, Any], profile_id: Any) -> Optional[Dict[str, Any]]:
+    wanted = str(profile_id or "").strip()
+    if not wanted:
+        return None
+    return next((p for p in store["profiles"] if p["id"] == wanted), None)
+
+
+def get_profile(profile_id: Any = None) -> Optional[Dict[str, Any]]:
+    """按 id 取档案；id 为空取默认档案；不存在返回 None。"""
+    store = load_tts_store()
+    return find_profile(store, profile_id or store["default_profile_id"])
 
 
 def _is_unchanged_secret(value: Any) -> bool:
@@ -203,31 +292,82 @@ def _is_unchanged_secret(value: Any) -> bool:
     return text in _MASK_PLACEHOLDERS or "..." in text
 
 
-def update_tts_config(updates: Any) -> bool:
-    """合并部分更新；api_key 为空、``***`` 或掩码值时保留旧值。
-
-    提交了 ``custom`` 段时会先校验模板，不合法抛 ``TTSError``（消息可直接展示）。
-    """
-    if not isinstance(updates, dict):
-        return False
-    current = load_tts_config()
-    merged: Dict[str, Any] = {k: v for k, v in current.items() if k not in PROVIDERS}
-    for key in ("enabled", "provider", "timeout_seconds", "max_chars"):
-        if key in updates and updates[key] is not None:
-            merged[key] = updates[key]
+def _merge_profile(store: Dict[str, Any], incoming: Dict[str, Any]) -> None:
+    """把一份（可能不完整的）档案更新合并进 store；id 不存在则新建。"""
+    profile_id = _clean_profile_id(incoming.get("id")) or uuid.uuid4().hex[:12]
+    existing = find_profile(store, profile_id)
+    is_new = existing is None
+    if existing is None:
+        if len(store["profiles"]) >= MAX_PROFILES:
+            raise TTSError(f"最多只能创建 {MAX_PROFILES} 个语音档案")
+        existing = _sanitize_profile({}, profile_id, UNNAMED_PROFILE_NAME)
+        store["profiles"].append(existing)
+    merged: Dict[str, Any] = {k: v for k, v in existing.items() if k not in PROVIDERS}
+    for key in _LEGACY_PROFILE_KEYS:
+        if incoming.get(key) is not None:
+            merged[key] = incoming[key]
     for provider_name in PROVIDERS:
-        section = dict(current[provider_name])
-        incoming = updates.get(provider_name)
-        if isinstance(incoming, dict):
-            for key, val in incoming.items():
+        section = dict(existing[provider_name])
+        section_in = incoming.get(provider_name)
+        if isinstance(section_in, dict):
+            for key, val in section_in.items():
                 if key == "api_key" and _is_unchanged_secret(val):
                     continue
                 if key in section and val is not None:
+                    if is_new and isinstance(val, str) and not val.strip():
+                        continue  # 新建档案时留空的字段沿用服务端默认值
                     section[key] = val
         merged[provider_name] = section
-    if isinstance(updates.get("custom"), dict):
-        validate_custom_section(sanitize_tts_config(merged)["custom"])
-    return settings_service.save_settings({_KEY_CONFIG: sanitize_tts_config(merged)})
+    name = _profile_name(incoming.get("name"), existing["name"]) if "name" in incoming else existing["name"]
+    sanitized = _sanitize_profile(merged, profile_id, name)
+    if isinstance(incoming.get("custom"), dict):
+        validate_custom_section(sanitized["custom"])
+    store["profiles"][store["profiles"].index(existing)] = sanitized
+
+
+def update_tts_config(updates: Any) -> bool:
+    """合并部分更新并保存。
+
+    * ``enabled``：全局开关；
+    * ``profiles``：档案列表，按 id 新增或合并（缺失的段 / 字段保留旧值）；
+    * ``delete_profile_ids``：删除档案；
+    * ``default_profile_id``：默认档案，必须存在；
+    * 旧客户端的顶层 ``provider`` / ``timeout_seconds`` / ``max_chars`` / 各供应商段
+      （没有 ``profiles``）视为对默认档案的更新。
+
+    api_key 为空、``***`` 或掩码值时保留旧值。提交了 ``custom`` 段时会先校验模板，
+    不合法抛 ``TTSError``（消息可直接展示）。
+    """
+    if not isinstance(updates, dict):
+        return False
+    store = load_tts_store()
+    if updates.get("enabled") is not None:
+        store["enabled"] = bool(updates["enabled"])
+
+    profile_updates = updates.get("profiles")
+    if profile_updates is None:
+        legacy = {
+            k: v for k, v in updates.items() if k in _LEGACY_PROFILE_KEYS or k in PROVIDERS
+        }
+        if legacy:
+            legacy["id"] = store["default_profile_id"] or DEFAULT_PROFILE_ID
+            profile_updates = [legacy]
+    for incoming in profile_updates if isinstance(profile_updates, list) else []:
+        if isinstance(incoming, dict):
+            _merge_profile(store, incoming)
+
+    deleted = updates.get("delete_profile_ids")
+    if isinstance(deleted, list) and deleted:
+        gone = {str(item).strip() for item in deleted}
+        store["profiles"] = [p for p in store["profiles"] if p["id"] not in gone]
+
+    requested_default = updates.get("default_profile_id")
+    if requested_default is not None:
+        default_id = _clean_profile_id(requested_default)
+        if find_profile(store, default_id) is None:
+            raise TTSError("默认语音档案不存在")
+        store["default_profile_id"] = default_id
+    return settings_service.save_settings({_KEY_CONFIG: sanitize_tts_store(store)})
 
 
 def _provider_ready(provider: str, params: Dict[str, Any]) -> bool:
@@ -240,18 +380,37 @@ def _provider_ready(provider: str, params: Dict[str, Any]) -> bool:
     return bool(str(params.get("ref_audio_path") or "").strip())
 
 
-def public_tts_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """返回给客户端的配置：api_key 替换为 api_key_masked，并带 configured 标志。"""
-    cfg = sanitize_tts_config(config) if config is not None else load_tts_config()
-    result = {k: v for k, v in cfg.items() if k not in PROVIDERS}
+def _public_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    result = {k: v for k, v in profile.items() if k not in PROVIDERS}
     for provider in PROVIDERS:
-        section = dict(cfg[provider])
+        section = dict(profile[provider])
         if "api_key" in section:
             masked = mask_api_key(section.pop("api_key"))
             if masked is not None:
                 section["api_key_masked"] = masked
         result[provider] = section
-    result["configured"] = _provider_ready(cfg["provider"], cfg[cfg["provider"]])
+    result["configured"] = _provider_ready(profile["provider"], profile[profile["provider"]])
+    return result
+
+
+def public_tts_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """返回给客户端的配置：api_key 替换为 api_key_masked，每个档案带 configured 标志。
+
+    顶层同时镜像默认档案的字段（provider、各供应商段、configured 等），
+    让只认识旧版单一配置的客户端仍能读写默认档案。
+    """
+    store = sanitize_tts_store(config) if config is not None else load_tts_store()
+    profiles = [_public_profile(p) for p in store["profiles"]]
+    default = next(
+        (p for p in profiles if p["id"] == store["default_profile_id"]),
+        None,
+    ) or _public_profile(_sanitize_profile({}, DEFAULT_PROFILE_ID, DEFAULT_PROFILE_NAME))
+    result: Dict[str, Any] = {
+        "enabled": store["enabled"],
+        "default_profile_id": store["default_profile_id"],
+        "profiles": profiles,
+    }
+    result.update({k: v for k, v in default.items() if k not in ("id", "name")})
     return result
 
 
@@ -261,21 +420,34 @@ def _role_voice_overrides(role_data: Optional[Dict[str, Any]]) -> Dict[str, Any]
     return voice if isinstance(voice, dict) else {}
 
 
-def resolve_tts_config(role_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """全局配置合并角色覆盖，返回当前 provider 的生效参数。"""
-    cfg = load_tts_config()
-    provider = cfg["provider"]
-    params = dict(cfg[provider])
+def resolve_tts_config(
+    role_data: Optional[Dict[str, Any]] = None, profile_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """选出生效档案（显式 profile_id > 角色选择 > 默认档案）并合并角色覆盖。"""
+    store = load_tts_store()
     overrides = _role_voice_overrides(role_data)
+    profile = None
+    for candidate in (profile_id, overrides.get("profile_id"), store["default_profile_id"]):
+        profile = find_profile(store, candidate)
+        if profile is not None:
+            break
+    if profile is None:
+        profile = store["profiles"][0] if store["profiles"] else _sanitize_profile(
+            {}, "", UNNAMED_PROFILE_NAME,
+        )
+    provider = profile["provider"]
+    params = dict(profile[provider])
     for key in _ROLE_VOICE_KEYS[provider]:
         value = overrides.get(key)
         if isinstance(value, str) and value.strip():
             params[key] = value.strip()[:2000]
     return {
-        "enabled": bool(cfg["enabled"]),
+        "enabled": bool(store["enabled"]),
+        "profile_id": profile["id"],
+        "profile_name": profile["name"],
         "provider": provider,
-        "timeout_seconds": cfg["timeout_seconds"],
-        "max_chars": cfg["max_chars"],
+        "timeout_seconds": profile["timeout_seconds"],
+        "max_chars": profile["max_chars"],
         "params": params,
         "role_enabled": overrides.get("enabled") is not False,
         "configured": _provider_ready(provider, params),
@@ -787,14 +959,14 @@ async def synthesize_for_role(
         audio = await synthesize(resolved, spoken, combined_style)
     except TTSError as exc:
         logger.warning(
-            "TTS 合成失败: provider=%s role=%s reason=%s",
-            resolved["provider"], role_id, exc,
+            "TTS 合成失败: profile=%s provider=%s role=%s reason=%s",
+            resolved.get("profile_id"), resolved["provider"], role_id, exc,
         )
         raise
     path = save_voice(role_id, audio)
     logger.info(
-        "TTS 合成完成: provider=%s role=%s chars=%d bytes=%d cost=%.2fs",
-        resolved["provider"], role_id, len(spoken), len(audio.data), time.monotonic() - started,
+        "TTS 合成完成: profile=%s provider=%s role=%s chars=%d bytes=%d cost=%.2fs",
+        resolved.get("profile_id"), resolved["provider"], role_id, len(spoken), len(audio.data), time.monotonic() - started,
     )
     return {
         "text": spoken,

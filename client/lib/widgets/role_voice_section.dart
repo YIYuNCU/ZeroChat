@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../models/role_voice_config.dart';
+import '../services/tts_settings_service.dart';
 
 /// 角色设置页里的“语音（仅此角色）”分组。
 ///
 /// 编辑结果通过 [onChanged] 以完整的新 metadata 交还给调用方（保留其他 key），
-/// 由调用方随角色一起保存。留空的字段表示沿用全局 TTS 配置。
+/// 由调用方随角色一起保存。顶部的「语音档案」选择该角色使用的 TTS 档案
+/// （留空跟随默认档案），其余留空的字段表示沿用所选档案的配置。
 class RoleVoiceSection extends StatefulWidget {
   final String roleName;
   final Map<String, dynamic> metadata;
@@ -14,12 +16,16 @@ class RoleVoiceSection extends StatefulWidget {
   /// 是否显示顶部的灰色小标题；嵌在带标题的可折叠分组里时应关掉，避免重复。
   final bool showHeader;
 
+  /// 读取档案列表用的服务；默认走 [TtsSettingsService.instance]，测试可注入。
+  final TtsSettingsService? ttsService;
+
   const RoleVoiceSection({
     super.key,
     required this.roleName,
     required this.metadata,
     required this.onChanged,
     this.showHeader = true,
+    this.ttsService,
   });
 
   @override
@@ -35,6 +41,9 @@ class _RoleVoiceSectionState extends State<RoleVoiceSection> {
   late final TextEditingController _promptLang;
   late final TextEditingController _textLang;
 
+  /// 已加载的 TTS 档案；null 表示尚未加载或加载失败。
+  List<TtsProfile>? _profiles;
+
   @override
   void initState() {
     super.initState();
@@ -45,6 +54,18 @@ class _RoleVoiceSectionState extends State<RoleVoiceSection> {
     _promptText = TextEditingController(text: _config.promptText);
     _promptLang = TextEditingController(text: _config.promptLang);
     _textLang = TextEditingController(text: _config.textLang);
+    _loadProfiles();
+  }
+
+  Future<void> _loadProfiles() async {
+    try {
+      final settings = await (widget.ttsService ?? TtsSettingsService.instance)
+          .load();
+      if (!mounted) return;
+      setState(() => _profiles = settings.profiles);
+    } catch (_) {
+      // 加载失败时只提供「跟随默认档案」和当前值，不阻塞其他字段。
+    }
   }
 
   @override
@@ -92,6 +113,57 @@ class _RoleVoiceSectionState extends State<RoleVoiceSection> {
     );
   }
 
+  /// 「语音档案」下拉：跟随默认档案 + 所有档案；当前值不在列表里时保留为额外项。
+  Widget _profileSelector() {
+    final profiles = _profiles;
+    final current = _config.profileId;
+    final known = profiles?.any((p) => p.id == current) ?? false;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      child: Row(
+        children: [
+          const SizedBox(width: 82, child: Text('语音档案')),
+          Expanded(
+            child: DropdownButton<String>(
+              key: const ValueKey('role-voice-profile'),
+              value: current,
+              isExpanded: true,
+              underline: const SizedBox.shrink(),
+              items: [
+                const DropdownMenuItem<String>(
+                  value: '',
+                  child: Text('跟随默认档案'),
+                ),
+                for (final profile in profiles ?? const <TtsProfile>[])
+                  DropdownMenuItem<String>(
+                    value: profile.id,
+                    child: Text(
+                      profile.name.isEmpty ? '未命名' : profile.name,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                if (current.isNotEmpty && !known)
+                  DropdownMenuItem<String>(
+                    value: current,
+                    enabled: false,
+                    child: Text(
+                      profiles == null ? '当前档案：$current' : '（已删除的档案）',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Color(0xFF999999)),
+                    ),
+                  ),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                _update(_config.copyWith(profileId: value));
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasSovits =
@@ -128,10 +200,12 @@ class _RoleVoiceSectionState extends State<RoleVoiceSection> {
               ),
               if (_config.enabled) ...[
                 const Divider(height: 1, indent: 16),
+                _profileSelector(),
+                const Divider(height: 1, indent: 16),
                 _field(
                   keyName: 'voice',
                   label: '音色',
-                  hint: '留空沿用全局默认',
+                  hint: '留空沿用档案默认',
                   controller: _voice,
                   apply: (value) => _config.copyWith(voice: value),
                 ),
@@ -139,7 +213,7 @@ class _RoleVoiceSectionState extends State<RoleVoiceSection> {
                 _field(
                   keyName: 'style',
                   label: '风格',
-                  hint: '语气/风格描述，留空沿用全局默认',
+                  hint: '语气/风格描述，留空沿用档案默认',
                   controller: _style,
                   apply: (value) => _config.copyWith(style: value),
                 ),
