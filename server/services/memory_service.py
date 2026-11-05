@@ -20,7 +20,12 @@ from services.vector_memory import VectorMemoryStore, _extract_semantic_text
 from services import summary_config_service
 from services.settings_service import get_thinking_config
 from services.chat_io_service import role_lock
-from services.chat_envelope import EXTRA_FIELDS as ENVELOPE_EXTRA_FIELDS, GROUP_ORIGINS
+from services.chat_envelope import (
+    EXTRA_FIELDS as ENVELOPE_EXTRA_FIELDS,
+    GROUP_ORIGINS,
+    normalize_quotes,
+    quotes_payload,
+)
 
 logger = logging.getLogger(__name__)
 #: SQL 片段：群聊来源集合（常量拼接，非用户输入）。
@@ -545,14 +550,18 @@ def format_memory_message(
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _clean_envelope_extra(extra: Optional[Dict[str, Any]]) -> Dict[str, str]:
+def _clean_envelope_extra(extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(extra, dict):
         return {}
-    cleaned: Dict[str, str] = {}
+    cleaned: Dict[str, Any] = {}
     for key in ENVELOPE_EXTRA_FIELDS:
         value = str(extra.get(key) or "").strip()
         if value:
             cleaned[key] = value
+    # 引用消息：用户这条消息回复的旧消息，随该行一起保存，历史回放时模型仍能看到。
+    quote = quotes_payload(normalize_quotes(extra.get("quote")))
+    if quote:
+        cleaned["quote"] = quote
     return cleaned
 
 

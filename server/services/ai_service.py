@@ -1177,11 +1177,14 @@ def _build_system_prompt(
     settings: Optional[Dict[str, Any]] = None,
     enable_voice: bool = False,
     allow_stats: bool = True,
+    allow_block: bool = False,
 ) -> str:
     """Build system prompt from role data and the configurable prompt registry.
 
     QQ（``is_onebot``）与 App 共用同一套输出协议（标签 / ``$`` / 无回复），再叠加 QQ
-    场景指令；数值系统仅在 ``allow_stats`` 时注入（QQ 下只对主用户私聊开放）。
+    场景指令；数值系统仅在 ``allow_stats`` 时注入（QQ 下只对主用户私聊开放）；
+    屏蔽骚扰用户的说明仅在 ``allow_block`` 时注入，与 ``block_user`` 工具同开同关，
+    避免提示词里提到一个本轮并没有提供的工具。
     """
     parts: List[str] = []
     stats_config = role_data.get("stats_config") or {}
@@ -1241,6 +1244,10 @@ def _build_system_prompt(
         rules.append(_prompt_section(
             "onebot_directive", prompt(prompt_config.ONEBOT_SYSTEM_DIRECTIVE_ID)
         ))
+        if allow_block:
+            rules.append(_prompt_section(
+                "self_protection", prompt(prompt_config.ONEBOT_SELF_PROTECTION_ID)
+            ))
 
     # 通用工具能力（所有场景可用）；表情工具分支由 variant 决定，
     # 可选表情包插件的指引在其声明了 PROMPT 时并入。
@@ -1450,6 +1457,7 @@ async def generate_with_role(
         include_runtime_context=False,
         enable_voice=enable_voice,
         allow_stats=owner_dm,
+        allow_block=is_third_party,
     )
     system_parts = [system_content] if system_content else []
     if extra_context:

@@ -63,3 +63,9 @@ placeholders: ["NO_REPLY_DIRECTIVE"]   # 正文用到的 {NAME} 占位符，必�
 v3 起 QQ 与 App 共用 `chat.format_protocol` 输出协议，指令里的 `<format_markers>`（旧式 `<>`/`//`/`[]`/`**` 标记）改为 `<delivery_rules>`
 （只有 `<对话>` 会送达 QQ，`$` 分条）。旧版覆盖会让模型输出旧标记，因此 `__base_version__` 低于 3（或缺失）的覆盖在渲染时被忽略并记录警告
 （`prompt_config_service.MIN_COMPATIBLE_BASE_VERSION`），需要在设置页基于新版重新编辑。
+
+### 不兼容升级：`onebot.system_directive` v4
+
+v4 把 `<self_protection>`（屏蔽骚扰用户）从指令里拆成独立提示词 `onebot.self_protection`，仅在本轮提供 `block_user` 工具
+（第三方用户的消息）时才注入系统提示词，主用户私聊 / 群聊不再提到一个并未提供的工具。`__base_version__` 低于 4 的指令覆盖
+仍内嵌旧的 `<self_protection>`，会被忽略并记录警告，需要基于新版重新编辑。

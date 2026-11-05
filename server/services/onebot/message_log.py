@@ -325,8 +325,10 @@ def record_inbound(inbound: Inbound, config: Dict[str, Any], when: Optional[int]
     if not should_log(inbound, config):
         return False
     chat_type, chat_id = _chat_key(inbound)
+    # 回复了别人的消息时留一个标记，QQ 消息回顾里才看得出这是一条回复。
+    text = f"[回复] {inbound.content}" if inbound.reply_to_id is not None else inbound.content
     return record(
-        inbound.role_id, chat_type, chat_id, inbound.content,
+        inbound.role_id, chat_type, chat_id, text,
         user_id=str(inbound.user_id or ""), sender=inbound.sender,
         message_id=inbound.message_id, when=when,
     )
@@ -352,7 +354,10 @@ def record_outgoing(role_id: str, target: Target, item: Any) -> bool:
         chat_type, chat_id = CHAT_GROUP, str(target.group_id)
     else:
         chat_type, chat_id = CHAT_PRIVATE, str(target.user_id)
-    return record(role_id, chat_type, chat_id, outgoing_text(item), is_self=True)
+    return record(
+        role_id, chat_type, chat_id, outgoing_text(item), is_self=True,
+        message_id=getattr(item, "message_id", None),
+    )
 
 
 def safe_call(fn, *args, **kwargs) -> bool:
@@ -370,6 +375,28 @@ async def arun(fn, *args) -> bool:
 
 
 # ---------------------------------------------------------------- 读取
+
+def lookup_message(
+    role_id: str, chat_type: str, chat_id: str, message_id: int, now: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """按 QQ 消息 id 取某个会话里一条未过期的消息（用户引用旧消息时还原内容）。
+
+    返回 ``{"user_id", "sender", "is_self", "content"}``；没有记录返回 None。
+    """
+    now = time.time() if now is None else now
+    with _open(create=False) as conn:
+        if conn is None:
+            return None
+        row = conn.execute(
+            "SELECT user_id, sender, is_self, content FROM onebot_messages "
+            "WHERE role_id = ? AND chat_type = ? AND chat_id = ? AND message_id = ? AND ts_epoch >= ? "
+            "ORDER BY id DESC LIMIT 1",
+            (role_id, chat_type, str(chat_id), message_id, now - RETENTION_SECONDS),
+        ).fetchone()
+    if not row:
+        return None
+    return {"user_id": row[0], "sender": row[1], "is_self": bool(row[2]), "content": row[3]}
+
 
 def coverage_start(role_id: str, now: Optional[float] = None) -> Optional[datetime]:
     """本库对该角色已完整覆盖的起点（本地无时区时间）；尚未开始记录时返回 None。"""

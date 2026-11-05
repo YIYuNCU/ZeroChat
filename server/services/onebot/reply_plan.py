@@ -32,6 +32,7 @@ class OutItem:
     carries_meta: bool = False  # 同步到 App 时挂 request_id / 工具调用 / 思考链的那一条
     voice: Optional[Dict[str, Any]] = None
     sticker: Any = None
+    message_id: Optional[int] = None  # 送达后 QQ 返回的消息 id，供用户之后引用这条消息时还原
 
 
 @dataclass

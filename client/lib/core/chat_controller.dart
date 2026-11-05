@@ -386,6 +386,7 @@ class ChatController extends ChangeNotifier {
       combinedContent,
       context.isGroup,
       imagePaths: imagePaths,
+      quotedMessages: _collectQuotedMessages(chatId, pendingMessages),
       stableRequestId: pendingMessages.length == 1
           ? pendingMessages.single.messageId
           : 'batch_${pendingMessages.map((item) => item.messageId).join('_')}',
@@ -713,12 +714,52 @@ class ChatController extends ChangeNotifier {
       return;
     }
 
+    final retryQuote = _quotePayloadFor(chatId, message);
     _processMessageInBackground(
       chatId,
       message.content,
       context.isGroup,
       stableRequestId: message.id,
+      quotedMessages: retryQuote == null ? const [] : [retryQuote],
     );
+  }
+
+  /// 用户消息引用了旧消息时，生成上送服务端的引用描述（id / 内容 / 发送人）。
+  /// 服务端会按 id 到已同步的聊天记录里还原完整内容，找不到时才使用这里的内容。
+  Map<String, String>? _quotePayloadFor(String chatId, Message message) {
+    final quotedId = message.quotedMessageId;
+    if (quotedId == null || quotedId.isEmpty) return null;
+    final original = MessageStore.instance.getMessage(chatId, quotedId);
+    final String content;
+    if (original == null) {
+      content = message.quotedPreviewText ?? '';
+    } else if (original.type == MessageType.image) {
+      content = '[图片]';
+    } else if (original.type == MessageType.sticker) {
+      content = '[表情]';
+    } else {
+      content = VoiceMessage.plainText(original);
+    }
+    return {
+      'id': quotedId,
+      'content': content,
+      'sender_id': original?.senderId ?? '',
+    };
+  }
+
+  /// 一批待发送消息里的全部引用（按出现顺序，被引用消息去重）。
+  List<Map<String, String>> _collectQuotedMessages(
+    String chatId,
+    Iterable<_PendingChatItem> items,
+  ) {
+    final quotes = <Map<String, String>>[];
+    final seen = <String>{};
+    for (final item in items) {
+      final message = MessageStore.instance.getMessage(chatId, item.messageId);
+      final quote = message == null ? null : _quotePayloadFor(chatId, message);
+      if (quote != null && seen.add(quote['id']!)) quotes.add(quote);
+    }
+    return quotes;
   }
 
   /// 后台处理消息
@@ -730,6 +771,7 @@ class ChatController extends ChangeNotifier {
     String content,
     bool isGroup, {
     List<String> imagePaths = const [],
+    List<Map<String, String>> quotedMessages = const [],
     String? stableRequestId,
   }) {
     Future(() async {
@@ -739,6 +781,7 @@ class ChatController extends ChangeNotifier {
             chatId,
             content,
             imagePaths: imagePaths,
+            quotedMessages: quotedMessages,
             stableRequestId: stableRequestId,
           );
         } else {
@@ -746,6 +789,7 @@ class ChatController extends ChangeNotifier {
             chatId,
             content,
             imagePaths: imagePaths,
+            quotedMessages: quotedMessages,
             stableRequestId: stableRequestId,
           );
         }
@@ -970,6 +1014,7 @@ class ChatController extends ChangeNotifier {
     String chatId,
     String userMessage, {
     List<String> imagePaths = const [],
+    List<Map<String, String>> quotedMessages = const [],
     String? stableRequestId,
   }) async {
     final role =
@@ -1052,6 +1097,7 @@ class ChatController extends ChangeNotifier {
       userMessage: userMessage,
       isGroup: false,
       imagePaths: imagePaths,
+      quotedMessages: quotedMessages,
       stableRequestId: stableRequestId,
     );
 
@@ -1078,6 +1124,7 @@ class ChatController extends ChangeNotifier {
     String chatId,
     String userMessage, {
     List<String> imagePaths = const [],
+    List<Map<String, String>> quotedMessages = const [],
     String? stableRequestId,
   }) async {
     final context = _contexts[chatId];
@@ -1164,6 +1211,8 @@ class ChatController extends ChangeNotifier {
           isGroup: true,
           speaker: lastSpeakerRole,
           imagePaths: pendingImagePaths,
+          // 引用只属于用户本轮消息：第 1 轮每位应答角色都要看到，AI↔AI 续聊轮次不带
+          quotedMessages: currentRound == 1 ? quotedMessages : const [],
           // 只有用户本轮消息需要稳定 id，AI↔AI 续聊轮次始终是新的内容。
           stableRequestId: (i == 0 && currentRound == 1)
               ? stableRequestId
@@ -1700,6 +1749,7 @@ class ChatController extends ChangeNotifier {
     required bool isGroup,
     Role? speaker,
     List<String> imagePaths = const [],
+    List<Map<String, String>> quotedMessages = const [],
     String? stableRequestId,
   }) async {
     String? asyncPushError;
@@ -1755,6 +1805,8 @@ class ChatController extends ChangeNotifier {
       'moments_context': momentsContext,
       'attached_json': attachedJson,
       if (visionUploadIds.isNotEmpty) 'vision_upload_ids': visionUploadIds,
+      // 用户引用了旧消息：服务端据此还原被引用内容并告知模型（见 server/services/chat_quote.py）
+      if (quotedMessages.isNotEmpty) 'quoted_messages': quotedMessages,
       if (isGroup) ..._groupEnvelopeContext(chatId, speaker),
     };
     // 重发同一条消息时复用稳定的 request_id：服务端据此去重用户短期记忆行，

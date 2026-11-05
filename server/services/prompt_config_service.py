@@ -64,8 +64,10 @@ LEGACY_BASE_VERSION = 1
 
 #: Prompts whose builtin changed incompatibly: a stored full replacement written against
 #: an older builtin version is ignored (and logged) instead of silently conflicting with
-#: the new protocol. ``onebot.system_directive`` v3 dropped the legacy QQ marker scheme.
-MIN_COMPATIBLE_BASE_VERSION: Dict[str, int] = {"onebot.system_directive": 3}
+#: the new protocol. ``onebot.system_directive`` v3 dropped the legacy QQ marker scheme; v4
+#: moved ``<self_protection>`` into its own ``onebot.self_protection`` prompt, which is only
+#: sent when the ``block_user`` tool is offered.
+MIN_COMPATIBLE_BASE_VERSION: Dict[str, int] = {"onebot.system_directive": 4}
 
 #: Placeholder key inside ``chat.tool_rules`` that carries the emoji-tool branch.
 EMOJI_TOOL_RULE_PLACEHOLDER = "EMOJI_TOOL_RULE"
@@ -89,6 +91,7 @@ CHAT_REPLY_FORMAT_HINT_ID = "chat.reply_format_hint"
 CHAT_NO_REPLY_ID = "chat.no_reply"
 CHAT_VOICE_RULES_ID = "chat.voice_rules"
 ONEBOT_SYSTEM_DIRECTIVE_ID = "onebot.system_directive"
+ONEBOT_SELF_PROTECTION_ID = "onebot.self_protection"
 SUMMARY_CONTEXT_EVENTS_ID = "summary.context_events"
 SUMMARY_CORE_MEMORY_ID = "summary.core_memory"
 SUMMARY_CHAT_RECALL_ID = "summary.chat_recall"
@@ -101,7 +104,8 @@ _REQUIRED_IDS = (
     CHAT_STATS_BULLET_DEFAULT_ID, CHAT_EMOJI_RULE_DEFAULT_ID, CHAT_EMOJI_RULE_CLOUD_ID,
     CHAT_USER_MESSAGE_JSON_HINT_ID, CHAT_REPLY_FORMAT_HINT_ID, CHAT_NO_REPLY_ID,
     CHAT_VOICE_RULES_ID,
-    ONEBOT_SYSTEM_DIRECTIVE_ID, SUMMARY_CONTEXT_EVENTS_ID, SUMMARY_CORE_MEMORY_ID,
+    ONEBOT_SYSTEM_DIRECTIVE_ID, ONEBOT_SELF_PROTECTION_ID,
+    SUMMARY_CONTEXT_EVENTS_ID, SUMMARY_CORE_MEMORY_ID,
     SUMMARY_CHAT_RECALL_ID, SUMMARY_ONEBOT_RECALL_ID,
 )
 _missing_ids = [prompt_id for prompt_id in _REQUIRED_IDS if prompt_id not in PROMPT_REGISTRY]

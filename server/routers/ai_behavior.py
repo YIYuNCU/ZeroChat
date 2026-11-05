@@ -26,6 +26,7 @@ from core.utils import (
     load_moments_posts,
 )
 from services.memory_service import trigger_memory_summary
+from services import chat_quote
 from services.chat_envelope import (
     ChatEnvelope,
     build_envelope,
@@ -905,7 +906,10 @@ async def handle_chat(role: Dict, event: AIEvent) -> AIResponse:
             error="角色已归档，无法聊天",
         )
 
-    # 统一对话信封：来源 / 会话 / 发送人。旧客户端仅发 is_group + chat_id 时在此推断为 App 群聊。
+    # App 用户引用了旧消息：客户端只报 id + 预览，这里按 id 还原完整内容与发送人（见 services/chat_quote.py）。
+    event_context = await chat_quote.attach_app_quotes(role_id, event_context)
+
+    # 统一对话信封：来源 / 会话 / 发送人 / 引用。旧客户端仅发 is_group + chat_id 时在此推断为 App 群聊。
     envelope = build_envelope(event_context)
 
     # 用户回复即取消上一轮「无回复续写」计时器并归零链计数。

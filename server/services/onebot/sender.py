@@ -44,6 +44,16 @@ def onebot_ok(response: Any) -> bool:
     return response.get("status") == "ok" or response.get("retcode") == 0
 
 
+def _message_id_of(response: Any) -> Optional[int]:
+    """发送成功回执 ``data.message_id``；缺失或不是整数返回 None。"""
+    data = response.get("data") if isinstance(response, dict) else None
+    raw = data.get("message_id") if isinstance(data, dict) else None
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _brief_response(response: Any) -> str:
     """失败回执的简要描述，只含状态与错误文字，便于排查。"""
     if not isinstance(response, dict):
@@ -212,6 +222,7 @@ async def deliver_plan(
                 logger.warning("OneBot 发送失败 role=%s kind=%s: %s", role_id, item.kind, exc)
                 continue
             if ok:
+                item.message_id = _message_id_of(response)
                 delivered.append((item, path))
                 if on_delivered is not None:
                     try:

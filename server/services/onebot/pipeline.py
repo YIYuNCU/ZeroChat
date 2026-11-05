@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from services.onebot import commands, config as cfg_mod, media, message_log, mirror, policy
+from services.onebot import commands, config as cfg_mod, media, message_log, mirror, policy, quote
 from services.onebot.aggregator import MessageAggregator, MessageDeduper
 from services.onebot.models import Inbound, OneBotEvent
 from services.onebot.parser import transform_event
@@ -124,6 +124,10 @@ class OneBotPipeline:
         }
         if upload_ids:
             context["vision_upload_ids"] = upload_ids
+        # 用户引用（回复）了旧消息：还原被引用的内容和发送人，随本轮消息一起交给模型
+        quotes = await quote.resolve_quotes(batch, conn)
+        if quotes:
+            context["quote"] = quotes
 
         result = await handle_ai_event(
             AIEvent(role_id=role_id, event_type=AIEventType.CHAT, content=merged["content"], context=context)

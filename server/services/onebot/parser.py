@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, List, Optional, Tuple
 
 from services.chat_envelope import (
@@ -17,7 +18,6 @@ _PLACEHOLDERS = {
     "face": "[表情]",
     "record": "[语音]",
     "video": "[视频]",
-    "reply": "[回复]",
     "forward": "[转发消息]",
     "json": "[JSON卡片]",
     "xml": "[XML消息]",
@@ -28,10 +28,32 @@ def _at_target(data: dict) -> Any:
     return data.get("qq") or data.get("target") or data.get("uin") or ""
 
 
-def flatten_message(message: Any, self_id: Optional[int] = None) -> Tuple[str, List[str]]:
-    """将 OneBot message 字段转换为纯文本和图片 URL 列表，去除开头的 @机器人。"""
+_CQ_REPLY_RE = re.compile(r"\[CQ:reply,[^\]]*?id=(-?\d+)[^\]]*\]")
+
+
+def extract_reply_id(message: Any) -> Optional[int]:
+    """消息里 reply 段（CQ:reply）引用的 QQ 消息 id；没有引用返回 None。"""
     if isinstance(message, str):
-        return message, []
+        match = _CQ_REPLY_RE.search(message)
+        return int(match.group(1)) if match else None
+    if not isinstance(message, list):
+        return None
+    for seg in message:
+        if isinstance(seg, dict) and seg.get("type") == "reply":
+            raw = str((seg.get("data") or {}).get("id", "")).strip()
+            if re.fullmatch(r"-?\d+", raw):
+                return int(raw)
+    return None
+
+
+def flatten_message(message: Any, self_id: Optional[int] = None) -> Tuple[str, List[str]]:
+    """将 OneBot message 字段转换为纯文本和图片 URL 列表，去除开头的 @机器人。
+
+    reply 段不输出占位符：被引用的消息由 :func:`extract_reply_id` 取 id、管线另行还原；
+    回复时 QQ 自动补在 reply 后面的 @机器人 因此仍算「开头的 @」被去掉。
+    """
+    if isinstance(message, str):
+        return _CQ_REPLY_RE.sub("", message).strip(), []
     if not isinstance(message, list):
         return str(message or ""), []
 
@@ -43,6 +65,8 @@ def flatten_message(message: Any, self_id: Optional[int] = None) -> Tuple[str, L
             continue
         seg_type = seg.get("type", "")
         data = seg.get("data") or {}
+        if seg_type == "reply":
+            continue
         if seg_type == "at":
             qq = _at_target(data) or "all"
             at_qq = int(qq) if str(qq).isdigit() else qq
@@ -203,4 +227,5 @@ def transform_event(
         image_urls=image_urls,
         server_url=server_url,
         at_bot=at_bot,
+        reply_to_id=extract_reply_id(event.message),
     )

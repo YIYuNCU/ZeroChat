@@ -59,6 +59,7 @@ class Inbound:
     image_urls: List[str] = field(default_factory=list)
     server_url: str = ""
     at_bot: bool = True  # 群聊里是否 @ 了机器人（私聊恒为 True）
+    reply_to_id: Optional[int] = None  # 这条消息引用（回复）的 QQ 消息 id
 
     @property
     def is_group(self) -> bool:

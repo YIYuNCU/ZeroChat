@@ -30,8 +30,10 @@ class OneBotConnection:
             if not future.done():
                 future.set_result({"status": "failed", "retcode": -1, "error": reason})
 
-    async def send_action(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """发送 API 调用并等待 echo 响应"""
+    async def send_action(
+        self, action: str, params: Dict[str, Any], timeout: float = 30.0
+    ) -> Dict[str, Any]:
+        """发送 API 调用并等待 echo 响应（超时返回 failed 回执）"""
         echo = uuid.uuid4().hex[:12]
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_echoes[echo] = future
@@ -48,7 +50,7 @@ class OneBotConnection:
             raise e
 
         try:
-            return await asyncio.wait_for(future, timeout=30.0)
+            return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending_echoes.pop(echo, None)
             return {"status": "failed", "retcode": -1, "error": "timeout"}

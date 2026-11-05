@@ -580,10 +580,13 @@ class DefaultPromptSnapshotTests(unittest.TestCase):
 
         pid = pcs.ONEBOT_SYSTEM_DIRECTIVE_ID
         stale = {pid: {pcs.BUILTIN_OVERRIDE_KEY: "旧版指令 {MAIN_QQ_HINT}", pcs.BASE_VERSION_KEY: "2"}}
+        # v3 的指令里还内嵌 <self_protection>，与现在独立的 onebot.self_protection 重复
+        v3 = {pid: {pcs.BUILTIN_OVERRIDE_KEY: "v3 指令", pcs.BASE_VERSION_KEY: "3"}}
         legacy = {pid: {pcs.BUILTIN_OVERRIDE_KEY: "无版本指令"}}
-        fresh = {pid: {pcs.BUILTIN_OVERRIDE_KEY: "新版指令", pcs.BASE_VERSION_KEY: "3"}}
+        fresh = {pid: {pcs.BUILTIN_OVERRIDE_KEY: "新版指令", pcs.BASE_VERSION_KEY: "4"}}
         builtin = pcs.resolve(pid, settings={}, role_data={})
         self.assertEqual(pcs.resolve(pid, settings={"prompt_overrides": stale}, role_data={}), builtin)
+        self.assertEqual(pcs.resolve(pid, settings={"prompt_overrides": v3}, role_data={}), builtin)
         self.assertEqual(pcs.resolve(pid, settings={"prompt_overrides": legacy}, role_data={}), builtin)
         self.assertEqual(pcs.resolve(pid, settings={"prompt_overrides": fresh}, role_data={}), "新版指令")
 

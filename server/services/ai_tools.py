@@ -271,31 +271,38 @@ async def execute_continue_if_no_reply(
 
 
 async def execute_block_user(role_data: Dict, user_id: str, reason: str) -> str:
-    """屏蔽用户，返回结果描述"""
-    from services.chat_io_service import role_lock
+    """全局屏蔽一个 QQ 用户（所有会话），返回结果描述。
+
+    经 ``onebot.config.edit_config`` 在角色档案锁内原子写回并失效角色缓存，
+    与 ``/block`` 指令写同一份 ``onebot_config.blocked_users``。屏蔽对象来自
+    模型之手，而第三方用户可以在消息里诱导模型：主 QQ 号（亲密对象）和机器人
+    自己的号码不允许被屏蔽。
+    """
+    from services.onebot import config as onebot_config
 
     role_id = role_data.get("id", "")
-    profile_file = _role_dir(role_id) / "profile.json"
+    target = str(user_id or "").strip()
+    if not (target.isascii() and target.isdigit()):
+        return "屏蔽失败：user_id 必须是纯数字的 QQ 号（见消息里的 sender_id / sender）"
+    target = str(int(target))
 
     try:
-        # 与 roles.save_role / 生理周期镜像共用同一把角色档案锁，避免整份档案互相覆盖
-        with role_lock(role_id):
-            with open(profile_file, "r", encoding="utf-8") as f:
-                role_content = json.load(f)
-            onebot_config = role_content.get("onebot_config") or {}
-            blocked = onebot_config.get("blocked_users") or {}
+        current = onebot_config.load_config(role_id)
+        if onebot_config.main_user_id(current) == int(target):
+            return "屏蔽失败：这是你的亲密对象，不能屏蔽"
+        if str(current.get("self_id") or current.get("selfId") or "") == target:
+            return "屏蔽失败：这是你自己的账号，不能屏蔽"
 
-            if user_id not in blocked:
-                blocked[user_id] = []
-            onebot_config["blocked_users"] = blocked
-            role_content["onebot_config"] = onebot_config
-
-            with open(profile_file, "w", encoding="utf-8") as f:
-                json.dump(role_content, f, ensure_ascii=False, indent=2)
+        with onebot_config.edit_config(role_id) as cfg:
+            blocked = cfg.get("blocked_users") or {}
+            if target in blocked and not blocked[target]:
+                return f"用户 {target} 已经被屏蔽"
+            blocked[target] = []  # 空列表 = 所有会话
+            cfg["blocked_users"] = blocked
 
         role_name = role_data.get("name", role_id)
-        logger.warning(f"AI主动屏蔽用户: role={role_name}({role_id}), target={user_id}, reason={reason}")
-        return f"已屏蔽用户 {user_id}，原因：{reason}"
+        logger.warning(f"AI主动屏蔽用户: role={role_name}({role_id}), target={target}, reason={reason}")
+        return f"已屏蔽用户 {target}，原因：{reason}"
     except Exception as e:
         return f"屏蔽失败：{e}"
 

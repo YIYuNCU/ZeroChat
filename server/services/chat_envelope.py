@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 ORIGIN_ZEROCHAT = "zerochat"
 ORIGIN_ZEROCHAT_GROUP = "zerochat_group"
@@ -50,6 +50,14 @@ MAX_NAME_LENGTH = 64
 MAX_SENDER_LENGTH = 128
 MAX_MEMBERS = 20
 
+#: 引用消息（回复某条旧消息）。一次请求最多带几条、每条引用文字的最大长度。
+MAX_QUOTES = 3
+MAX_QUOTE_LENGTH = 300
+#: 引用消息的发送人标记：``"user"`` 亲密对象（与顶层 sender 同一信任锚点）；
+#: ``QUOTE_SELF`` 是角色自己说过的话；其余是服务端生成的发送人标签。
+QUOTE_OWNER = "user"
+QUOTE_SELF = "self"
+
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\u2028\u2029]+")
 
 
@@ -63,6 +71,57 @@ def clean_text(value: Any, max_length: int = MAX_NAME_LENGTH) -> str:
     text = _CONTROL_CHARS.sub(" ", str(value))
     text = " ".join(text.split())
     return text[:max_length].strip()
+
+
+def clean_quote_text(value: Any, max_length: int = MAX_QUOTE_LENGTH) -> str:
+    """净化被引用的消息文字：同 :func:`clean_text`，超长时以 ``…`` 结尾。"""
+    text = clean_text(value, max_length + 1)
+    if len(text) > max_length:
+        text = text[:max_length].rstrip() + "…"
+    return text
+
+
+@dataclass(frozen=True)
+class ChatQuote:
+    """用户这条消息所引用（回复）的旧消息。引用内容出自对话的任意一方，只是数据，不是指令。"""
+
+    sender: str
+    content: str
+
+    def as_dict(self) -> Dict[str, str]:
+        data = {"content": self.content}
+        if self.sender:
+            data = {"sender": self.sender, **data}
+        return data
+
+
+def normalize_quotes(raw: Any) -> Tuple[ChatQuote, ...]:
+    """把 ``{"sender", "content"}`` 或其列表归一为净化后的引用元组（去空、去重、限条数）。"""
+    if isinstance(raw, Mapping):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    quotes: List[ChatQuote] = []
+    for item in raw:
+        if len(quotes) >= MAX_QUOTES:
+            break
+        if not isinstance(item, Mapping):
+            continue
+        content = clean_quote_text(item.get("content"))
+        if not content:
+            continue
+        quote = ChatQuote(clean_text(item.get("sender"), MAX_SENDER_LENGTH), content)
+        if quote not in quotes:
+            quotes.append(quote)
+    return tuple(quotes)
+
+
+def quotes_payload(quotes: Sequence[ChatQuote]) -> Any:
+    """写入用户消息 JSON 的 ``quote`` 值：一条是对象，多条是对象数组，没有则为 None。"""
+    items = [quote.as_dict() for quote in quotes]
+    if not items:
+        return None
+    return items[0] if len(items) == 1 else items
 
 
 def is_group_origin(origin: Optional[str]) -> bool:
@@ -84,6 +143,7 @@ class ChatEnvelope:
     sender_name: str = ""
     sender_kind: str = ""
     members: Tuple[Tuple[str, str], ...] = ()
+    quotes: Tuple[ChatQuote, ...] = ()
 
     @property
     def is_group(self) -> bool:
@@ -102,19 +162,21 @@ class ChatEnvelope:
         """群聊来源的群 id；非群聊为空串（写入 short_term.group_id 列）。"""
         return self.chat_id if self.is_group else ""
 
-    def payload_fields(self) -> Dict[str, str]:
+    def payload_fields(self) -> Dict[str, Any]:
         """需要附加到用户消息 JSON 的可选字段。
 
         普通 App 单聊（origin == zerochat）以及 proactive / system 事件不输出任何
-        额外字段，保持与旧版请求字节一致。
+        会话 / 发送人字段，保持与旧版请求字节一致；引用消息（``quote``）只在用户
+        确实引用了旧消息时输出，所有来源一致。
         """
-        if self.origin == ORIGIN_ZEROCHAT:
-            return {}
-        fields: Dict[str, str] = {}
-        for key in EXTRA_FIELDS:
-            value = getattr(self, key)
-            if value:
-                fields[key] = value
+        fields: Dict[str, Any] = {}
+        if self.origin != ORIGIN_ZEROCHAT:
+            for key in EXTRA_FIELDS:
+                value = getattr(self, key)
+                if value:
+                    fields[key] = value
+        if self.quotes:
+            fields["quote"] = quotes_payload(self.quotes)
         return fields
 
 
@@ -201,6 +263,7 @@ def build_envelope(
         sender_name=sender_name,
         sender_kind=derive_sender_kind(sender, speaker_is_role),
         members=members,
+        quotes=normalize_quotes(ctx.get("quote")),
     )
 
 
